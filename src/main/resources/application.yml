@@ -1,0 +1,76 @@
+server:
+  port: 8686
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,env,beans,mappings,loggers,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+    metrics:
+      enabled: true
+    loggers:
+      enabled: true
+
+logging:
+  level:
+    org.springframework.ai.mcp: DEBUG
+    io.modelcontextprotocol: DEBUG
+    org.springframework.ai.tool: DEBUG
+
+spring:
+  ai:
+    mcp:
+      server:
+        name: database-mcp-server
+        version: 0.1.0
+        protocol: STATELESS
+
+  datasource:
+    primary:
+      jdbc-url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false
+      username: sa
+      password:
+      driver-class-name: org.h2.Driver
+      maximum-pool-size: 10
+
+  main:
+    banner-mode: off
+
+entropy:
+  mcp:
+    database:
+      enabled: true
+      dialect: generic
+      query:
+        max-rows: 100
+        timeout-seconds: 30
+        max-result-rows: 10000
+      ddl:
+        allowed: true
+      security:
+        enabled: false
+        allowed-tables: []
+        enable-parameterized-only: true
+      masking:
+        column-patterns:
+          - email
+          - phone
+          - mobile
+          - ssn
+          - credit_card
+          - password
+          - secret
+          - token
+      cache:
+        max-size: 1000
+        expire-after-access: 5m
+    gateway:
+      enabled: false
+    monitoring:
+      pool:
+        enabled: true

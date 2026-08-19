@@ -1,0 +1,43 @@
+services:
+  mcp-server:
+    build: .
+    container_name: database-mcp-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Oracle 数据库连接（application-prod.yml 使用 DB_*，application-ccprod.yml 使用 CC_DB_*）
+      DB_HOST: ${DB_HOST}
+      DB_NAME: ${DB_NAME}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      CC_DB_HOST: ${CC_DB_HOST}
+      CC_DB_NAME: ${CC_DB_NAME}
+      CC_DB_USERNAME: ${CC_DB_USERNAME}
+      CC_DB_PASSWORD: ${CC_DB_PASSWORD}
+      # JVM 配置
+      JAVA_OPTS: ${JAVA_OPTS}
+      # 启用对应 profile（prod 或 ccprod）
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+    ports:
+      - "${SERVER_PORT:-8686}:8686"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "1"
+        reservations:
+          memory: 512m
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8686/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge

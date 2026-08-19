@@ -1,0 +1,26 @@
+# CCProd profile - 长春地铁项目生产环境
+# 所有敏感信息通过环境变量注入，不回退到硬编码默认值
+spring:
+  datasource:
+    primary:
+      jdbc-url: jdbc:oracle:thin:@//${CC_DB_HOST}/${CC_DB_NAME}
+      username: ${CC_DB_USERNAME}
+      password: ${CC_DB_PASSWORD}
+      driver-class-name: oracle.jdbc.OracleDriver
+      hikari:
+        maximum-pool-size: 20
+        minimum-idle: 5
+        connection-timeout: 30000
+        idle-timeout: 600000
+        max-lifetime: 1800000
+        leak-detection-threshold: 60000
+  jpa:
+    open-in-view: false
+
+entropy:
+  mcp:
+    database:
+      dialect: oracle
+      security:
+        enabled: true
+        allow-drop-table: false

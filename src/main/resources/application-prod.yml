@@ -1,0 +1,27 @@
+# Production profile - Oracle database
+# 真实生产环境配置（新华三 CloudOS / K8s）
+# 所有敏感信息通过环境变量注入，不回退到硬编码默认值
+spring:
+  datasource:
+    primary:
+      jdbc-url: jdbc:oracle:thin:@//${DB_HOST}/${DB_NAME}
+      username: ${DB_USERNAME}
+      password: ${DB_PASSWORD}
+      driver-class-name: oracle.jdbc.OracleDriver
+      hikari:
+        maximum-pool-size: 20
+        minimum-idle: 5
+        connection-timeout: 30000
+        idle-timeout: 600000
+        max-lifetime: 1800000
+        leak-detection-threshold: 60000
+  jpa:
+    open-in-view: false
+
+entropy:
+  mcp:
+    database:
+      dialect: oracle
+      security:
+        enabled: true
+        allow-drop-table: false
