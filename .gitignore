@@ -27,6 +27,8 @@ logs/
 # Environment variables
 .env*
 !.env.example
+# 生产配置文件（包含环境特定信息）
+!application-production.yml
 
 # Docker production compose (local overrides)
 docker-compose.prod.yml
