@@ -24,6 +24,8 @@ import org.springframework.stereotype.Component;
 
 import com.entropy.database.mcp.properties.DatabaseProperties;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -137,8 +139,8 @@ public class McpMetricsCollectorImpl implements McpMetricsCollector {
      * Get current metrics snapshot as Map.
      */
     @Override
-    public java.util.Map<String, Object> getMetrics() {
-        java.util.Map<String, Object> metrics = new java.util.HashMap<>();
+    public Map<String, Object> getMetrics() {
+        Map<String, Object> metrics = new HashMap<>();
 
         metrics.put("totalQueries", totalQueryCount.get());
         metrics.put("slowQueryCount", slowQueryCount.get());

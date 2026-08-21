@@ -46,6 +46,7 @@ public final class DialectUtils {
         if (jdbcUrl.startsWith("jdbc:sqlserver:")) return "com.microsoft.sqlserver.jdbc.SQLServerDriver";
         if (jdbcUrl.startsWith("jdbc:sqlite:")) return "org.sqlite.JDBC";
         if (jdbcUrl.startsWith("jdbc:db2:")) return "com.ibm.db2.jdbc.DB2Driver";
+        if (jdbcUrl.startsWith("jdbc:h2:")) return "org.h2.Driver";
         return null;
     }
 }

@@ -16,7 +16,6 @@
 package com.entropy.database.mcp.aop;
 
 import com.entropy.database.mcp.exception.DatabaseMcpException;
-import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.tools.McpToolUtils;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;

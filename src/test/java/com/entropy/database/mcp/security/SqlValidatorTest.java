@@ -9,6 +9,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Set;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -18,8 +19,8 @@ class SqlValidatorTest {
 
     @BeforeEach
     void setUp(@Mock DatabaseProperties properties) {
-        when(properties.query()).thenReturn(new DatabaseProperties.QueryProperties(100, 30, true, 10000, 500, 100));
-        when(properties.security()).thenReturn(new DatabaseProperties.SecurityProperties(10, 5));
+        lenient().when(properties.query()).thenReturn(new DatabaseProperties.QueryProperties(100, 30, true, 10000, 500, 100));
+        lenient().when(properties.security()).thenReturn(new DatabaseProperties.SecurityProperties(10, 5));
         validator = new SqlValidatorImpl(properties);
     }
 

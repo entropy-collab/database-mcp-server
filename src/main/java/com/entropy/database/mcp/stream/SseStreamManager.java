@@ -19,6 +19,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.Consumer;
 
 /**
@@ -60,7 +62,7 @@ public class SseStreamManager {
             return new ProgressEvent("PROGRESS_END", data, System.currentTimeMillis());
         }
         public static ProgressEvent error(String message) {
-            java.util.Map<String, String> err = new java.util.HashMap<>();
+            Map<String, String> err = new HashMap<>();
             err.put("message", message);
             return new ProgressEvent("ERROR", err, System.currentTimeMillis());
         }

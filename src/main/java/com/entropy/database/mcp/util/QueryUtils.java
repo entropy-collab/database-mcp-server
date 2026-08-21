@@ -21,6 +21,7 @@ import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -65,6 +66,21 @@ public final class QueryUtils {
             return t.toLocalTime().toString();
         }
         return value;
+    }
+
+    /**
+     * Convert rows to serializable format, replacing non-JSON types with strings.
+     */
+    public static List<Map<String, Object>> makeSerializable(List<Map<String, Object>> rows) {
+        return rows.stream()
+                .map(row -> {
+                    Map<String, Object> safeRow = new java.util.HashMap<>();
+                    for (Map.Entry<String, Object> entry : row.entrySet()) {
+                        safeRow.put(entry.getKey(), convertToSerializable(entry.getValue()));
+                    }
+                    return safeRow;
+                })
+                .toList();
     }
 
     /**

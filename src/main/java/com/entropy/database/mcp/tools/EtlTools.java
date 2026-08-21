@@ -398,7 +398,7 @@ public class EtlTools {
             @McpToolParam(description = "BYOK connection name") String connectionName,
             @McpToolParam(description = "Source SELECT query") String sourceSql,
             @McpToolParam(description = "Target table name") String targetTable,
-            @McpToolParam(description = "Batch size for processing") Integer batchSize) {
+            @McpToolParam(description = "Batch size for processing", required = false) Integer batchSize) {
         try {
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();

@@ -220,6 +220,7 @@ public class JobExecutionEngine implements DisposableBean {
                 case DDL -> executeDdl(sourceContext, step, execution);
                 case UPSERT -> executeUpsert(sourceContext, targetContext, step, execution);
                 case QUERY_TO_JSON -> executeQueryToJson(sourceContext, step, execution);
+                case READ -> executeRead(sourceContext, step, execution);
                 case EXPORT -> executeExport(sourceContext, step, execution);
             };
 
@@ -346,6 +347,12 @@ public class JobExecutionEngine implements DisposableBean {
         List<Map<String, Object>> rows = context.getJdbcTemplate().queryForList(step.sourceSql());
         // In production, write to file or return via SSE
         log.info("Query to JSON: {} rows", rows.size());
+        return rows.size();
+    }
+
+    private long executeRead(ByokDataSourceContext context, Step step, JobExecution execution) {
+        List<Map<String, Object>> rows = context.getJdbcTemplate().queryForList(step.sourceSql());
+        log.info("Read step: {} rows", rows.size());
         return rows.size();
     }
 

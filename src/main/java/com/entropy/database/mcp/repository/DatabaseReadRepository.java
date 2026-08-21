@@ -27,7 +27,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.security.MessageDigest;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -35,6 +34,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Database read operations repository.
@@ -142,7 +142,12 @@ public class DatabaseReadRepository {
             return (List<String>) cached;
         }
         String sql = dialect.schemasQuery();
-        List<String> result = jdbcTemplate.queryForList(sql, String.class);
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+        List<String> result = rows.stream()
+                .map(row -> row.values().stream().findFirst().orElse(null))
+                .filter(Objects::nonNull)
+                .map(Object::toString)
+                .toList();
         cache.putMetadata(cacheKey, result);
         return result;
     }

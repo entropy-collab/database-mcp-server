@@ -15,7 +15,6 @@
  */
 package com.entropy.database.mcp.byok;
 
-import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Map;

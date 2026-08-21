@@ -73,7 +73,7 @@ public class SchemaTools {
     @McpTool(description = "Describe columns, types, and nullability of a table")
     public Map<String, Object> describeTable(
             @McpToolParam(description = "Table name") String table,
-            @McpToolParam(description = "Schema name") String schema,
+            @McpToolParam(description = "Schema name", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection JSON. Omit to use primary datasource.", required = false) String connection) {
         return routingFacade.describeTable(table, schema, parseConnection(connection));
     }
@@ -81,7 +81,7 @@ public class SchemaTools {
     @McpTool(description = "List all indexes for a table including column names and uniqueness")
     public List<Map<String, Object>> listIndexes(
             @McpToolParam(description = "Table name") String table,
-            @McpToolParam(description = "Schema name") String schema,
+            @McpToolParam(description = "Schema name", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection JSON. Omit to use primary datasource.", required = false) String connection) {
         return routingFacade.listIndexes(table, schema, parseConnection(connection));
     }
@@ -104,7 +104,7 @@ public class SchemaTools {
     public Object describe(
             @McpToolParam(description = "Object type: TABLE, SCHEMA, INDEX, or VIEW") String type,
             @McpToolParam(description = "Object name (required for TABLE, INDEX)") String name,
-            @McpToolParam(description = "Schema name") String schema,
+            @McpToolParam(description = "Schema name", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection JSON. Omit to use primary datasource.", required = false) String connection) {
         switch (type.toUpperCase()) {
             case "TABLE": return routingFacade.describeTable(name, schema, parseConnection(connection));

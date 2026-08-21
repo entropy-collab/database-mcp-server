@@ -24,6 +24,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -250,8 +251,8 @@ public class DatabaseCacheImpl implements DatabaseCache {
     }
 
     @Override
-    public java.util.Map<String, Object> getStatistics() {
-        Map<String, Object> stats = new java.util.HashMap<>();
+    public Map<String, Object> getStatistics() {
+        Map<String, Object> stats = new HashMap<>();
         
         stats.put("totalSize", size());
         stats.put("queryCacheSize", queryCacheSize());

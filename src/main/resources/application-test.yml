@@ -1,5 +1,5 @@
 server:
-  port: 0
+  port: 8686
 
 spring:
   datasource:
@@ -17,7 +17,7 @@ entropy:
   mcp:
     database:
       enabled: true
-      dialect: generic
+      dialect: h2
       query:
         max-rows: 100
         max-result-rows: 10000

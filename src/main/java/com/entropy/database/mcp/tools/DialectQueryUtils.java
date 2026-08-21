@@ -71,7 +71,11 @@ public final class DialectQueryUtils {
                 jdbcTemplate = context.getJdbcTemplate();
             }
 
-            String sql = sqlProvider.apply(dialect).trim();
+            String sql = sqlProvider.apply(dialect);
+            if (sql == null || sql.isBlank()) {
+                throw new IllegalStateException("Dialect does not support this operation: " + dialect.getClass().getSimpleName());
+            }
+            sql = sql.trim();
             if (sql.startsWith("BEGIN") || sql.startsWith("ANALYZE") || sql.toLowerCase().startsWith("analyze")) {
                 jdbcTemplate.execute(sql);
                 return successResponse(Map.of("rows", List.of()));

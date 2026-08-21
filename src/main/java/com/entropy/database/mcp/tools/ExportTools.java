@@ -25,11 +25,9 @@ import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.context.annotation.Configuration;
 
-import java.util.List;
 import java.util.Map;
 
 import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 
 /**
  * Export tools for CSV and JSON output.
@@ -39,6 +37,7 @@ public class ExportTools {
 
     private static final Logger log = LoggerFactory.getLogger(ExportTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final int MAX_EXPORT_LIMIT = 10000;
 
     private final DatabaseFacade databaseFacade;
     private final int maxExportRows;
@@ -49,11 +48,15 @@ public class ExportTools {
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
 
+    private int computeExportLimit(int maxRows) {
+        return Math.min(maxRows, Math.min(MAX_EXPORT_LIMIT, maxExportRows));
+    }
+
     @McpTool(description = "Execute a query and export results to CSV format")
     public String exportCsv(
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows") int maxRows) {
-        int limit = Math.min(maxRows, Math.min(100, maxExportRows));
+        int limit = computeExportLimit(maxRows);
         var result = databaseFacade.executeQuery(sql, limit, null);
         return QueryUtils.toCsv(result.rows(), result.columns());
     }
@@ -62,7 +65,7 @@ public class ExportTools {
     public String exportJson(
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows") int maxRows) {
-        int limit = Math.min(maxRows, Math.min(100, maxExportRows));
+        int limit = computeExportLimit(maxRows);
         var result = databaseFacade.executeQuery(sql, limit, null);
         try {
             return OBJECT_MAPPER.writeValueAsString(Map.of(

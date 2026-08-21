@@ -20,6 +20,8 @@ spring:
 
 entropy:
   mcp:
+    gateway:
+      enabled: true
     database:
       dialect: oracle
       security:

@@ -30,6 +30,11 @@ public enum StepType {
     QUERY_TO_JSON("query_to_json"),
 
     /**
+     * Execute a SELECT/READ query without modification.
+     */
+    READ("read"),
+
+    /**
      * Transform data from source table to target table with column mapping.
      */
     TRANSFORM("transform"),
@@ -64,6 +69,7 @@ public enum StepType {
         return switch (value.toLowerCase()) {
             case "query_to_table" -> QUERY_TO_TABLE;
             case "query_to_json" -> QUERY_TO_JSON;
+            case "read" -> READ;
             case "transform" -> TRANSFORM;
             case "ddl" -> DDL;
             case "upsert" -> UPSERT;

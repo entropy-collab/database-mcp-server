@@ -49,7 +49,7 @@ class DialectResolverTest {
     @Test
     void fallsBackToGenericDialect() {
         var dialect = resolver.resolve("h2", null);
-        Assertions.assertThat(dialect).isInstanceOf(GenericDialect.class);
+        Assertions.assertThat(dialect).isInstanceOf(H2Dialect.class);
     }
 
     @Test

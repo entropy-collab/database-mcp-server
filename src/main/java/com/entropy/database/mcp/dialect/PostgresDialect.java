@@ -189,11 +189,13 @@ public class PostgresDialect extends AbstractDatabaseDialect {
                        CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'i' THEN 'INDEX'
                            WHEN 'S' THEN 'SEQUENCE' WHEN 'v' THEN 'VIEW'
                            WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE c.relkind::text END AS object_type,
-                       'INVALID' AS status
+                       CASE WHEN c.relkind IN ('r','v','m','S','i')
+                            THEN 'VALID' ELSE 'INVALID' END AS status
                 FROM pg_class c
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 WHERE n.nspname = COALESCE(?, current_schema())
-                  AND c.relisvalid = false
+                  AND c.relkind IN ('r','v','m','S','i')
+                  AND NOT c.relispartition
                 ORDER BY n.nspname, c.relkind, c.relname
                 """;
     }

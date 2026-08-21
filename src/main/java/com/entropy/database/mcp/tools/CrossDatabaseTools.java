@@ -42,6 +42,12 @@ import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 @ConditionalOnProperty(name = "entropy.mcp.gateway.enabled", havingValue = "true")
 public class CrossDatabaseTools {
 
+    private static final String GATEWAY_NOT_ENABLED_MSG = "Cross-database gateway is not enabled";
+    private static final String FEDERATED_GATEWAY_NOT_ENABLED_MSG = "Federated gateway is not enabled";
+    private static final int DEFAULT_CROSS_DB_MAX_ROWS = 100;
+    private static final int DEFAULT_COMPLEX_ANALYTICS_MAX_ROWS = 50;
+    private static final int MAX_CTE_ROWS = 50000;
+
     private final RoutingDatabaseFacade routingFacade;
     private final SqlValidator sqlValidator;
     private final SseStreamManager sseStreamManager;
@@ -78,10 +84,10 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "SQL query with @db_link syntax") String sql,
             @McpToolParam(description = "Maximum rows to return") Integer maxRows) {
         if (!isGatewayEnabled()) {
-            return errorResponse(Map.of("sql", sql), "Cross-database gateway is not enabled", "DisabledException");
+            return errorResponse(Map.of("sql", sql), GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         try {
-            int limit = maxRows != null ? maxRows : 100;
+            int limit = maxRows != null ? maxRows : DEFAULT_CROSS_DB_MAX_ROWS;
             String limitedSql = String.format("SELECT * FROM (%s) WHERE ROWNUM <= %d", sql, limit);
             List<Map<String, Object>> rows = primaryJdbcTemplate.queryForList(limitedSql);
             return successResponse(Map.of("sql", sql, "rowCount", rows.size(), "data", rows));
@@ -96,15 +102,20 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Remote schema owner (use 'USER' for current user)") String owner) {
         if (!isGatewayEnabled()) {
             return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "owner", owner),
-                    "Cross-database gateway is not enabled", "DisabledException"));
+                    GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
         }
-        String sql;
-        if ("USER".equalsIgnoreCase(owner)) {
-            sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = USER", dbLinkName);
-            return primaryJdbcTemplate.queryForList(sql);
-        } else {
-            sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName);
-            return primaryJdbcTemplate.queryForList(sql, owner.toUpperCase());
+        try {
+            String sql;
+            if ("USER".equalsIgnoreCase(owner)) {
+                sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = USER", dbLinkName);
+                return primaryJdbcTemplate.queryForList(sql);
+            } else {
+                sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName);
+                return primaryJdbcTemplate.queryForList(sql, owner.toUpperCase());
+            }
+        } catch (Exception e) {
+            return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "owner", owner),
+                    e.getMessage(), e.getClass().getSimpleName()));
         }
     }
 
@@ -114,13 +125,18 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Remote table name") String remoteTable) {
         if (!isGatewayEnabled()) {
             return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
-                    "Cross-database gateway is not enabled", "DisabledException"));
+                    GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
         }
-        String sql = String.format(
-                "SELECT column_name, data_type, data_length, nullable " +
-                "FROM all_tab_columns@%s WHERE table_name = UPPER(?) ORDER BY column_id",
-                dbLinkName);
-        return primaryJdbcTemplate.queryForList(sql, remoteTable.toUpperCase());
+        try {
+            String sql = String.format(
+                    "SELECT column_name, data_type, data_length, nullable " +
+                    "FROM all_tab_columns@%s WHERE table_name = UPPER(?) ORDER BY column_id",
+                    dbLinkName);
+            return primaryJdbcTemplate.queryForList(sql, remoteTable.toUpperCase());
+        } catch (Exception e) {
+            return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
+                    e.getMessage(), e.getClass().getSimpleName()));
+        }
     }
 
     @McpTool(description = "Execute a pre-built complex cross-database analytics query with JOINs, subqueries, and analytic functions")
@@ -133,7 +149,7 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Maximum rows to return") Integer maxRows) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("dbLinkName", dbLinkName, "localTablePrefix", localTablePrefix, "partitionDate", partitionDate),
-                    "Cross-database gateway is not enabled", "DisabledException");
+                    GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         String localTable = localTablePrefix + partitionDate;
         int limit = maxRows != null ? maxRows : 50;
@@ -144,7 +160,7 @@ public class CrossDatabaseTools {
                     TXN_DATE, TXN_TIME, TICKET_ID, TICKET_TYPE, TXN_STATION_ID, LAST_STATION_ID,
                     TXN_AMT, REWARD_AMT, PAY_TYPE
                 FROM %s
-                WHERE ROWNUM <= 50000
+                WHERE ROWNUM <= MAX_CTE_ROWS
             ),
             remote_quality AS (
                 SELECT 
@@ -202,7 +218,7 @@ public class CrossDatabaseTools {
     @McpTool(description = "Get pre-built cross-database JOIN query templates")
     public Map<String, Object> getCrossDatabaseTemplates() {
         if (!isGatewayEnabled()) {
-            return errorResponse(Map.of(), "Cross-database gateway is not enabled", "DisabledException");
+            return errorResponse(Map.of(), GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         return successResponse(Map.of(
                 "inner_join", String.format("SELECT ... FROM local_table t INNER JOIN remote_table@%%s s ON t.col = s.col WHERE ...", "_DB_LINK_"),
@@ -215,7 +231,7 @@ public class CrossDatabaseTools {
     @McpTool(description = "List all registered databases with connection info")
     public List<Map<String, Object>> listDatabases() {
         if (!isGatewayEnabled() || gateway == null) {
-            return List.of(errorResponse(Map.of(), "Federated gateway is not enabled", "DisabledException"));
+            return List.of(errorResponse(Map.of(), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
         }
         return gateway.listDatabases();
     }
@@ -224,7 +240,7 @@ public class CrossDatabaseTools {
     public Map<String, Object> getFederatedDatabaseInfo(
             @McpToolParam(description = "Database identifier") String databaseId) {
         if (!isGatewayEnabled() || gateway == null) {
-            return errorResponse(Map.of("databaseId", databaseId), "Federated gateway is not enabled", "DisabledException");
+            return errorResponse(Map.of("databaseId", databaseId), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         return gateway.getDatabaseInfo(databaseId);
     }
@@ -245,8 +261,7 @@ public class CrossDatabaseTools {
     public Map<String, Object> executeSelectiveQuery(
             @McpToolParam(description = "Map of databaseId to SQL query") Map<String, String> databaseQueries) {
         if (!isGatewayEnabled() || gateway == null) {
-            return errorResponse(Map.of("databaseQueries", databaseQueries),
-                    "Federated gateway is not enabled", "DisabledException");
+            return errorResponse(Map.of("databaseQueries", databaseQueries), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         return gateway.executeSelectiveQuery(databaseQueries);
     }
@@ -254,7 +269,7 @@ public class CrossDatabaseTools {
     @McpTool(description = "Get the number of registered database clients in the federated gateway")
     public Map<String, Object> getGatewayStatistics() {
         if (!isGatewayEnabled() || gateway == null) {
-            return errorResponse(Map.of(), "Federated gateway is not enabled", "DisabledException");
+            return errorResponse(Map.of(), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         return successResponse(Map.of(
                 "clientCount", gateway.getClientCount(),
@@ -301,7 +316,7 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Name of the database link to drop") String dbLinkName) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("dbLinkName", dbLinkName),
-                    "Cross-database gateway is not enabled", "DisabledException");
+                    GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
@@ -321,7 +336,7 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Remote table name to query") String remoteTable) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
-                    "Cross-database gateway is not enabled", "DisabledException");
+                    GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         ValidationUtils.validateIdentifier(remoteTable, "remoteTable");

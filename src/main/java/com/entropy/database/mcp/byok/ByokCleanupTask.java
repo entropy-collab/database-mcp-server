@@ -20,8 +20,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
-
 /**
  * Scheduled cleanup task for expired BYOK datasources.
  * Proactively removes datasources that have exceeded their max lifetime

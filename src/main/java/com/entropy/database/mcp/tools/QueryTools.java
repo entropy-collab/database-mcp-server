@@ -25,13 +25,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
 
 import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
 import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
@@ -72,33 +72,28 @@ public class QueryTools {
     @McpTool(description = "Execute a SQL SELECT query with pagination support")
     public Map<String, Object> executeQuery(
             @McpToolParam(description = "SQL query to execute") String sql,
-            @McpToolParam(description = "Maximum number of rows to return") int maxRows,
-            @McpToolParam(description = "Continuation token for pagination. Omit or pass empty string for first page.") String continuationToken,
+            @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
+            @McpToolParam(description = "Continuation token for pagination. Omit or pass empty string for first page.", required = false) String continuationToken,
             @McpToolParam(description = "Optional BYOK connection JSON (jdbcUrl, username, password, dialect). Omit to use primary datasource.", required = false) String connection) {
         try {
             log.debug("executeQuery called: sql={}, maxRows={}, token={}, connection={}", sql, maxRows, continuationToken, connection);
             ConnectionProperties cp = parseConnection(connection);
             var result = routingFacade.executeQuery(sql, maxRows, continuationToken, cp);
-            List<Map<String, Object>> safeRows = result.rows().stream()
-                    .map(row -> {
-                        Map<String, Object> safeRow = new java.util.HashMap<>();
-                        for (Map.Entry<String, Object> entry : row.entrySet()) {
-                            safeRow.put(entry.getKey(), QueryUtils.convertToSerializable(entry.getValue()));
-                        }
-                        return safeRow;
-                    })
-                    .toList();
-            return successResponse(Map.of(
-                    "columns", result.columns(),
-                    "rows", safeRows,
-                    "rowCount", safeRows.size(),
-                    "hasMore", result.hasMore(),
-                    "continuationToken", result.continuationToken()
-            ));
+            List<Map<String, Object>> safeRows = QueryUtils.makeSerializable(result.rows());
+            java.util.Map<String, Object> resultMap = new java.util.LinkedHashMap<>();
+            resultMap.put("columns", result.columns());
+            resultMap.put("rows", safeRows);
+            resultMap.put("rowCount", safeRows.size());
+            resultMap.put("hasMore", result.hasMore());
+            resultMap.put("continuationToken", result.continuationToken());
+            return successResponse(resultMap);
         } catch (Exception e) {
             log.warn("executeQuery failed: {}", e.getMessage());
-            return errorResponse(Map.of("sql", sql, "maxRows", maxRows, "connection", connection),
-                    e.getMessage(), e.getClass().getSimpleName());
+            Map<String, Object> ctx = new LinkedHashMap<>();
+            ctx.put("sql", sql);
+            ctx.put("maxRows", maxRows);
+            ctx.put("connection", connection);
+            return errorResponse(ctx, e.getMessage(), e.getClass().getSimpleName());
         }
     }
 
@@ -111,7 +106,7 @@ public class QueryTools {
     @McpTool(description = "Execute multiple SQL queries in batch mode (max 5 queries)")
     public List<Map<String, Object>> batchQuery(
             @McpToolParam(description = "List of SQL queries (max 5)") List<String> sqls,
-            @McpToolParam(description = "Maximum rows per query") int maxRows,
+            @McpToolParam(description = "Maximum rows per query", required = false) Integer maxRows,
             @McpToolParam(description = "Optional BYOK connection JSON. Omit to use primary datasource.", required = false) String connection) throws Exception {
         if (sqls == null || sqls.size() > 5) {
             return List.of(errorResponse(Map.of("sqls", sqls, "maxRows", maxRows, "connection", connection),
@@ -122,22 +117,14 @@ public class QueryTools {
                 .map(sql -> {
                     try {
                         var result = routingFacade.executeQuery(sql, maxRows, null, cp);
-                        List<Map<String, Object>> safeRows = result.rows().stream()
-                                .map(row -> {
-                                    Map<String, Object> safeRow = new java.util.HashMap<>();
-                                    for (Map.Entry<String, Object> entry : row.entrySet()) {
-                                        safeRow.put(entry.getKey(), QueryUtils.convertToSerializable(entry.getValue()));
-                                    }
-                                    return safeRow;
-                                })
-                                .toList();
-                        Map<String, Object> resultObj = new java.util.LinkedHashMap<>();
+                        List<Map<String, Object>> safeRows = QueryUtils.makeSerializable(result.rows());
+                        Map<String, Object> resultObj = new LinkedHashMap<>();
                         resultObj.put("columns", result.columns());
                         resultObj.put("rows", safeRows);
                         resultObj.put("rowCount", safeRows.size());
                         resultObj.put("hasMore", result.hasMore());
                         resultObj.put("continuationToken", result.continuationToken());
-                        Map<String, Object> item = new java.util.LinkedHashMap<>();
+                        Map<String, Object> item = new LinkedHashMap<>();
                         item.put("sql", sql);
                         item.put("result", resultObj);
                         return item;
@@ -152,14 +139,16 @@ public class QueryTools {
     public Map<String, Object> executeSqlTemplate(
             @McpToolParam(description = "Template name: query_by_id, list_by_page, or count_by_condition") String templateName,
             @McpToolParam(description = "Table name") String table,
-            @McpToolParam(description = "Parameters as key-value pairs") Map<String, Object> params) throws Exception {
+            @McpToolParam(description = "Optional schema name for qualifying table references", required = false) String schema,
+            @McpToolParam(description = "Parameters as key-value pairs", required = false) Map<String, Object> params) throws Exception {
         String template = TEMPLATES.get(templateName);
         if (template == null) {
             throw new IllegalArgumentException("Unknown template: " + templateName
                     + ". Available templates: " + TEMPLATES.keySet());
         }
 
-        String sql = template.replace("{table}", table);
+        String qualifiedTable = (schema != null && !schema.isBlank()) ? schema + "." + table : table;
+        String sql = template.replace("{table}", qualifiedTable);
         Map<String, Object> boundParams = new java.util.HashMap<>(params != null ? params : Map.of());
 
         if (templateName.equals("query_by_id")) {
@@ -168,7 +157,7 @@ public class QueryTools {
             sql = sql.replace("{condition}", (String) boundParams.getOrDefault("condition", "1=1"));
         }
 
-        log.debug("executeSqlTemplate: template={}, table={}, params={}", templateName, table, boundParams);
+        log.debug("executeSqlTemplate: template={}, table={}, schema={}, params={}", templateName, qualifiedTable, schema, boundParams);
         sqlValidator.validateSelect(sql);
 
         List<Map<String, Object>> rows = namedParameterJdbcTemplate.queryForList(sql, boundParams);

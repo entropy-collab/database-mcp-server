@@ -27,7 +27,6 @@ import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.util.List;
 import java.util.Map;
 
 import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;

@@ -25,6 +25,7 @@ import org.springframework.stereotype.Repository;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -73,7 +74,7 @@ public class AuditLogRepository {
             @Nullable Instant endTime,
             int limit) {
         StringBuilder sql = new StringBuilder("SELECT id, tool, sql, rows, duration_ms, success, error, timestamp, connection_key FROM audit_log WHERE 1=1");
-        var params = new java.util.ArrayList<>();
+        var params = new ArrayList<>();
 
         if (tool != null && !tool.isBlank()) {
             sql.append(" AND tool = ?");

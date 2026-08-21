@@ -73,15 +73,14 @@ class DynamicDataSourceManagerImplTest {
                 2
         );
         return new DynamicDataSourceManagerImpl(
-                dialectResolver,
-                sqlValidator,
-                maskingService,
-                queryAuditLogger,
-                infrastructureFactory,
-                connectionPoolFactory,
-                properties,
-                100,
-                metricsCollector
+                new DynamicDataSourceManagerImpl.Dependencies(
+                        dialectResolver,
+                        infrastructureFactory,
+                        connectionPoolFactory,
+                        properties,
+                        100,
+                        metricsCollector
+                )
         );
     }
 

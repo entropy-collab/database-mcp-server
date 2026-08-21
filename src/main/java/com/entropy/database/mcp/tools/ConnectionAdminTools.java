@@ -123,4 +123,9 @@ public class ConnectionAdminTools {
             return McpToolUtils.errorResponse(Map.of(), e.getMessage(), e.getClass().getSimpleName());
         }
     }
+
+    @McpTool(name = "getActiveConnectionCount", description = "Get the current number of active BYOK connections (alias)")
+    public Map<String, Object> getActiveConnectionCount() {
+        return getConnectionCount();
+    }
 }

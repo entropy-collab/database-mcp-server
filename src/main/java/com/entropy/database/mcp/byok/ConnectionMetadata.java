@@ -15,8 +15,6 @@
  */
 package com.entropy.database.mcp.byok;
 
-import com.entropy.database.mcp.dialect.DatabaseDialect;
-
 import java.time.Instant;
 
 /**

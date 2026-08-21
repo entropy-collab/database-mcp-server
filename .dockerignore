@@ -1,4 +1,5 @@
-target/
+target/*
+!target/database-mcp-server-0.1.0-SNAPSHOT.jar
 .git/
 .idea/
 *.iml

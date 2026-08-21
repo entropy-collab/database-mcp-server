@@ -6,19 +6,15 @@ services:
     env_file:
       - .env
     environment:
-      # Oracle 数据库连接（application-prod.yml 使用 DB_*，application-ccprod.yml 使用 CC_DB_*）
+      # Oracle 数据库连接（统一使用 DB_* 环境变量，prod profile）
       DB_HOST: ${DB_HOST}
       DB_NAME: ${DB_NAME}
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
-      CC_DB_HOST: ${CC_DB_HOST}
-      CC_DB_NAME: ${CC_DB_NAME}
-      CC_DB_USERNAME: ${CC_DB_USERNAME}
-      CC_DB_PASSWORD: ${CC_DB_PASSWORD}
       # JVM 配置
       JAVA_OPTS: ${JAVA_OPTS}
-      # 启用对应 profile（prod 或 ccprod）
-      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+      # 启用生产环境 profile
+      SPRING_PROFILES_ACTIVE: prod
     ports:
       - "${SERVER_PORT:-8686}:8686"
     deploy:

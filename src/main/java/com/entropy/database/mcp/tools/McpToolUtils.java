@@ -15,6 +15,8 @@
  */
 package com.entropy.database.mcp.tools;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -47,8 +49,9 @@ public final class McpToolUtils {
      * Create a standardized success response map.
      */
     public static Map<String, Object> successResponse(Map<String, Object> data) {
-        data.put("success", true);
-        return data;
+        Map<String, Object> result = new LinkedHashMap<>(data);
+        result.put("success", true);
+        return result;
     }
 
     /**

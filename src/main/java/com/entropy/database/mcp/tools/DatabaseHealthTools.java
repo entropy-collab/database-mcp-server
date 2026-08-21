@@ -163,7 +163,7 @@ public class DatabaseHealthTools {
     @McpTool(description = "Estimate table size in MB")
     public Map<String, Object> estimateTableSize(
             @McpToolParam(description = "Table name") String tableName,
-            @McpToolParam(description = "Optional schema name") String schema,
+            @McpToolParam(description = "Optional schema name", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection name. Omit to use primary datasource.", required = false) String connection) {
         requireNotBlank(tableName, "tableName");
         try {
@@ -191,7 +191,7 @@ public class DatabaseHealthTools {
 
     @McpTool(description = "List invalid database objects")
     public Map<String, Object> listInvalidObjects(
-            @McpToolParam(description = "Optional schema name filter") String schema,
+            @McpToolParam(description = "Optional schema name filter", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection name. Omit to use primary datasource.", required = false) String connection) {
         try {
             Map<String, Object> result = DialectQueryUtils.executeDialectQuery(
@@ -214,7 +214,7 @@ public class DatabaseHealthTools {
     @McpTool(description = "Gather table statistics for optimizer")
     public Map<String, Object> gatherTableStats(
             @McpToolParam(description = "Table name") String tableName,
-            @McpToolParam(description = "Optional schema name") String schema,
+            @McpToolParam(description = "Optional schema name", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection name. Omit to use primary datasource.", required = false) String connection) {
         requireNotBlank(tableName, "tableName");
         try {
@@ -241,7 +241,7 @@ public class DatabaseHealthTools {
     @McpTool(description = "Show index status and unusable indexes")
     public Map<String, Object> showIndexStatus(
             @McpToolParam(description = "Optional table name filter") String tableName,
-            @McpToolParam(description = "Optional schema name") String schema,
+            @McpToolParam(description = "Optional schema name", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection name. Omit to use primary datasource.", required = false) String connection) {
         try {
             Map<String, Object> result = DialectQueryUtils.executeDialectQuery(
@@ -269,8 +269,8 @@ public class DatabaseHealthTools {
     @McpTool(description = "Generate flashback query template (AS OF TIMESTAMP)")
     public Map<String, Object> flashbackQuery(
             @McpToolParam(description = "Table name") String tableName,
-            @McpToolParam(description = "Timestamp in ISO-8601 format") String timestamp,
-            @McpToolParam(description = "Optional schema name") String schema,
+            @McpToolParam(description = "Timestamp in ISO-8601 format", required = false) String timestamp,
+            @McpToolParam(description = "Optional schema name", required = false) String schema,
             @McpToolParam(description = "Optional BYOK connection name. Omit to use primary datasource.", required = false) String connection) {
         requireNotBlank(tableName, "tableName");
         requireNotBlank(timestamp, "timestamp");

@@ -16,7 +16,6 @@
 package com.entropy.database.mcp.service;
 
 import com.entropy.database.mcp.dialect.DatabaseDialect;
-import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.slf4j.Logger;

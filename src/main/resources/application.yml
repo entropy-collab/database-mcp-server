@@ -30,20 +30,6 @@ spring:
         version: 0.1.0
         protocol: STATELESS
 
-  datasource:
-    primary:
-      jdbc-url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false
-      username: sa
-      password:
-      driver-class-name: org.h2.Driver
-      maximum-pool-size: 10
-    secondary:
-      jdbc-url: jdbc:oracle:thin:@//${SECONDARY_DB_HOST}/${SECONDARY_DB_NAME}
-      username: ${SECONDARY_DB_USERNAME}
-      password: ${SECONDARY_DB_PASSWORD}
-      driver-class-name: oracle.jdbc.OracleDriver
-      maximum-pool-size: 10
-
   main:
     banner-mode: off
 

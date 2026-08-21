@@ -38,7 +38,6 @@ import org.springframework.security.web.SecurityFilterChain;
  */
 @Configuration
 @EnableWebSecurity
-@ConditionalOnProperty(name = "entropy.mcp.security.test-mode", havingValue = "false", matchIfMissing = true)
 public class SecurityConfig {
 
     @Value("${entropy.mcp.security.enabled:false}")
