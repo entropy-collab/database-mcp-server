@@ -14,7 +14,7 @@ target/
 .settings/
 
 # Documentation
-# docs/ 允许提交，用于存放开源文档
+docs/
 
 # OS
 .DS_Store
@@ -27,6 +27,9 @@ logs/
 # Environment variables
 .env*
 !.env.example
+
+# Docker production compose (local overrides)
+docker-compose.prod.yml
 
 # Test coverage
 coverage/
