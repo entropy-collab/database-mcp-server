@@ -83,6 +83,10 @@ dependency-reduced-pom.xml
 *.ear
 *.zip
 *.rar
+BOOT-INF/
+
+# Build artifacts (platform-specific Docker files)
+Dockerfile.*
 
 # Test
 jacoco.exec
