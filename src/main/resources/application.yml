@@ -37,6 +37,12 @@ spring:
       password:
       driver-class-name: org.h2.Driver
       maximum-pool-size: 10
+    secondary:
+      jdbc-url: jdbc:oracle:thin:@//${SECONDARY_DB_HOST}/${SECONDARY_DB_NAME}
+      username: ${SECONDARY_DB_USERNAME}
+      password: ${SECONDARY_DB_PASSWORD}
+      driver-class-name: oracle.jdbc.OracleDriver
+      maximum-pool-size: 10
 
   main:
     banner-mode: off
@@ -50,27 +56,40 @@ entropy:
         max-rows: 100
         timeout-seconds: 30
         max-result-rows: 10000
+        max-export-rows: 500
+        fetch-size: 100
+      audit:
+        enabled: true
+        retention-days: 7
+        sql-truncate-length: 200
+        entry-sql-truncate-length: 500
       ddl:
         allowed: true
       security:
         enabled: false
         allowed-tables: []
         enable-parameterized-only: true
-      masking:
-        column-patterns:
-          - email
-          - phone
-          - mobile
-          - ssn
-          - credit_card
-          - password
-          - secret
-          - token
+        max-joins: 10
+        max-subquery-depth: 5
+      etl:
+        thread-pool-size: 4
+        batch-size: 1000
       cache:
         max-size: 1000
-        expire-after-access: 5m
+        query-ttl: 30s
+        metadata-ttl: 5m
+        max-warm-size: 10
+      connection-pool:
+        connection-timeout: 30s
+        idle-timeout: 10m
+        max-lifetime: 30m
+      prepared-statement:
+        cache-size: 250
+        cache-sql-limit: 2048
+      metrics:
+        slow-query-threshold-ms: 5000
     gateway:
-      enabled: false
+      enabled: true
     monitoring:
       pool:
         enabled: true

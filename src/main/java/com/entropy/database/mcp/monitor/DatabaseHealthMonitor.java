@@ -15,62 +15,30 @@
  */
 package com.entropy.database.mcp.monitor;
 
-import com.entropy.database.mcp.cache.DatabaseCache;
-import javax.sql.DataSource;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Component;
-
-import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Database health checker and statistics provider.
+ * Database health checker and statistics provider interface.
  */
-@Component
-public class DatabaseHealthMonitor {
+public interface DatabaseHealthMonitor {
 
-    private final JdbcTemplate jdbcTemplate;
-    private final DatabaseCache cache;
-    private final QueryStats queryStats = new QueryStats();
+    /**
+     * Get the current health status of the database.
+     */
+    Map<String, Object> getHealthStatus();
 
-    public DatabaseHealthMonitor(JdbcTemplate jdbcTemplate, DatabaseCache cache) {
-        this.jdbcTemplate = jdbcTemplate;
-        this.cache = cache;
-    }
+    /**
+     * Get database statistics.
+     */
+    Map<String, Object> getStatistics();
 
-    public Map<String, Object> getHealthStatus() {
-        Map<String, Object> status = new HashMap<>();
-        try (Connection conn = jdbcTemplate.getDataSource().getConnection()) {
-            DatabaseMetaData meta = conn.getMetaData();
+    /**
+     * Record a query execution for statistics tracking.
+     */
+    void recordQuery(long durationMs, int rowsReturned, boolean success);
 
-            status.put("status", "healthy");
-            status.put("databaseProductName", meta.getDatabaseProductName());
-            status.put("databaseProductVersion", meta.getDatabaseProductVersion());
-            status.put("driverName", meta.getDriverName());
-            status.put("driverVersion", meta.getDriverVersion());
-            status.put("url", meta.getURL());
-            status.put("user", meta.getUserName());
-        } catch (Exception e) {
-            status.put("status", "unhealthy");
-            status.put("error", e.getMessage());
-        }
-        return status;
-    }
-
-    public Map<String, Object> getStatistics() {
-        Map<String, Object> stats = new HashMap<>();
-        stats.put("query", queryStats.toSummary());
-        stats.put("cache", cache.getStatistics());
-        return stats;
-    }
-
-    public void recordQuery(long durationMs, int rowsReturned, boolean success) {
-        queryStats.recordQuery(durationMs, rowsReturned, success);
-    }
-
-    public QueryStats getQueryStats() {
-        return queryStats;
-    }
+    /**
+     * Get the query statistics.
+     */
+    QueryStats getQueryStats();
 }

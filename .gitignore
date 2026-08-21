@@ -5,12 +5,16 @@ target/
 # IDE
 .idea/
 .vscode/
+.trae/
 *.iml
 *.ipr
 *.iws
 .project
 .classpath
 .settings/
+
+# Documentation
+docs/
 
 # OS
 .DS_Store

@@ -18,33 +18,61 @@ package com.entropy.database.mcp.dialect;
 import javax.sql.DataSource;
 import org.springframework.jdbc.support.JdbcUtils;
 import org.springframework.lang.Nullable;
+import java.util.ServiceLoader;
 
 public class DialectResolver {
+
+    private final java.util.Map<String, DatabaseDialect> customDialects;
+
+    public DialectResolver() {
+        this.customDialects = loadCustomDialects();
+    }
 
     public DatabaseDialect resolve(String dialectName, DataSource dataSource) {
         if (dialectName == null || dialectName.isBlank()) {
             return new GenericDialect();
         }
-        return switch (dialectName.toLowerCase()) {
+        String lower = dialectName.toLowerCase();
+        
+        // Check custom dialects first
+        if (customDialects.containsKey(lower)) {
+            return customDialects.get(lower);
+        }
+        
+        return switch (lower) {
             case "oracle" -> new OracleDialect();
             case "mysql" -> new MySqlDialect();
             case "postgres", "postgresql" -> new PostgresDialect();
+            case "sqlserver", "mssql" -> new SqlServerDialect();
+            case "sqlite" -> new SqliteDialect();
+            case "db2" -> new Db2Dialect();
             case "auto" -> detectFromJdbcUrl(dataSource);
             default -> new GenericDialect();
         };
     }
 
+    private java.util.Map<String, DatabaseDialect> loadCustomDialects() {
+        java.util.Map<String, DatabaseDialect> map = new java.util.HashMap<>();
+        ServiceLoader<DialectProvider> loader = ServiceLoader.load(DialectProvider.class);
+        for (DialectProvider provider : loader) {
+            map.put(provider.getName().toLowerCase(), provider.getDialect());
+        }
+        return map;
+    }
+
     private DatabaseDialect detectFromJdbcUrl(DataSource dataSource) {
         try (var connection = dataSource.getConnection()) {
             var url = connection.getMetaData().getURL();
-            if (url.startsWith("jdbc:oracle:")) {
-                return new OracleDialect();
-            } else if (url.startsWith("jdbc:mysql:")) {
-                return new MySqlDialect();
-            } else if (url.startsWith("jdbc:postgresql:")) {
-                return new PostgresDialect();
-            }
-            return new GenericDialect();
+            String dialect = DialectUtils.inferDialect(url);
+            return switch (dialect) {
+                case "oracle" -> new OracleDialect();
+                case "mysql" -> new MySqlDialect();
+                case "postgres" -> new PostgresDialect();
+                case "sqlserver" -> new SqlServerDialect();
+                case "sqlite" -> new SqliteDialect();
+                case "db2" -> new Db2Dialect();
+                default -> new GenericDialect();
+            };
         } catch (Exception e) {
             return new GenericDialect();
         }

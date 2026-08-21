@@ -15,7 +15,7 @@
  */
 package com.entropy.database.mcp.dialect;
 
-public class GenericDialect implements DatabaseDialect {
+public class GenericDialect extends AbstractDatabaseDialect {
 
     @Override
     public String quote(String name) {
@@ -71,5 +71,97 @@ public class GenericDialect implements DatabaseDialect {
     @Override
     public boolean supportsLimit() {
         return true;
+    }
+
+    @Override
+    public String listActiveSessionsSql() {
+        return """
+                SELECT 1 AS sid, 1 AS serial#, CURRENT_USER AS username,
+                       'ACTIVE' AS status, 'localhost' AS machine, 'unknown' AS program,
+                       NOW() AS logon_time, 0 AS last_call_et,
+                       'NONE' AS event, 'NONE' AS wait_class, '' AS sql_id
+                """;
+    }
+
+    @Override
+    public String showLocksSql() {
+        return """
+                SELECT 1 AS sid, 1 AS serial#, 'NONE' AS type,
+                       0 AS id1, 0 AS id2, 'NONE' AS lmode, 0 AS request,
+                       0 AS ctime, CURRENT_USER AS username, 'ACTIVE' AS status, '' AS event
+                """;
+    }
+
+    @Override
+    public String showBlockingTreeSql() {
+        return """
+                SELECT 1 AS waiter_sid, 1 AS waiter_serial,
+                       CURRENT_USER AS waiter_user, '' AS waiter_event,
+                       1 AS blocker_sid, 1 AS blocker_serial,
+                       CURRENT_USER AS blocker_user, '' AS blocker_event
+                """;
+    }
+
+    @Override
+    public String listTablespacesSql() {
+        return """
+                SELECT 'USERS' AS tablespace_name, 'PERMANENT' AS contents,
+                       'LOCAL' AS extent_management, 'ONLINE' AS status,
+                       0 AS size_mb, 0 AS used_mb
+                """;
+    }
+
+    @Override
+    public String listDataFilesSql() {
+        return """
+                SELECT 'data' AS file_name, 'USERS' AS tablespace_name,
+                       0 AS bytes, 0 AS blocks, 'ONLINE' AS status,
+                       'NO' AS autoextensible, 0 AS maxbytes, 0 AS increment_by, 0 AS max_mb
+                """;
+    }
+
+    @Override
+    public String estimateTableSizeSql(String tableName, String schema) {
+        return "SELECT ? AS segment_name, 'TABLE' AS segment_type, 0 AS size_mb, 0 AS extents";
+    }
+
+    @Override
+    public String listInvalidObjectsSql(String schema) {
+        return "SELECT CURRENT_USER AS owner, 'NONE' AS object_name, 'NONE' AS object_type, 'VALID' AS status";
+    }
+
+    @Override
+    public String gatherTableStatsSql(String tableName, String schema) {
+        return "SELECT 1";
+    }
+
+    @Override
+    public String showIndexStatusSql(String tableName, String schema) {
+        return """
+                SELECT CURRENT_USER AS owner, 'NONE' AS table_name,
+                       'NONE' AS index_name, 'VALID' AS status,
+                       'NONUNIQUE' AS uniqueness, null AS last_analyzed, 0 AS num_rows, 0 AS distinct_keys
+                """;
+    }
+
+    @Override
+    public String flashbackQuerySql(String tableName) {
+        return "SELECT 'SELECT * FROM %s -- Flashback not supported for this dialect' AS sql_template"
+                .formatted(tableName);
+    }
+
+    @Override
+    public String showUndoUsageSql() {
+        return "SELECT 'undo' AS tablespace_name, 0 AS size_mb, 0 AS used_mb, 0 AS free_mb, 0 AS used_pct";
+    }
+
+    @Override
+    public String listCurrentPrivilegesSql() {
+        return "SELECT 'SELECT' AS privilege, 'NO' AS admin_option, 'NO' AS grantable";
+    }
+
+    @Override
+    public String listGrantsSql(String userName) {
+        return "SELECT ? AS grantee, 'SELECT' AS privilege, 'NO' AS grantable, CURRENT_USER AS grantor";
     }
 }

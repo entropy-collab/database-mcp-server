@@ -44,6 +44,9 @@ public class SecurityConfig {
     @Value("${entropy.mcp.security.enabled:false}")
     private boolean securityEnabled;
 
+    @Value("${entropy.mcp.security.admin-username:admin}")
+    private String adminUsername;
+
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
@@ -85,7 +88,7 @@ public class SecurityConfig {
         String encodedPassword = passwordEncoder.encode(adminPassword);
 
         UserDetails admin = User.builder()
-            .username("admin")
+            .username(adminUsername)
             .password(encodedPassword)  // Store encoded password
             .roles("ADMIN", "DBA")
             .build();

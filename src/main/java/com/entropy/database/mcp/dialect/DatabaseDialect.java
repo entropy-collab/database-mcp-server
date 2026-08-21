@@ -15,6 +15,9 @@
  */
 package com.entropy.database.mcp.dialect;
 
+import com.entropy.database.mcp.properties.DatabaseProperties;
+import com.zaxxer.hikari.HikariConfig;
+
 public interface DatabaseDialect {
     String quote(String name);
     String tablesQuery(String schema);
@@ -61,5 +64,172 @@ public interface DatabaseDialect {
 
     default String getExecutionPlanSql() {
         return null; // Not supported
+    }
+
+    /**
+     * SQL to search tables by keyword across all schemas.
+     * Returns SQL with a LIKE ? placeholder for the keyword.
+     */
+    default String searchTablesQuery(String keyword) {
+        if (keyword != null && !keyword.isBlank()) {
+            return """
+                SELECT table_schema AS schema_name, table_name, 0 AS row_count
+                FROM information_schema.tables
+                WHERE table_type = 'BASE TABLE'
+                  AND table_name LIKE ?
+                ORDER BY table_schema, table_name
+                """;
+        }
+        return """
+            SELECT table_schema AS schema_name, table_name, 0 AS row_count
+            FROM information_schema.tables
+            WHERE table_type = 'BASE TABLE'
+            ORDER BY table_schema, table_name
+            """;
+    }
+
+    /**
+     * Connection validation query for keepalive.
+     */
+    default String connectionTestQuery() {
+        return "SELECT 1";
+    }
+
+    /**
+     * SQL to get the current database user.
+     */
+    default String currentUserQuery() {
+        return "SELECT CURRENT_USER";
+    }
+
+    /**
+     * SQL to get DDL for a table using database-specific metadata functions.
+     */
+    default String getTableDdlQuery(String tableName, String schema) {
+        return null;
+    }
+
+    /**
+     * Validate database identifier (table name, column name, etc.).
+     */
+    default boolean isValidIdentifier(String name) {
+        if (name == null || name.isBlank()) {
+            return false;
+        }
+        return name.matches("[a-zA-Z_][a-zA-Z0-9_]*");
+    }
+
+    /**
+     * Normalize table name for the current dialect.
+     * Oracle stores identifiers in uppercase by default.
+     */
+    default String normalizeTableName(String table) {
+        return table;
+    }
+
+    /**
+     * SQL to kill a database session. Returns null if the dialect does not support session killing.
+     */
+    default String killSessionSql(String sessionId, String mode) {
+        return null;
+    }
+
+    /**
+     * SQL to list active database sessions.
+     */
+    default String listActiveSessionsSql() {
+        return null;
+    }
+
+    /**
+     * SQL to show database locks and blocking information.
+     */
+    default String showLocksSql() {
+        return null;
+    }
+
+    /**
+     * SQL to show blocking chain (who is blocking whom).
+     */
+    default String showBlockingTreeSql() {
+        return null;
+    }
+
+    /**
+     * SQL to list tablespaces and usage.
+     */
+    default String listTablespacesSql() {
+        return null;
+    }
+
+    /**
+     * SQL to list datafiles status and autoextension.
+     */
+    default String listDataFilesSql() {
+        return null;
+    }
+
+    /**
+     * SQL to estimate table size in MB. Returns SQL with ? placeholders for tableName and schema.
+     */
+    default String estimateTableSizeSql(String tableName, String schema) {
+        return null;
+    }
+
+    /**
+     * SQL to list invalid database objects. Returns SQL with ? placeholder for schema.
+     */
+    default String listInvalidObjectsSql(String schema) {
+        return null;
+    }
+
+    /**
+     * SQL to gather table statistics for optimizer. Returns SQL with ? placeholders for tableName and schema.
+     */
+    default String gatherTableStatsSql(String tableName, String schema) {
+        return null;
+    }
+
+    /**
+     * SQL to show index status and unusable indexes. Returns SQL with ? placeholders for tableName and schema.
+     */
+    default String showIndexStatusSql(String tableName, String schema) {
+        return null;
+    }
+
+    /**
+     * SQL to generate flashback query template. Returns formatted SQL with quoted tableName.
+     */
+    default String flashbackQuerySql(String tableName) {
+        return null;
+    }
+
+    /**
+     * SQL to show undo tablespace usage.
+     */
+    default String showUndoUsageSql() {
+        return null;
+    }
+
+    /**
+     * SQL to list current user privileges.
+     */
+    default String listCurrentPrivilegesSql() {
+        return null;
+    }
+
+    /**
+     * SQL to list grants for a user or role. Returns SQL with ? placeholder for userName.
+     */
+    default String listGrantsSql(String userName) {
+        return null;
+    }
+
+    /**
+     * Configure dialect-specific HikariCP datasource properties.
+     * Called after common pool settings are applied.
+     */
+    default void configureDataSource(HikariConfig config, DatabaseProperties properties) {
+        // No-op by default
     }
 }

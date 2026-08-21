@@ -17,18 +17,22 @@ package com.entropy.database.mcp.repository;
 
 import com.entropy.database.mcp.cache.DatabaseCache;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
-import com.entropy.database.mcp.dialect.OracleDialect;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
+import com.entropy.database.mcp.repository.QueryLimits;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.stream.SseStreamManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Repository;
 
 import java.security.MessageDigest;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -36,10 +40,12 @@ import java.util.Map;
  * Database read operations repository.
  * Handles all SELECT queries with proper pagination, caching, and dialect-driven SQL.
  */
-@Repository
 public class DatabaseReadRepository {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseReadRepository.class);
+    public static final int DEFAULT_MAX_ROWS = 100;
+    public static final int DEFAULT_MAX_RESULT_ROWS = 10000;
+    public static final int DEFAULT_FETCH_SIZE = 100;
 
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseDialect dialect;
@@ -48,6 +54,7 @@ public class DatabaseReadRepository {
     private final DataMaskingService maskingService;
     private final int maxRows;
     private final int maxResultRows;
+    private final int fetchSize;
     private final SseStreamManager sseStreamManager;
 
     public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
@@ -55,8 +62,30 @@ public class DatabaseReadRepository {
                                   SqlValidator sqlValidator,
                                   DatabaseCache cache,
                                   DataMaskingService maskingService,
-                                  @Value("${entropy.mcp.database.query.max-rows:100}") int maxRows,
-                                  @Value("${entropy.mcp.database.query.max-result-rows:10000}") int maxResultRows,
+                                  SseStreamManager sseStreamManager) {
+        this(jdbcTemplate, dialect, sqlValidator, cache, maskingService,
+             DEFAULT_MAX_ROWS, DEFAULT_MAX_RESULT_ROWS, DEFAULT_FETCH_SIZE, sseStreamManager);
+    }
+
+    public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
+                                  DatabaseDialect dialect,
+                                  SqlValidator sqlValidator,
+                                  DatabaseCache cache,
+                                  DataMaskingService maskingService,
+                                  QueryLimits limits,
+                                  SseStreamManager sseStreamManager) {
+        this(jdbcTemplate, dialect, sqlValidator, cache, maskingService,
+             limits.maxRows(), limits.maxResultRows(), DEFAULT_FETCH_SIZE, sseStreamManager);
+    }
+
+    public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
+                                  DatabaseDialect dialect,
+                                  SqlValidator sqlValidator,
+                                  DatabaseCache cache,
+                                  DataMaskingService maskingService,
+                                  int maxRows,
+                                  int maxResultRows,
+                                  int fetchSize,
                                   SseStreamManager sseStreamManager) {
         this.jdbcTemplate = jdbcTemplate;
         this.dialect = dialect;
@@ -65,6 +94,7 @@ public class DatabaseReadRepository {
         this.maskingService = maskingService;
         this.maxRows = maxRows;
         this.maxResultRows = maxResultRows;
+        this.fetchSize = fetchSize;
         this.sseStreamManager = sseStreamManager;
     }
 
@@ -93,27 +123,15 @@ public class DatabaseReadRepository {
         if (cached != null) {
             return (List<Map<String, Object>>) cached;
         }
-        String sql;
+        String sql = dialect.searchTablesQuery(keyword);
+        List<Map<String, Object>> result;
         if (keyword != null && !keyword.isBlank()) {
-            sql = """
-                SELECT owner AS schema_name, table_name, num_rows AS row_count
-                FROM all_tables
-                WHERE table_name LIKE ?
-                ORDER BY owner, table_name
-                """;
-            List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, "%" + keyword.toUpperCase() + "%");
-            cache.putMetadata(cacheKey, result);
-            return result;
+            result = jdbcTemplate.queryForList(sql, "%" + keyword + "%");
         } else {
-            sql = """
-                SELECT owner AS schema_name, table_name, num_rows AS row_count
-                FROM all_tables
-                ORDER BY owner, table_name
-                """;
-            List<Map<String, Object>> result = jdbcTemplate.queryForList(sql);
-            cache.putMetadata(cacheKey, result);
-            return result;
+            result = jdbcTemplate.queryForList(sql);
         }
+        cache.putMetadata(cacheKey, result);
+        return result;
     }
 
     @SuppressWarnings("unchecked")
@@ -137,7 +155,7 @@ public class DatabaseReadRepository {
             return (Map<String, Object>) cached;
         }
         String sql = dialect.columnsQuery(table, schema);
-        List<Map<String, Object>> columns = jdbcTemplate.queryForList(sql, schema, table.toUpperCase());
+        List<Map<String, Object>> columns = jdbcTemplate.queryForList(sql, schema, normalizeTableName(table));
         Map<String, Object> result = Map.of(
             "table", table,
             "schema", schema,
@@ -156,7 +174,7 @@ public class DatabaseReadRepository {
             return (List<Map<String, Object>>) cached;
         }
         String sql = dialect.indexesQuery(table, schema);
-        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema, table.toUpperCase());
+        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema, normalizeTableName(table));
         cache.putMetadata(cacheKey, result);
         return result;
     }
@@ -200,69 +218,89 @@ public class DatabaseReadRepository {
     @SuppressWarnings("unchecked")
     public PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
                                                     SseStreamManager.QueryExecutor<PaginatedQueryResult> executor) {
+        if (sseStreamManager == null) {
+            return executeQueryDirect(sql, maxRows, continuationToken);
+        }
         return sseStreamManager.executeWithProgress(progress -> {
             // SSE event handling can be added here if needed
-        }, () -> {
-            sqlValidator.validateSelect(sql);
+        }, () -> executeQueryDirect(sql, maxRows, continuationToken));
+    }
 
-            // Prepare cache key and pagination params
-            int limit = Math.min(maxRows, this.maxRows);
-            String schema = extractSchema(sql);
-            String cacheKey = "query:" + sha256(schema + "." + sql) + ":" + limit;
+    @SuppressWarnings("unchecked")
+    private PaginatedQueryResult executeQueryDirect(String sql, int maxRows, String continuationToken) {
+        // Prepare cache key and pagination params
+        int limit = Math.min(maxRows, this.maxRows);
+        String schema = extractSchema(sql);
+        String cacheKey = "query:" + sha256(schema + "." + sql) + ":" + limit;
 
-            // Cache first-page queries only (no continuation token)
-            if (continuationToken == null || continuationToken.isBlank()) {
-                // Bloom filter pre-check: if definitely not present, skip cache lookup
-                boolean possiblyCached = cache.queryBloomFilter.mightContain(schema + "." + sql);
-                if (possiblyCached) {
-                    Object cached = cache.getQuery(cacheKey);
-                    if (cached != null) {
-                        return (PaginatedQueryResult) cached;
-                    }
+        // Cache first-page queries only (no continuation token)
+        if (continuationToken == null || continuationToken.isBlank()) {
+            // Bloom filter pre-check: if definitely not present, skip cache lookup
+            boolean possiblyCached = cache.getQueryBloomFilter().mightContain(schema + "." + sql);
+            if (possiblyCached) {
+                Object cached = cache.getQuery(cacheKey);
+                if (cached != null) {
+                    return (PaginatedQueryResult) cached;
                 }
             }
+        }
 
-            // Execute query with pagination
-            int offset = (int) parseCursor(continuationToken);
-            String limitedSql = dialect.supportsLimit()
-                    ? dialect.applyLimit(sql, limit, offset)
-                    : sql;
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(limitedSql);
-
-            // Circuit breaker: reject if result exceeds maxResultRows
-            if (rows.size() > maxResultRows) {
-                throw new com.entropy.database.mcp.exception.DatabaseMcpException(
-                    com.entropy.database.mcp.exception.ErrorCode.QUERY_RESULT_TOO_LARGE,
-                    "Query result exceeds max-result-rows limit: " + rows.size() + " > " + maxResultRows);
-            }
-
-            boolean hasMore = rows.size() == limit;
-            String nextToken = null;
-            if (hasMore) {
-                nextToken = String.valueOf(offset + limit);
-            }
-
-            PaginatedQueryResult result = PaginatedQueryResult.from(rows, nextToken, hasMore);
-
-            // Apply data masking before caching and returning
-            List<Map<String, Object>> maskedRows = maskingService.maskResults(rows, sqlValidator.getMaskColumns());
-            if (maskedRows != rows) {
-                String maskedCacheKey = cacheKey + ":masked";
-                result = new PaginatedQueryResult(result.columns(), maskedRows, nextToken, hasMore);
-                if (continuationToken == null || continuationToken.isBlank()) {
-                    cache.putQuery(maskedCacheKey, result);
-                    cache.queryBloomFilter.put(schema + "." + sql);
+        // Execute query with pagination
+        int offset = (int) parseCursor(continuationToken);
+        String limitedSql = dialect.supportsLimit()
+                ? dialect.applyLimit(sql, limit, offset)
+                : sql;
+        List<Map<String, Object>> rows = jdbcTemplate.query(con -> {
+            PreparedStatement ps = con.prepareStatement(limitedSql);
+            ps.setFetchSize(fetchSize);
+            return ps;
+        }, (ResultSet rs) -> {
+            List<Map<String, Object>> results = new ArrayList<>();
+            ResultSetMetaData metaData = rs.getMetaData();
+            int columnCount = metaData.getColumnCount();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= columnCount; i++) {
+                    row.put(metaData.getColumnLabel(i), rs.getObject(i));
                 }
+                results.add(row);
             }
-
-            // Cache first page results
-            if (continuationToken == null || continuationToken.isBlank() && maskedRows == rows) {
-                cache.putQuery(cacheKey, result);
-                cache.queryBloomFilter.put(schema + "." + sql);
-            }
-
-            return result;
+            return results;
         });
+
+        // Circuit breaker: reject if result exceeds maxResultRows
+        if (rows.size() > maxResultRows) {
+            throw new com.entropy.database.mcp.exception.DatabaseMcpException(
+                com.entropy.database.mcp.exception.ErrorCode.QUERY_RESULT_TOO_LARGE,
+                "Query result exceeds max-result-rows limit: " + rows.size() + " > " + maxResultRows);
+        }
+
+        boolean hasMore = rows.size() == limit;
+        String nextToken = null;
+        if (hasMore) {
+            nextToken = String.valueOf(offset + limit);
+        }
+
+        PaginatedQueryResult result = PaginatedQueryResult.from(rows, nextToken, hasMore);
+
+        // Apply data masking before caching and returning
+        List<Map<String, Object>> maskedRows = maskingService.maskResults(rows, sqlValidator.getMaskColumns());
+        if (maskedRows != rows) {
+            String maskedCacheKey = cacheKey + ":masked";
+            result = new PaginatedQueryResult(result.columns(), maskedRows, nextToken, hasMore);
+            if (continuationToken == null || continuationToken.isBlank()) {
+                cache.putQuery(maskedCacheKey, result);
+                cache.getQueryBloomFilter().put(schema + "." + sql);
+            }
+        }
+
+        // Cache first page results
+        if ((continuationToken == null || continuationToken.isBlank()) && maskedRows == rows) {
+            cache.putQuery(cacheKey, result);
+            cache.getQueryBloomFilter().put(schema + "." + sql);
+        }
+
+        return result;
     }
 
     // ─── Private helpers ──────────────────────────────────────────────────
@@ -317,6 +355,13 @@ public class DatabaseReadRepository {
             || word.equals("DELETE") || word.equals("AND") || word.equals("OR")
             || word.equals("NOT") || word.equals("NULL") || word.equals("TRUE")
             || word.equals("FALSE") || word.equals("EXISTS") || word.equals("IN");
+    }
+
+    private String normalizeTableName(String table) {
+        if (table == null) {
+            return null;
+        }
+        return dialect.normalizeTableName(table);
     }
 
     public Map<String, Object> getDatabaseInfo() {

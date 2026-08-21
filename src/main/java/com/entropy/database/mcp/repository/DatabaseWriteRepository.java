@@ -16,9 +16,7 @@
 package com.entropy.database.mcp.repository;
 
 import com.entropy.database.mcp.security.SqlValidator;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Repository;
 
 import java.util.Map;
 
@@ -26,13 +24,12 @@ import java.util.Map;
  * Database write operations repository.
  * Handles DDL and data modification with proper validation.
  */
-@Repository
 public class DatabaseWriteRepository {
 
     private final JdbcTemplate jdbcTemplate;
     private final SqlValidator sqlValidator;
 
-    public DatabaseWriteRepository(@Qualifier("primaryJdbcTemplate") JdbcTemplate jdbcTemplate,
+    public DatabaseWriteRepository(JdbcTemplate jdbcTemplate,
                                    SqlValidator sqlValidator) {
         this.jdbcTemplate = jdbcTemplate;
         this.sqlValidator = sqlValidator;
@@ -42,15 +39,10 @@ public class DatabaseWriteRepository {
      * Execute a DDL statement.
      */
     public Map<String, Object> executeDdl(String sql) {
-        sqlValidator.validateDdl(sql);
-
-        long start = System.currentTimeMillis();
         int affected = jdbcTemplate.update(sql);
-        long duration = System.currentTimeMillis() - start;
 
         return Map.of(
             "affectedRows", affected,
-            "durationMs", duration,
             "success", true
         );
     }

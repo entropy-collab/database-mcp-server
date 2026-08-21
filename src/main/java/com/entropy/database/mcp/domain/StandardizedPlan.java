@@ -36,7 +36,8 @@ public record StandardizedPlan(
     /**
      * Create from Oracle DBMS_XPLAN output.
      */
-    public static StandardizedPlan fromOracleExplain(Map<String, String> planRow) {
+    public static StandardizedPlan fromOracleExplain(Map<String, String> planRow,
+                                                     List<Map<String, Object>> allRows) {
         String id = planRow.getOrDefault("ID", "0");
         String parentIds = planRow.getOrDefault("PARENT_ID", "");
         String operation = planRow.getOrDefault("OPERATION", "SELECT");
@@ -47,13 +48,13 @@ public record StandardizedPlan(
         // Parse operation type
         String opType = extractOperationType(operation, options);
         
-        // Extract predicates
-        String accessPred = planRow.getOrDefault("ACCESS_PREDICATES", "");
-        String filterPred = planRow.getOrDefault("FILTER_PREDICATES", "");
+        // Aggregate predicates from all child operations
+        String accessPred = aggregatePredicates(allRows, "ACCESS_PREDICATES");
+        String filterPred = aggregatePredicates(allRows, "FILTER_PREDICATES");
         
-        // Estimate row count from row object or output
-        String rowObj = planRow.getOrDefault("ROW_OBJ", "");
-        int estimatedRows = parseEstimatedRows(rowObj);
+        // Estimate row count from cardinality column
+        long estimatedRows = parseLong(planRow.get("CARDINALITY"));
+        Double cost = parseCost(planRow.get("COST"));
         
         return new StandardizedPlan(
             id,
@@ -63,13 +64,20 @@ public record StandardizedPlan(
             extractOperator(options),
             List.of(
                 new PlanProperty("estimated_rows", estimatedRows),
-                new PlanProperty("cost", parseCost(planRow.get("_COST"))),
+                new PlanProperty("cost", cost),
                 new PlanProperty("cardinality", estimatedRows)
             ),
             accessPred.isBlank() ? null : accessPred,
             filterPred.isBlank() ? null : filterPred,
             estimateProjectionSize(projection)
         );
+    }
+
+    /**
+     * Create from Oracle DBMS_XPLAN output (legacy, single row only).
+     */
+    public static StandardizedPlan fromOracleExplain(Map<String, String> planRow) {
+        return fromOracleExplain(planRow, List.of());
     }
 
     /**
@@ -174,6 +182,26 @@ public record StandardizedPlan(
         if (upper.contains("NESTED")) return "NESTED";
         if (upper.contains("MERGE")) return "MERGE";
         return null;
+    }
+
+    private static String aggregatePredicates(List<Map<String, Object>> rows, String column) {
+        if (rows == null || rows.isEmpty()) return "";
+        
+        return rows.stream()
+            .map(row -> row.getOrDefault(column, ""))
+            .filter(val -> val != null && !val.toString().isBlank())
+            .map(val -> val.toString().trim())
+            .distinct()
+            .reduce((a, b) -> a + "; " + b)
+            .orElse("");
+    }
+
+    private static long parseLong(String value) {
+        try {
+            return value != null ? Long.parseLong(value.trim()) : 0L;
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     private static int parseEstimatedRows(String rowObj) {

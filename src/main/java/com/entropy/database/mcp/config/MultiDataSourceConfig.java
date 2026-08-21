@@ -32,4 +32,10 @@ public class MultiDataSourceConfig {
     public DataSource primaryDataSource() {
         return DataSourceBuilder.create().build();
     }
+
+    @Bean(name = "secondaryDataSource")
+    @ConfigurationProperties(prefix = "spring.datasource.secondary")
+    public DataSource secondaryDataSource() {
+        return DataSourceBuilder.create().build();
+    }
 }

@@ -20,14 +20,13 @@ import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.domain.PlanAnalysis;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
-import com.entropy.database.mcp.repository.DatabaseMetadataRepository;
 import com.entropy.database.mcp.repository.DatabaseReadRepository;
 import com.entropy.database.mcp.repository.DatabaseWriteRepository;
 import com.entropy.database.mcp.repository.ExecutionPlanRepository;
 import com.entropy.database.mcp.security.QueryAuditLogger;
+import com.entropy.database.mcp.service.DatabaseBackupService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
@@ -36,36 +35,28 @@ import java.util.Map;
  * Application facade that orchestrates repository operations.
  * Provides a clean API for tool publishers.
  */
-@Service
-public class DatabaseFacade {
+public class DatabaseFacade implements DatabaseOperations {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseFacade.class);
 
     private final DatabaseReadRepository readRepo;
     private final DatabaseWriteRepository writeRepo;
-    private final DatabaseMetadataRepository metadataRepo;
+    private final DatabaseBackupService backupService;
     private final ExecutionPlanRepository executionPlanRepo;
     private final DatabaseCache cache;
     private final DatabaseHealthMonitor healthMonitor;
     private final QueryAuditLogger auditLogger;
     private final McpMetricsCollector metricsCollector;
 
-    public DatabaseFacade(DatabaseReadRepository readRepo,
-                          DatabaseWriteRepository writeRepo,
-                          DatabaseMetadataRepository metadataRepo,
-                          ExecutionPlanRepository executionPlanRepo,
-                          DatabaseCache cache,
-                          DatabaseHealthMonitor healthMonitor,
-                          QueryAuditLogger auditLogger,
-                          McpMetricsCollector metricsCollector) {
-        this.readRepo = readRepo;
-        this.writeRepo = writeRepo;
-        this.metadataRepo = metadataRepo;
-        this.executionPlanRepo = executionPlanRepo;
-        this.cache = cache;
-        this.healthMonitor = healthMonitor;
-        this.auditLogger = auditLogger;
-        this.metricsCollector = metricsCollector;
+    public DatabaseFacade(FacadeDependencies deps) {
+        this.readRepo = deps.readRepo();
+        this.writeRepo = deps.writeRepo();
+        this.backupService = deps.backupService();
+        this.executionPlanRepo = deps.executionPlanRepo();
+        this.cache = deps.cache();
+        this.healthMonitor = deps.healthMonitor();
+        this.auditLogger = deps.auditLogger();
+        this.metricsCollector = deps.metricsCollector();
     }
 
     // ─── Read Operations ──────────────────────────────────────────────────
@@ -107,21 +98,7 @@ public class DatabaseFacade {
 
     public PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
                                                     com.entropy.database.mcp.stream.SseStreamManager.QueryExecutor<PaginatedQueryResult> executor) {
-        long start = System.currentTimeMillis();
-        try {
-            PaginatedQueryResult result = readRepo.executeQueryWithSse(sql, maxRows, continuationToken, executor);
-            long duration = System.currentTimeMillis() - start;
-            healthMonitor.recordQuery(duration, result.rows().size(), true);
-            auditLogger.log("executeQuery", sql, result.rows().size(), duration, true);
-            metricsCollector.recordToolExecution("executeQuery", duration);
-            return result;
-        } catch (Exception e) {
-            long duration = System.currentTimeMillis() - start;
-            healthMonitor.recordQuery(duration, 0, false);
-            auditLogger.log("executeQuery", sql, 0, duration, false, e.getMessage());
-            metricsCollector.recordToolExecution("executeQuery", duration);
-            throw e;
-        }
+        return readRepo.executeQueryWithSse(sql, maxRows, continuationToken, executor);
     }
 
     public Map<String, Object> getDatabaseInfo() {
@@ -137,37 +114,23 @@ public class DatabaseFacade {
     // ─── Write Operations ─────────────────────────────────────────────────
 
     public Map<String, Object> executeDdl(String sql) {
-        long start = System.currentTimeMillis();
-        try {
-            Map<String, Object> result = writeRepo.executeDdl(sql);
-            long duration = System.currentTimeMillis() - start;
-            int affected = (int) result.getOrDefault("affectedRows", 0);
-            healthMonitor.recordQuery(duration, affected, true);
-            auditLogger.log("executeDdl", sql, affected, duration, true);
-            metricsCollector.recordToolExecution("executeDdl", duration);
-            cache.invalidateAll(); // Evict cache on DDL
-            return result;
-        } catch (Exception e) {
-            long duration = System.currentTimeMillis() - start;
-            healthMonitor.recordQuery(duration, 0, false);
-            auditLogger.log("executeDdl", sql, 0, duration, false, e.getMessage());
-            metricsCollector.recordToolExecution("executeDdl", duration);
-            throw e;
-        }
+        Map<String, Object> result = writeRepo.executeDdl(sql);
+        cache.invalidateAll(); // Evict cache on DDL
+        return result;
     }
 
     // ─── Metadata Operations ──────────────────────────────────────────────
 
     public Map<String, Object> backupSchema(String tableName) {
-        return metadataRepo.backupSchema(tableName);
+        return backupService.backupSchema(tableName);
     }
 
     public Map<String, Object> backupData(String tableName, int maxRows) {
-        return metadataRepo.backupData(tableName, maxRows);
+        return backupService.backupData(tableName, maxRows);
     }
 
     public Map<String, Object> diffSchema(String sourceTable, String targetTable) {
-        return metadataRepo.diffSchema(sourceTable, targetTable);
+        return backupService.diffSchema(sourceTable, targetTable);
     }
 
     // ─── Cache Operations ─────────────────────────────────────────────────

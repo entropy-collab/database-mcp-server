@@ -16,97 +16,54 @@
 package com.entropy.database.mcp.monitor;
 
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.Timer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
-import org.springframework.stereotype.Component;
 
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Map;
 
 /**
  * Prometheus-compatible metrics collector for MCP server.
- * Exposes: tool execution duration, cache hit rate, slow query count, connection pool usage.
+ * Exposes: tool execution duration, cache hit rate, slow query count, BYOK connection count, ETL success rate.
  */
-@Component
-@ConditionalOnClass(io.micrometer.core.instrument.MeterRegistry.class)
-public class McpMetricsCollector {
-
-    private static final Logger log = LoggerFactory.getLogger(McpMetricsCollector.class);
-
-    private final MeterRegistry registry;
-    private final ConcurrentHashMap<String, Timer> toolTimers = new ConcurrentHashMap<>();
-    private final AtomicLong slowQueryCount = new AtomicLong(0);
-    private final AtomicLong totalQueryCount = new AtomicLong(0);
-    private final AtomicLong cacheHitCount = new AtomicLong(0);
-    private final AtomicLong cacheMissCount = new AtomicLong(0);
-
-    public McpMetricsCollector(MeterRegistry registry) {
-        this.registry = registry;
-        log.info("McpMetricsCollector initialized");
-    }
+public interface McpMetricsCollector {
 
     /**
      * Record tool execution time.
      */
-    public void recordToolExecution(String toolName, long durationMs) {
-        totalQueryCount.incrementAndGet();
-        Timer timer = toolTimers.computeIfAbsent(toolName,
-            name -> Timer.builder("mcp.tool.execution.duration")
-                .tag("tool", name)
-                .description("Tool execution duration in milliseconds")
-                .register(registry));
-        timer.record(durationMs, TimeUnit.MILLISECONDS);
-
-        // Track P99 via cumulative timer
-        if (durationMs > 5000) {
-            slowQueryCount.incrementAndGet();
-            log.warn("Slow query detected: tool={}, duration={}ms", toolName, durationMs);
-        }
-    }
+    void recordToolExecution(String toolName, long durationMs);
 
     /**
      * Record cache hit.
      */
-    public void recordCacheHit() {
-        cacheHitCount.incrementAndGet();
-    }
+    void recordCacheHit();
 
     /**
      * Record cache miss.
      */
-    public void recordCacheMiss() {
-        cacheMissCount.incrementAndGet();
-    }
+    void recordCacheMiss();
+
+    /**
+     * Record BYOK connection created.
+     */
+    void recordByokConnectionCreated();
+
+    /**
+     * Record BYOK connection removed.
+     */
+    void recordByokConnectionRemoved();
+
+    /**
+     * Record ETL job submitted.
+     */
+    void recordEtlJobSubmitted();
+
+    /**
+     * Record ETL job completed.
+     *
+     * @param success true if job completed successfully, false if failed
+     */
+    void recordEtlJobCompleted(boolean success);
 
     /**
      * Get current metrics snapshot as Map.
      */
-    public java.util.Map<String, Object> getMetrics() {
-        java.util.Map<String, Object> metrics = new java.util.HashMap<>();
-
-        metrics.put("totalQueries", totalQueryCount.get());
-        metrics.put("slowQueryCount", slowQueryCount.get());
-
-        long hits = cacheHitCount.get();
-        long misses = cacheMissCount.get();
-        long total = hits + misses;
-        metrics.put("cacheHits", hits);
-        metrics.put("cacheMisses", misses);
-        metrics.put("cacheHitRate", total > 0 ? String.format("%.2f%%", hits * 100.0 / total) : "N/A");
-
-        // Per-tool P99 approximation
-        toolTimers.forEach((name, timer) -> {
-            double p95 = timer.percentile(0.95, java.util.concurrent.TimeUnit.MILLISECONDS);
-            double p99 = timer.percentile(0.99, java.util.concurrent.TimeUnit.MILLISECONDS);
-            metrics.put(name + ".p95_ms", String.format("%.0f", p95));
-            metrics.put(name + ".p99_ms", String.format("%.0f", p99));
-            metrics.put(name + ".count", timer.count());
-            metrics.put(name + ".total_time_ms", String.format("%.0f", timer.totalTime(java.util.concurrent.TimeUnit.MILLISECONDS)));
-        });
-
-        return metrics;
-    }
+    Map<String, Object> getMetrics();
 }

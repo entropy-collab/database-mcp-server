@@ -15,298 +15,138 @@
  */
 package com.entropy.database.mcp.cache;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.hash.BloomFilter;
-import com.google.common.hash.Funnel;
-import com.google.common.hash.Hashing;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 /**
- * Unified database cache with Caffeine.
- * Merges QueryCache and SchemaCache into a single high-performance cache.
- * 
- * Uses two internal caches:
- * - queryCache: For query results (smaller, shorter TTL)
- * - metadataCache: For schema metadata (larger, longer TTL)
+ * Multi-tier database cache interface.
+ * Provides hot/warm/cold cache layers with refresh-ahead support.
  */
-@Component
-public class DatabaseCache {
+public interface DatabaseCache {
 
-    private static final Logger log = LoggerFactory.getLogger(DatabaseCache.class);
+    /**
+     * Cache tier enumeration.
+     */
+    enum CacheTier {
+        HOT, WARM, COLD, QUERY, METADATA
+    }
 
-    private static final String QUERY_PREFIX = "query:";
-    private static final String METADATA_PREFIX = "meta:";
-    private static final String STATS_PREFIX = "stats:";
+    /**
+     * Get a value from the cache.
+     */
+    Object get(String key, CacheTier tier);
 
-    private Cache<String, Object> queryCache;
-    private Cache<String, Object> metadataCache;
-    private Cache<String, Long> accessTracker;
+    /**
+     * Put a value into the cache.
+     */
+    void put(String key, Object value, CacheTier tier);
 
-    /** Bloom filter for query cache key pre-check (schema.sql -> boolean). */
-    public BloomFilter<String> queryBloomFilter;
+    /**
+     * Evict a value from the cache.
+     */
+    void evict(String key, CacheTier tier);
 
-    private final int queryCacheSize;
-    private final int metadataCacheSize;
-    private final Duration queryTtl;
-    private final Duration metadataTtl;
+    /**
+     * Get a value from the query cache.
+     */
+    Object getQuery(String key);
 
-    public DatabaseCache(
-            @Value("${entropy.mcp.database.cache.max-size:1000}") int maxSize,
-            @Value("${entropy.mcp.database.cache.query-ttl:30s}") Duration queryTtl,
-            @Value("${entropy.mcp.database.cache.metadata-ttl:5m}") Duration metadataTtl) {
-        
-        this.queryTtl = queryTtl;
-        this.metadataTtl = metadataTtl;
-        this.queryCacheSize = maxSize / 10;  // Query cache is smaller
-        this.metadataCacheSize = maxSize;
-
-        try {
-            // Query result cache - smaller, faster expiration
-            this.queryCache = Caffeine.newBuilder()
-                .maximumSize(queryCacheSize)
-                .expireAfterAccess(queryTtl)
-                .recordStats()
-                .build();
-
-            // Metadata cache - larger, slower expiration
-            this.metadataCache = Caffeine.newBuilder()
-                .maximumSize(metadataCacheSize)
-                .expireAfterAccess(metadataTtl)
-                .recordStats()
-                .build();
-
-            // Access time tracker
-            this.accessTracker = Caffeine.newBuilder()
-                .maximumSize(maxSize * 2)
-                .expireAfterAccess(Duration.ofMinutes(10))
-                .build();
-
-            log.info("DatabaseCache initialized: querySize={}, metadataSize={}, queryTTL={}ms, metadataTTL={}ms",
-                queryCacheSize, metadataCacheSize, queryTtl.toMillis(), metadataTtl.toMillis());
-
-            // Initialize Bloom filter for query pre-check
-            this.queryBloomFilter = BloomFilter.create(
-                (Funnel<String>) (str, into) -> into.putString(str, StandardCharsets.UTF_8),
-                queryCacheSize * 10,  // expected inserts: 10x cache size
-                0.01                 // false positive rate: 1%
-            );
-
-        } catch (Exception e) {
-            log.error("Failed to initialize Caffeine cache, using fallback", e);
-            this.queryCache = null;
-            this.metadataCache = null;
-            this.accessTracker = null;
-            this.queryBloomFilter = BloomFilter.create(
-                (Funnel<String>) (str, into) -> into.putString(str, StandardCharsets.UTF_8),
-                1000,
-                0.01
-            );
+    /**
+     * Get a value from the query cache with a loader function.
+     * If the key is absent, the loader is called atomically to load the value.
+     */
+    default Object getQuery(String key, java.util.function.Function<String, Object> loader) {
+        Object cached = getQuery(key);
+        if (cached != null) {
+            return cached;
         }
-    }
-
-    // ─── Query Cache Operations ───────────────────────────────────────────
-
-    /**
-     * Get query result from cache.
-     */
-    public Object getQuery(String key) {
-        if (queryCache == null) return null;
-        return queryCache.getIfPresent(QUERY_PREFIX + key);
-    }
-
-    /**
-     * Put query result into cache.
-     */
-    public void putQuery(String key, Object value) {
-        if (queryCache == null) return;
-        queryCache.put(QUERY_PREFIX + key, value);
-        trackAccess(key);
-    }
-
-    /**
-     * Evict query result from cache.
-     */
-    public void evictQuery(String key) {
-        if (queryCache != null) {
-            queryCache.invalidate(QUERY_PREFIX + key);
-            accessTracker.invalidate(QUERY_PREFIX + key);
-        }
-    }
-
-    // ─── Metadata Cache Operations ────────────────────────────────────────
-
-    /**
-     * Get metadata from cache.
-     */
-    public Object getMetadata(String key) {
-        if (metadataCache == null) return null;
-        return metadataCache.getIfPresent(METADATA_PREFIX + key);
-    }
-
-    /**
-     * Get or compute metadata with caching.
-     */
-    public <T> T getMetadata(String key, java.util.function.Function<String, T> loader) {
-        if (metadataCache == null) {
+        if (loader != null) {
             return loader.apply(key);
         }
-        @SuppressWarnings("unchecked")
-        T result = (T) metadataCache.get(METADATA_PREFIX + key, loader);
-        trackAccess(key);
-        return result;
+        return null;
     }
 
     /**
-     * Put metadata into cache.
+     * Put a value into the query cache.
      */
-    public void putMetadata(String key, Object value) {
-        if (metadataCache == null) return;
-        metadataCache.put(METADATA_PREFIX + key, value);
-        trackAccess(key);
-    }
+    void putQuery(String key, Object value);
 
     /**
-     * Evict metadata from cache.
+     * Evict a value from the query cache.
      */
-    public void evictMetadata(String key) {
-        if (metadataCache != null) {
-            metadataCache.invalidate(METADATA_PREFIX + key);
-            accessTracker.invalidate(METADATA_PREFIX + key);
-        }
-    }
-
-    // ─── Stats Cache Operations ───────────────────────────────────────────
+    void evictQuery(String key);
 
     /**
-     * Get stats from cache.
+     * Get a value from the metadata cache.
      */
-    public Object getStats(String key) {
-        if (metadataCache == null) return null;
-        return metadataCache.getIfPresent(STATS_PREFIX + key);
-    }
+    Object getMetadata(String key);
 
     /**
-     * Put stats into cache.
+     * Get a value from the metadata cache with a loader function.
      */
-    public void putStats(String key, Object value) {
-        if (metadataCache == null) return;
-        metadataCache.put(STATS_PREFIX + key, value);
-    }
-
-    // ─── Bulk Operations ──────────────────────────────────────────────────
+    <T> T getMetadata(String key, java.util.function.Function<String, T> loader);
 
     /**
-     * Clear all cache entries.
+     * Put a value into the metadata cache.
      */
-    public void clear() {
-        if (queryCache != null) queryCache.invalidateAll();
-        if (metadataCache != null) metadataCache.invalidateAll();
-        if (accessTracker != null) accessTracker.invalidateAll();
-        log.debug("DatabaseCache cleared");
-    }
+    void putMetadata(String key, Object value);
 
     /**
-     * Invalidate all caches (for DDL operations).
+     * Evict a value from the metadata cache.
      */
-    public void invalidateAll() {
-        clear();
-    }
-
-    // ─── Statistics ───────────────────────────────────────────────────────
+    void evictMetadata(String key);
 
     /**
-     * Get total cache size.
+     * Clear all caches.
      */
-    public long size() {
-        long querySize = queryCache != null ? queryCache.estimatedSize() : 0;
-        long metaSize = metadataCache != null ? metadataCache.estimatedSize() : 0;
-        return querySize + metaSize;
-    }
+    void clear();
 
     /**
-     * Get query cache size.
+     * Invalidate all cache entries.
      */
-    public long queryCacheSize() {
-        return queryCache != null ? queryCache.estimatedSize() : 0;
-    }
+    void invalidateAll();
 
     /**
-     * Get metadata cache size.
+     * Shutdown the cache and release resources.
      */
-    public long metadataCacheSize() {
-        return metadataCache != null ? metadataCache.estimatedSize() : 0;
-    }
+    void shutdown();
 
     /**
-     * Get maximum cache size.
+     * Get the total size of all caches.
      */
-    public int maxSize() {
-        return queryCacheSize + metadataCacheSize;
-    }
+    long size();
 
     /**
-     * Get query cache hit rate.
+     * Get the query cache size.
      */
-    public double queryHitRate() {
-        if (queryCache == null) return 0.0;
-        return queryCache.stats().hitRate();
-    }
+    long queryCacheSize();
 
     /**
-     * Get metadata cache hit rate.
+     * Get the metadata cache size.
      */
-    public double metadataHitRate() {
-        if (metadataCache == null) return 0.0;
-        return metadataCache.stats().hitRate();
-    }
+    long metadataCacheSize();
 
     /**
-     * Get detailed cache statistics.
+     * Get the maximum cache size.
      */
-    public Map<String, Object> getStatistics() {
-        Map<String, Object> stats = new java.util.HashMap<>();
-        
-        stats.put("totalSize", size());
-        stats.put("queryCacheSize", queryCacheSize());
-        stats.put("metadataCacheSize", metadataCacheSize());
-        stats.put("maxSize", maxSize());
-        stats.put("queryTTL", queryTtl.toMillis() / 1000 + "s");
-        stats.put("metadataTTL", metadataTtl.toMillis() / 1000 + "s");
-        
-        if (queryCache != null) {
-            var qs = queryCache.stats();
-            stats.put("queryHits", qs.hitCount());
-            stats.put("queryMisses", qs.missCount());
-            stats.put("queryHitRate", String.format("%.2f%%", qs.hitRate() * 100));
-            stats.put("queryEvictions", qs.evictionCount());
-        }
-        
-        if (metadataCache != null) {
-            var ms = metadataCache.stats();
-            stats.put("metadataHits", ms.hitCount());
-            stats.put("metadataMisses", ms.missCount());
-            stats.put("metadataHitRate", String.format("%.2f%%", ms.hitRate() * 100));
-            stats.put("metadataEvictions", ms.evictionCount());
-        }
+    int maxSize();
 
-        return stats;
-    }
+    /**
+     * Get the query cache hit rate.
+     */
+    double queryHitRate();
 
-    // ─── Private Helpers ──────────────────────────────────────────────────
+    /**
+     * Get the metadata cache hit rate.
+     */
+    double metadataHitRate();
 
-    private void trackAccess(String key) {
-        if (accessTracker != null) {
-            accessTracker.put(key, System.currentTimeMillis());
-        }
-    }
+    /**
+     * Get cache statistics.
+     */
+    java.util.Map<String, Object> getStatistics();
+
+    /**
+     * Get the query bloom filter.
+     */
+    BloomFilter<String> getQueryBloomFilter();
 }

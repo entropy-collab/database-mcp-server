@@ -28,6 +28,7 @@ import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -125,22 +126,26 @@ public class FederatedQueryGateway {
         Map<String, Object> results = new ConcurrentHashMap<>();
         long startTime = System.currentTimeMillis();
 
-        for (String dbId : databases) {
-            try {
-                List<Map<String, Object>> rows = executeQuery(dbId, query, maxRows, null);
-                results.put(dbId, Map.of(
-                    "status", "success",
-                    "rowCount", rows.size(),
-                    "data", rows
-                ));
-            } catch (Exception e) {
-                log.warn("Failed to query database {}: {}", dbId, e.getMessage());
-                results.put(dbId, Map.of(
-                    "status", "error",
-                    "error", e.getMessage()
-                ));
-            }
-        }
+        List<CompletableFuture<Void>> futures = databases.stream()
+            .map(dbId -> CompletableFuture.runAsync(() -> {
+                try {
+                    List<Map<String, Object>> rows = executeQuery(dbId, query, maxRows, null);
+                    results.put(dbId, Map.of(
+                        "status", "success",
+                        "rowCount", rows.size(),
+                        "data", rows
+                    ));
+                } catch (Exception e) {
+                    log.warn("Failed to query database {}: {}", dbId, e.getMessage());
+                    results.put(dbId, Map.of(
+                        "status", "error",
+                        "error", e.getMessage()
+                    ));
+                }
+            }))
+            .collect(Collectors.toList());
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
         return Map.of(
             "databases", databases,
@@ -194,24 +199,28 @@ public class FederatedQueryGateway {
         Map<String, Object> results = new ConcurrentHashMap<>();
         long startTime = System.currentTimeMillis();
 
-        for (Map.Entry<String, String> entry : databaseQueries.entrySet()) {
-            String dbId = entry.getKey();
-            String sql = entry.getValue();
-            try {
-                List<Map<String, Object>> rows = executeQuery(dbId, sql, null, null);
-                results.put(dbId, Map.of(
-                    "status", "success",
-                    "rowCount", rows.size(),
-                    "data", rows
-                ));
-            } catch (Exception e) {
-                log.warn("Failed to query database {}: {}", dbId, e.getMessage());
-                results.put(dbId, Map.of(
-                    "status", "error",
-                    "error", e.getMessage()
-                ));
-            }
-        }
+        List<CompletableFuture<Void>> futures = databaseQueries.entrySet().stream()
+            .map(entry -> CompletableFuture.runAsync(() -> {
+                String dbId = entry.getKey();
+                String sql = entry.getValue();
+                try {
+                    List<Map<String, Object>> rows = executeQuery(dbId, sql, null, null);
+                    results.put(dbId, Map.of(
+                        "status", "success",
+                        "rowCount", rows.size(),
+                        "data", rows
+                    ));
+                } catch (Exception e) {
+                    log.warn("Failed to query database {}: {}", dbId, e.getMessage());
+                    results.put(dbId, Map.of(
+                        "status", "error",
+                        "error", e.getMessage()
+                    ));
+                }
+            }))
+            .collect(Collectors.toList());
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
         results.put("executionTimeMs", System.currentTimeMillis() - startTime);
         return results;
@@ -230,16 +239,26 @@ public class FederatedQueryGateway {
         try (var conn = ds.getConnection()) {
             var meta = conn.getMetaData();
             String url = meta.getURL();
+            String user = meta.getUserName();
 
             // Extract meaningful ID from URL
             if (url.contains("@")) {
                 String hostPart = url.substring(url.lastIndexOf("@") + 1);
-                if (hostPart.contains(":")) {
-                    return hostPart.substring(0, hostPart.indexOf(":"));
+                String dbPart = "";
+                if (hostPart.contains("/")) {
+                    dbPart = hostPart.substring(hostPart.indexOf("/") + 1);
+                    hostPart = hostPart.substring(0, hostPart.indexOf("/"));
                 }
-                return hostPart.split("/")[0];
+                if (hostPart.contains(":")) {
+                    hostPart = hostPart.substring(0, hostPart.indexOf(":"));
+                }
+                // Include username to make ID unique for different users on same host
+                if (user != null && !user.isBlank()) {
+                    return hostPart + "_" + user.toLowerCase();
+                }
+                return hostPart + (dbPart.isBlank() ? "" : "_" + dbPart);
             }
-            return meta.getDatabaseProductName().toLowerCase();
+            return meta.getDatabaseProductName().toLowerCase() + "_" + (user != null ? user.toLowerCase() : "unknown");
         } catch (Exception e) {
             return "unknown-" + System.identityHashCode(ds);
         }

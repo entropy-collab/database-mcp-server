@@ -1,0 +1,134 @@
+/*
+ * Copyright 2024-2026 Embabel Pty Ltd.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.entropy.database.mcp.audit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.lang.Nullable;
+import org.springframework.stereotype.Repository;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.Instant;
+import java.util.List;
+
+/**
+ * Audit log repository for persisting query audit entries to database.
+ */
+@Repository
+public class AuditLogRepository {
+
+    private static final Logger log = LoggerFactory.getLogger(AuditLogRepository.class);
+
+    private final JdbcTemplate jdbcTemplate;
+
+    public AuditLogRepository(JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    /**
+     * Insert a new audit log entry.
+     */
+    public void insert(AuditLogEntity entity) {
+        try {
+            jdbcTemplate.update(
+                "INSERT INTO audit_log (tool, sql, rows, duration_ms, success, error, timestamp, connection_key) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                entity.tool(),
+                truncate(entity.sql(), 2000),
+                entity.rows(),
+                entity.durationMs(),
+                entity.success(),
+                truncate(entity.error(), 1000),
+                entity.timestamp(),
+                entity.connectionKey()
+            );
+        } catch (Exception e) {
+            log.warn("Failed to persist audit log entry: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Query audit logs with optional filters.
+     */
+    public List<AuditLogEntity> query(
+            @Nullable String tool,
+            @Nullable String connectionKey,
+            @Nullable Instant startTime,
+            @Nullable Instant endTime,
+            int limit) {
+        StringBuilder sql = new StringBuilder("SELECT id, tool, sql, rows, duration_ms, success, error, timestamp, connection_key FROM audit_log WHERE 1=1");
+        var params = new java.util.ArrayList<>();
+
+        if (tool != null && !tool.isBlank()) {
+            sql.append(" AND tool = ?");
+            params.add(tool);
+        }
+        if (connectionKey != null && !connectionKey.isBlank()) {
+            sql.append(" AND connection_key = ?");
+            params.add(connectionKey);
+        }
+        if (startTime != null) {
+            sql.append(" AND timestamp >= ?");
+            params.add(startTime);
+        }
+        if (endTime != null) {
+            sql.append(" AND timestamp <= ?");
+            params.add(endTime);
+        }
+
+        sql.append(" ORDER BY timestamp DESC LIMIT ?");
+        params.add(limit);
+
+        return jdbcTemplate.query(sql.toString(), params.toArray(), new AuditLogRowMapper());
+    }
+
+    /**
+     * Delete audit logs older than the specified timestamp.
+     */
+    public int deleteOlderThan(Instant before) {
+        try {
+            return jdbcTemplate.update("DELETE FROM audit_log WHERE timestamp < ?", before);
+        } catch (Exception e) {
+            log.warn("Failed to delete old audit logs: {}", e.getMessage());
+            return 0;
+        }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return null;
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
+    private static class AuditLogRowMapper implements RowMapper<AuditLogEntity> {
+        @Override
+        public AuditLogEntity mapRow(ResultSet rs, int rowNum) throws SQLException {
+            return new AuditLogEntity(
+                rs.getLong("id"),
+                rs.getString("tool"),
+                rs.getString("sql"),
+                rs.getInt("rows"),
+                rs.getLong("duration_ms"),
+                rs.getBoolean("success"),
+                rs.getString("error"),
+                rs.getTimestamp("timestamp").toInstant(),
+                rs.getString("connection_key")
+            );
+        }
+    }
+}

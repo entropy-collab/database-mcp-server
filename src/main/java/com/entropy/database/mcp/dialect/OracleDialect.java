@@ -15,10 +15,13 @@
  */
 package com.entropy.database.mcp.dialect;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.entropy.database.mcp.properties.DatabaseProperties;
+
 /**
  * Oracle-specific dialect with EXPLAIN PLAN support.
  */
-public class OracleDialect implements DatabaseDialect {
+public class OracleDialect extends AbstractDatabaseDialect {
 
     @Override
     public String quote(String name) {
@@ -153,5 +156,228 @@ public class OracleDialect implements DatabaseDialect {
             CONNECT BY PRIOR id = parent_id
             ORDER BY sid, id
             """;
+    }
+
+    @Override
+    public String searchTablesQuery(String keyword) {
+        if (keyword != null && !keyword.isBlank()) {
+            return """
+                SELECT owner AS schema_name, table_name, num_rows AS row_count
+                FROM all_tables
+                WHERE UPPER(table_name) LIKE UPPER(?)
+                ORDER BY owner, table_name
+                """;
+        }
+        return """
+            SELECT owner AS schema_name, table_name, num_rows AS row_count
+            FROM all_tables
+            ORDER BY owner, table_name
+            """;
+    }
+
+    @Override
+    public String connectionTestQuery() {
+        return "SELECT 1 FROM DUAL";
+    }
+
+    /**
+     * SQL to get the current database user.
+     */
+    public String currentUserQuery() {
+        return "SELECT USER FROM DUAL";
+    }
+
+    /**
+     * SQL to get DDL for a table using DBMS_METADATA.
+     */
+    public String getTableDdlQuery(String tableName, String schema) {
+        return """
+            SELECT DBMS_METADATA.GET_DDL('TABLE', :table, :schema) AS ddl
+            FROM DUAL
+            """;
+    }
+
+    /**
+     * Validate Oracle identifier (table name, column name, etc.).
+     */
+    public boolean isValidIdentifier(String name) {
+        if (name == null || name.isBlank()) {
+            return false;
+        }
+        return name.matches("[A-Za-z][A-Za-z0-9_$#]*");
+    }
+
+    @Override
+    public String normalizeTableName(String table) {
+        return table.toUpperCase();
+    }
+
+    @Override
+    public String killSessionSql(String sessionId, String mode) {
+        return "ALTER SYSTEM KILL SESSION '" + sessionId + "' " + mode;
+    }
+
+    @Override
+    public String listActiveSessionsSql() {
+        return """
+                SELECT s.sid, s.serial#, s.username, s.status, s.machine, s.program,
+                       s.logon_time, s.last_call_et, s.event, s.wait_class, s.sql_id
+                FROM v$session s
+                WHERE s.type = 'USER'
+                ORDER BY s.sid
+                """;
+    }
+
+    @Override
+    public String showLocksSql() {
+        return """
+                SELECT l.sid, l.serial#, l.type, l.id1, l.id2, l.lmode, l.request,
+                       l.ctime, s.username, s.status, s.event
+                FROM v$lock l
+                JOIN v$session s ON l.sid = s.sid
+                WHERE s.type = 'USER'
+                ORDER BY l.sid
+                """;
+    }
+
+    @Override
+    public String showBlockingTreeSql() {
+        return """
+                SELECT s.sid AS waiter_sid, s.serial# AS waiter_serial,
+                       s.username AS waiter_user, s.event AS waiter_event,
+                       b.sid AS blocker_sid, b.serial# AS blocker_serial,
+                       b.username AS blocker_user, b.event AS blocker_event
+                FROM v$session s
+                JOIN v$lock l1 ON s.sid = l1.sid
+                JOIN v$lock l2 ON l1.id1 = l2.id1 AND l1.id2 = l2.id2
+                JOIN v$session b ON l2.sid = b.sid
+                WHERE s.type = 'USER'
+                  AND b.type = 'USER'
+                  AND l1.request > 0
+                  AND l2.lmode > 0
+                """;
+    }
+
+    @Override
+    public String listTablespacesSql() {
+        return """
+                SELECT tablespace_name, contents, extent_management, status,
+                       round(bytes / 1024 / 1024, 2) AS size_mb,
+                       round((bytes - NVL(free_space, 0)) / 1024 / 1024, 2) AS used_mb
+                FROM dba_tablespaces
+                ORDER BY tablespace_name
+                """;
+    }
+
+    @Override
+    public String listDataFilesSql() {
+        return """
+                SELECT file_name, tablespace_name, bytes, blocks, status,
+                       autoextensible, maxbytes, increment_by, round(maxbytes / 1024 / 1024, 2) AS max_mb
+                FROM dba_data_files
+                ORDER BY tablespace_name, file_name
+                """;
+    }
+
+    @Override
+    public String estimateTableSizeSql(String tableName, String schema) {
+        return """
+                SELECT segment_name, segment_type,
+                       round(sum(bytes) / 1024 / 1024, 2) AS size_mb,
+                       count(*) AS extents
+                FROM dba_segments
+                WHERE segment_name = ?
+                  AND segment_type IN ('TABLE', 'TABLE PARTITION')
+                GROUP BY segment_name, segment_type
+                """;
+    }
+
+    @Override
+    public String listInvalidObjectsSql(String schema) {
+        return """
+                SELECT owner, object_name, object_type, status
+                FROM dba_objects
+                WHERE status = 'INVALID'
+                  AND owner = COALESCE(?, USER)
+                ORDER BY owner, object_type, object_name
+                """;
+    }
+
+    @Override
+    public String gatherTableStatsSql(String tableName, String schema) {
+        return """
+                BEGIN
+                    DBMS_STATS.GATHER_TABLE_STATS(
+                        ownname => COALESCE(?, USER),
+                        tabname => ?,
+                        estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE,
+                        method_opt => 'FOR ALL COLUMNS SIZE AUTO',
+                        cascade => TRUE
+                    );
+                END;
+                """;
+    }
+
+    @Override
+    public String showIndexStatusSql(String tableName, String schema) {
+        return """
+                SELECT i.owner, i.table_name, i.index_name, i.status, i.uniqueness,
+                       i.last_analyzed, i.num_rows, i.distinct_keys
+                FROM dba_indexes i
+                WHERE i.owner = COALESCE(?, USER)
+                  AND i.table_name = COALESCE(?, i.table_name)
+                ORDER BY i.owner, i.table_name, i.index_name
+                """;
+    }
+
+    @Override
+    public String flashbackQuerySql(String tableName) {
+        return "SELECT 'SELECT * FROM %s AS OF TIMESTAMP TO_TIMESTAMP(?, ''YYYY-MM-DD HH24:MI:SS'')' AS sql_template FROM dual"
+                .formatted(quote(tableName));
+    }
+
+    @Override
+    public String showUndoUsageSql() {
+        return """
+                SELECT tablespace_name, round(sum(bytes) / 1024 / 1024, 2) AS size_mb,
+                       round(sum(bytes) / 1024 / 1024, 2) - round(sum(nvl(free_space, 0)) / 1024 / 1024, 2) AS used_mb,
+                       round(sum(nvl(free_space, 0)) / 1024 / 1024, 2) AS free_mb,
+                       round((sum(bytes) - sum(nvl(free_space, 0))) / sum(bytes) * 100, 2) AS used_pct
+                FROM dba_undo_extents
+                GROUP BY tablespace_name
+                ORDER BY tablespace_name
+                """;
+    }
+
+    @Override
+    public String listCurrentPrivilegesSql() {
+        return """
+                SELECT privilege, admin_option, grantable
+                FROM user_sys_privs
+                UNION ALL
+                SELECT privilege, admin_option, grantable
+                FROM user_tab_privs
+                ORDER BY privilege
+                """;
+    }
+
+    @Override
+    public String listGrantsSql(String userName) {
+        return """
+                SELECT grantee, privilege, admin_option, grantable
+                FROM dba_tab_privs
+                WHERE grantee = ?
+                UNION ALL
+                SELECT grantee, privilege, admin_option, grantable
+                FROM dba_sys_privs
+                WHERE grantee = ?
+                ORDER BY grantee, privilege
+                """;
+    }
+
+    @Override
+    public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
+        config.addDataSourceProperty("oracle.jdbc.ReadTimeout", "30000");
+        config.addDataSourceProperty("oracle.net.CONNECT_TIMEOUT", "10000");
     }
 }
