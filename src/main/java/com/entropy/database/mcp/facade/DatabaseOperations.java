@@ -24,54 +24,56 @@ import java.util.Map;
 
 /**
  * Common interface for database facade operations.
- * Implemented by both primary and BYOK facade implementations.
+ * All operations require an explicit connection name; there is no default connection.
  */
 public interface DatabaseOperations {
 
     // ─── Read Operations ──────────────────────────────────────────────────
 
-    List<Map<String, Object>> listTables(String schema);
+    List<Map<String, Object>> listTables(String schema, String connection);
 
-    List<Map<String, Object>> searchTables(String keyword);
+    List<Map<String, Object>> searchTables(String keyword, String connection);
 
-    List<String> listSchemas();
+    List<String> listSchemas(String connection);
 
-    Map<String, Object> describeTable(String table, String schema);
+    Map<String, Object> describeTable(String table, String schema, String connection);
 
-    List<Map<String, Object>> listIndexes(String table, String schema);
+    List<Map<String, Object>> listIndexes(String table, String schema, String connection);
 
-    List<Map<String, Object>> listViews(String schema);
+    List<Map<String, Object>> listViews(String schema, String connection);
 
-    List<Map<String, Object>> listSequences(String schema);
+    List<Map<String, Object>> listSequences(String schema, String connection);
 
-    PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken);
+    PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken, String connection);
 
     PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
-                                             SseStreamManager.QueryExecutor<PaginatedQueryResult> executor);
+                                             SseStreamManager.QueryExecutor<PaginatedQueryResult> executor, String connection);
 
-    Map<String, Object> getDatabaseInfo();
+    List<Map<String, Object>> executeNamedQuery(String sql, Map<String, Object> params, String connection);
+
+    Map<String, Object> getDatabaseInfo(String connection);
 
     // ─── Execution Plan ────────────────────────────────────────────────────
 
-    PlanAnalysis explainPlan(String sql);
+    PlanAnalysis explainPlan(String sql, String connection);
 
     // ─── Write Operations ──────────────────────────────────────────────────
 
-    Map<String, Object> executeDdl(String sql);
+    Map<String, Object> executeDdl(String sql, String connection);
 
-    // ─── Metadata Operations ───────────────────────────────────────────────
+    // ─── Metadata Operations ────────────────────────────────────────────────
 
-    Map<String, Object> backupSchema(String tableName);
+    Map<String, Object> backupSchema(String tableName, String connection);
 
-    Map<String, Object> backupData(String tableName, int maxRows);
+    Map<String, Object> backupData(String tableName, int maxRows, String connection);
 
-    Map<String, Object> diffSchema(String sourceTable, String targetTable);
+    Map<String, Object> diffSchema(String sourceTable, String targetTable, String connection);
 
     // ─── Cache Operations ──────────────────────────────────────────────────
 
-    void clearCache();
+    void clearCache(String connection);
 
     // ─── Statistics ────────────────────────────────────────────────────────
 
-    Map<String, Object> getStatistics();
+    Map<String, Object> getStatistics(String connection);
 }

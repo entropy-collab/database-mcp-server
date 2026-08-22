@@ -17,6 +17,7 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.util.ConnectionUtils;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,12 +34,8 @@ import java.util.Map;
 public class ResourceTools {
 
     private static final Logger log = LoggerFactory.getLogger(ResourceTools.class);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    private static final Map<String, String> TEMPLATES = Map.of(
-            "query_by_id", "SELECT * FROM {table} WHERE {idColumn} = :id",
-            "list_by_page", "SELECT * FROM {table} LIMIT :limit OFFSET :offset",
-            "count_by_condition", "SELECT COUNT(*) FROM {table} WHERE {condition}"
-    );
 
     private final RoutingDatabaseFacade routingFacade;
 
@@ -53,9 +50,9 @@ public class ResourceTools {
             mimeType = "text/plain"
     )
     public McpSchema.ReadResourceResult getQueryTemplate(String templateName) {
-        String template = TEMPLATES.get(templateName);
+        String template = ToolParams.TEMPLATES.get(templateName);
         if (template == null) {
-            String available = String.join(", ", TEMPLATES.keySet());
+            String available = String.join(", ", ToolParams.TEMPLATES.keySet());
             return new McpSchema.ReadResourceResult(List.of(
                     new McpSchema.TextResourceContents(
                             "query-templates://" + templateName,
@@ -81,21 +78,20 @@ public class ResourceTools {
     )
     public McpSchema.ReadResourceResult getTables(String connection) {
         try {
-            var cp = ConnectionUtils.parseConnection(connection);
-            var tables = routingFacade.listTables(null, cp);
-            String json = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(tables);
+            var tables = routingFacade.listTables(null, connection);
+            String json = OBJECT_MAPPER.writeValueAsString(tables);
             return new McpSchema.ReadResourceResult(List.of(
                     new McpSchema.TextResourceContents(
-                            "schema://tables/" + (connection != null ? connection : "primary"),
+                            "schema://tables/" + connection,
                             "application/json",
                             json
                     )
             ));
         } catch (Exception e) {
-            log.warn("Failed to list tables: {}", e.getMessage());
+            log.warn("Failed to list tables", e);
             return new McpSchema.ReadResourceResult(List.of(
                     new McpSchema.TextResourceContents(
-                            "schema://tables/" + (connection != null ? connection : "primary"),
+                            "schema://tables/" + connection,
                             "application/json",
                             "{\"error\": \"" + e.getMessage() + "\"}"
                     )

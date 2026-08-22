@@ -15,40 +15,39 @@
  */
 package com.entropy.database.mcp.config;
 
-import com.entropy.database.mcp.byok.ByokInfrastructureFactory;
-import com.entropy.database.mcp.byok.ConnectionPoolFactory;
+import com.entropy.database.mcp.audit.SqlAuditService;
+import com.entropy.database.mcp.byok.ByokDataSourceFactory;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.DynamicDataSourceManagerImpl;
-import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.etl.JobExecutionEngine;
-import com.entropy.database.mcp.facade.DatabaseFacade;
-import com.entropy.database.mcp.facade.FacadeDependencies;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.properties.ByokProperties;
 import com.entropy.database.mcp.properties.DatabaseProperties;
-import com.entropy.database.mcp.repository.DatabaseReadRepository;
-import com.entropy.database.mcp.repository.DatabaseWriteRepository;
-import com.entropy.database.mcp.repository.ExecutionPlanRepository;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.security.SqlValidatorImpl;
 import com.entropy.database.mcp.service.DatabaseBackupService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.lang.Nullable;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
-import javax.sql.DataSource;
+import java.util.function.Supplier;
 
 /**
  * Database configuration for MCP server.
+ * Uses Supplier-based dependency injection for shared components,
+ * following Spring's DataSourceBuilder pattern.
  */
 @Configuration
 @EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class})
 public class DatabaseConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(DatabaseConfig.class);
 
     @Bean
     @ConditionalOnMissingBean
@@ -94,108 +93,59 @@ public class DatabaseConfig {
 
     @Bean
     @ConditionalOnMissingBean
-    public DatabaseDialect databaseDialect(DialectResolver dialectResolver, DatabaseProperties properties, DataSource dataSource) {
-        return dialectResolver.resolve(properties.dialect(), dataSource);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean(name = "primaryJdbcTemplate")
-    public JdbcTemplate primaryJdbcTemplate(DataSource primaryDataSource) {
-        return new JdbcTemplate(primaryDataSource);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
     public SqlValidator sqlValidator(DatabaseProperties properties) {
         return new SqlValidatorImpl(properties);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public NamedParameterJdbcTemplate namedParameterJdbcTemplate(JdbcTemplate jdbcTemplate) {
-        return new NamedParameterJdbcTemplate(jdbcTemplate);
+    public RoutingDatabaseFacade routingDatabaseFacade(DynamicDataSourceManager dynamicDataSourceManager) {
+        return new RoutingDatabaseFacade(dynamicDataSourceManager);
+    }
+
+    // ─── Unified BYOK Factory ──────────────────────────────────────────────
+    //
+    // Replaces: ConnectionPoolFactory + ByokInfrastructureFactory
+    // Uses Supplier<T> for shared dependencies to follow Spring DataSourceBuilder pattern.
+    // Suppliers defer resolution until runtime connection creation, avoiding circular init.
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ByokDataSourceFactory byokDataSourceFactory(
+            SqlValidator sqlValidator,
+            DataMaskingService maskingService,
+            @Nullable com.entropy.database.mcp.audit.AuditLogRepository auditLogRepository,
+            DatabaseProperties properties,
+            ByokProperties byokProperties,
+            CacheConfig cacheConfig,
+            SqlAuditService sqlAuditService,
+            QueryConfig queryConfig) {
+        // Use Suppliers to defer shared-component resolution until factory.create() is called.
+        // This avoids circular dependency during bean initialization.
+        Supplier<SqlValidator> sv = () -> sqlValidator;
+        Supplier<DataMaskingService> ms = () -> maskingService;
+        Supplier<com.entropy.database.mcp.audit.AuditLogRepository> ar = () -> auditLogRepository;
+        Supplier<DatabaseProperties> dp = () -> properties;
+        Supplier<ByokProperties> bp = () -> byokProperties;
+        Supplier<CacheConfig> cc = () -> cacheConfig;
+        Supplier<SqlAuditService> sas = () -> sqlAuditService;
+        int fetchSize = queryConfig != null ? queryConfig.fetchSize() : 100;
+
+        return new ByokDataSourceFactory(sv, ms, ar, dp, bp, cc, sas, fetchSize);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public DatabaseWriteRepository databaseWriteRepository(JdbcTemplate primaryJdbcTemplate,
-                                                            SqlValidator sqlValidator) {
-        return new DatabaseWriteRepository(primaryJdbcTemplate, sqlValidator);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public DatabaseReadRepository databaseReadRepository(JdbcTemplate primaryJdbcTemplate,
-                                                          DatabaseDialect dialect,
-                                                          SqlValidator sqlValidator,
-                                                          com.entropy.database.mcp.cache.DatabaseCache cache,
-                                                          DataMaskingService maskingService,
-                                                          QueryConfig queryConfig) {
-        return new DatabaseReadRepository(
-                primaryJdbcTemplate, dialect, sqlValidator, cache, maskingService,
-                queryConfig.maxRows(), queryConfig.maxResultRows(), queryConfig.fetchSize(), null);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public DatabaseFacade databaseFacade(DatabaseReadRepository readRepo,
-                                         DatabaseWriteRepository writeRepo,
-                                         DatabaseBackupService backupService,
-                                         ExecutionPlanRepository executionPlanRepo,
-                                         com.entropy.database.mcp.cache.DatabaseCache cache,
-                                         com.entropy.database.mcp.monitor.DatabaseHealthMonitor healthMonitor,
-                                         com.entropy.database.mcp.security.QueryAuditLogger auditLogger,
-                                         com.entropy.database.mcp.monitor.McpMetricsCollector metricsCollector) {
-        var deps = new FacadeDependencies(readRepo, writeRepo, backupService, executionPlanRepo,
-                cache, healthMonitor, auditLogger, metricsCollector);
-        return new DatabaseFacade(deps);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public RoutingDatabaseFacade routingDatabaseFacade(DatabaseFacade primaryFacade,
-                                                       DynamicDataSourceManager dynamicDataSourceManager) {
-        return new RoutingDatabaseFacade(primaryFacade, dynamicDataSourceManager);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public ByokInfrastructureFactory byokInfrastructureFactory(SqlValidator sqlValidator,
-                                                                DataMaskingService maskingService,
-                                                                com.entropy.database.mcp.audit.AuditLogRepository auditLogRepository,
-                                                                DatabaseProperties properties,
-                                                                CacheConfig cacheConfig) {
-        return new ByokInfrastructureFactory(sqlValidator, maskingService, auditLogRepository, properties, cacheConfig);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public ConnectionPoolFactory connectionPoolFactory(ByokProperties byokProperties,
-                                                       DatabaseProperties databaseProperties) {
-        return new ConnectionPoolFactory(byokProperties, databaseProperties);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    public DynamicDataSourceManager dynamicDataSourceManager(DialectResolver dialectResolver,
-                                                              ByokInfrastructureFactory infrastructureFactory,
-                                                              ConnectionPoolFactory connectionPoolFactory,
-                                                              DataSource primaryDataSource,
-                                                              QueryConfig queryConfig,
-                                                              DatabaseDialect databaseDialect,
-                                                              com.entropy.database.mcp.properties.ByokProperties byokProperties,
-                                                              com.entropy.database.mcp.monitor.McpMetricsCollector metricsCollector) {
-        int fetchSize = queryConfig.fetchSize();
+    public DynamicDataSourceManager dynamicDataSourceManager(
+            DialectResolver dialectResolver,
+            ByokDataSourceFactory dataSourceFactory,
+            ByokProperties byokProperties,
+            com.entropy.database.mcp.monitor.McpMetricsCollector metricsCollector) {
         var deps = new DynamicDataSourceManagerImpl.Dependencies(
-                dialectResolver,
-                infrastructureFactory, connectionPoolFactory, byokProperties,
-                fetchSize, metricsCollector
-        );
-        DynamicDataSourceManagerImpl manager = new DynamicDataSourceManagerImpl(deps);
-
-        // Register primary datasource as a special BYOK connection (wrap existing Spring-managed datasource)
-        manager.registerExisting("primary", primaryDataSource, databaseDialect);
-
+                dialectResolver, dataSourceFactory, byokProperties, metricsCollector);
+        var manager = new DynamicDataSourceManagerImpl(deps);
+        log.info("DynamicDataSourceManager initialized without default datasource. "
+                + "Use createNamedConnection to register BYOK connections.");
         return manager;
     }
 

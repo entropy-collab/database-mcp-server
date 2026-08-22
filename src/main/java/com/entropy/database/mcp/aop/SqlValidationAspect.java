@@ -35,11 +35,11 @@ public class SqlValidationAspect {
         this.sqlValidator = sqlValidator;
     }
 
-    @Around("(execution(* com.entropy.database.mcp.facade.DatabaseFacade.execute*(..)) || " +
-            "execution(* com.entropy.database.mcp.facade.DatabaseFacade.explain*(..)) || " +
+    @Around("(execution(* com.entropy.database.mcp.facade.RoutingDatabaseFacade.execute*(..)) || " +
+            "execution(* com.entropy.database.mcp.facade.RoutingDatabaseFacade.explain*(..)) || " +
             "execution(* com.entropy.database.mcp.facade.ByokDatabaseFacade.execute*(..)) || " +
             "execution(* com.entropy.database.mcp.facade.ByokDatabaseFacade.explain*(..)) || " +
-            "execution(* com.entropy.database.mcp.repository.ExecutionPlanRepositoryImpl.analyze*(..))) && args(sql, ..)")
+            "execution(* com.entropy.database.mcp.repository.ExecutionPlanRepositoryImpl.analyze*(..))) && args(java.lang.String, ..)")
     public Object validateSqlBeforeExecution(ProceedingJoinPoint pjp, String sql) throws Throwable {
         String methodName = pjp.getSignature().getName();
         if (methodName.toLowerCase().contains("ddl") || methodName.toLowerCase().contains("update") || methodName.toLowerCase().contains("insert")) {

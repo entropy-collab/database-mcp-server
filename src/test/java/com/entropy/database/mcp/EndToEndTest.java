@@ -16,6 +16,9 @@
 package com.entropy.database.mcp;
 
 import com.entropy.database.mcp.config.TestSecurityConfig;
+import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.dialect.DialectResolver;
+import com.entropy.database.mcp.dialect.H2Dialect;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeAll;
@@ -28,9 +31,11 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.web.client.RestTemplate;
 
+import javax.sql.DataSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -44,10 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
     properties = {"entropy.mcp.security.enabled=false",
                   "entropy.mcp.security.test-mode=true",
-                  "spring.datasource.primary.jdbc-url=jdbc:h2:mem:e2edb;DB_CLOSE_DELAY=-1",
-                  "spring.datasource.primary.username=sa",
-                  "spring.datasource.primary.password=",
-                  "entropy.mcp.database.dialect=generic",
+                  "entropy.mcp.database.dialect=h2",
                   "entropy.mcp.gateway.enabled=false"})
 @TestPropertySource(properties = {
     "entropy.mcp.database.security.enabled=false",
@@ -65,10 +67,23 @@ class EndToEndTest {
     // ─── Setup ────────────────────────────────────────────────────────────
 
     @BeforeAll
-    static void setUp(@Autowired org.springframework.jdbc.core.JdbcTemplate jdbc) {
+    static void setUp(@Autowired DynamicDataSourceManager dataSourceManager,
+                      @Autowired DialectResolver dialectResolver) throws Exception {
+        // Create H2 datasource for tests
+        org.h2.Driver.load();
+        org.h2.jdbcx.JdbcDataSource dataSource = new org.h2.jdbcx.JdbcDataSource();
+        dataSource.setURL("jdbc:h2:mem:e2edb;DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false");
+        dataSource.setUser("sa");
+        dataSource.setPassword("");
+
+        // Register as BYOK connection
+        dataSourceManager.registerExisting("primary", dataSource, new H2Dialect());
+
+        // Create test data
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         jdbc.execute("CREATE TABLE employees ("
-            + "id INT PRIMARY KEY, name VARCHAR(100), department VARCHAR(50), "
-            + "salary DECIMAL(10,2), email VARCHAR(100))");
+            + "ID INT PRIMARY KEY, NAME VARCHAR(100), DEPARTMENT VARCHAR(50), "
+            + "SALARY DECIMAL(10,2), EMAIL VARCHAR(100))");
         jdbc.execute("INSERT INTO employees VALUES (1, 'Alice', 'Engineering', 95000, 'alice@example.com')");
         jdbc.execute("INSERT INTO employees VALUES (2, 'Bob', 'Marketing', 72000, 'bob@example.com')");
         jdbc.execute("INSERT INTO employees VALUES (3, 'Charlie', 'Engineering', 88000, 'charlie@example.com')");
@@ -172,7 +187,7 @@ class EndToEndTest {
     @Test
     @DisplayName("tools/call listTables should return test tables")
     void testListTables() throws Exception {
-        String response = postToolCall("listTables", Map.of("schema", "PUBLIC"));
+        String response = postToolCall("listTables", Map.of("schema", "PUBLIC", "connection", "primary"));
         String text = getToolText(response);
         assertThat(text.toLowerCase()).contains("employees");
     }
@@ -181,9 +196,10 @@ class EndToEndTest {
     @DisplayName("tools/call executeQuery should return employee data")
     void testExecuteQuery() throws Exception {
         String response = postToolCall("executeQuery", Map.of(
-            "sql", "SELECT id, name, department, salary FROM employees ORDER BY id",
+            "sql", "SELECT ID, NAME, DEPARTMENT, SALARY FROM employees ORDER BY ID",
             "maxRows", 10,
-            "continuationToken", ""));
+            "continuationToken", "",
+            "connection", "primary"));
 
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);
@@ -198,9 +214,10 @@ class EndToEndTest {
     @DisplayName("tools/call executeQuery with WHERE clause filters correctly")
     void testExecuteQueryWithFilter() throws Exception {
         String response = postToolCall("executeQuery", Map.of(
-            "sql", "SELECT name, salary FROM employees WHERE department = 'Engineering' ORDER BY salary DESC",
+            "sql", "SELECT NAME, SALARY FROM employees WHERE DEPARTMENT = 'Engineering' ORDER BY SALARY DESC",
             "maxRows", 10,
-            "continuationToken", ""));
+            "continuationToken", "",
+            "connection", "primary"));
 
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);
@@ -216,9 +233,10 @@ class EndToEndTest {
     void testExecuteQueryPagination() throws Exception {
         // Page 1: limit 2 rows
         String response = postToolCall("executeQuery", Map.of(
-            "sql", "SELECT id, name FROM employees ORDER BY id",
+            "sql", "SELECT ID, NAME FROM employees ORDER BY ID",
             "maxRows", 2,
-            "continuationToken", ""));
+            "continuationToken", "",
+            "connection", "primary"));
 
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);
@@ -230,9 +248,10 @@ class EndToEndTest {
         // Page 2: using continuation token
         String token = result.get("continuationToken").asText();
         String response2 = postToolCall("executeQuery", Map.of(
-            "sql", "SELECT id, name FROM employees ORDER BY id",
+            "sql", "SELECT ID, NAME FROM employees ORDER BY ID",
             "maxRows", 2,
-            "continuationToken", token));
+            "continuationToken", token,
+            "connection", "primary"));
 
         String text2 = getToolText(response2);
         JsonNode result2 = mapper.readTree(text2);
@@ -246,7 +265,8 @@ class EndToEndTest {
     void testDescribeTable() throws Exception {
         String response = postToolCall("describeTable", Map.of(
             "table", "employees",
-            "schema", "PUBLIC"));
+            "schema", "PUBLIC",
+            "connection", "primary"));
         String text = getToolText(response);
         assertThat(text).contains("employees");
         assertThat(text).contains("columnCount");
@@ -255,7 +275,7 @@ class EndToEndTest {
     @Test
     @DisplayName("tools/call getDatabaseInfo should return product info")
     void testGetDatabaseInfo() throws Exception {
-        String response = postToolCall("getDatabaseInfo", Map.of());
+        String response = postToolCall("getDatabaseInfo", Map.of("connection", "primary"));
         String text = getToolText(response);
         JsonNode info = mapper.readTree(text);
         assertThat(info.has("productName")).isTrue();
@@ -268,7 +288,8 @@ class EndToEndTest {
         String response = postToolCall("executeQuery", Map.of(
             "sql", "SELECT * FROM employees",
             "maxRows", 2,
-            "continuationToken", ""));
+            "continuationToken", "",
+            "connection", "primary"));
 
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);

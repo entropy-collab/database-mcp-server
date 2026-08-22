@@ -17,6 +17,7 @@ package com.entropy.database.mcp.security;
 
 import com.entropy.database.mcp.audit.AuditLogEntity;
 import com.entropy.database.mcp.audit.AuditLogRepository;
+import com.entropy.database.mcp.audit.SqlAuditService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.lang.Nullable;
@@ -33,6 +34,7 @@ import java.util.stream.Collectors;
 /**
  * Query audit logger for tracking database operations.
  * Buffers entries in memory for SSE/polling consumers and optionally persists to database.
+ * If the default database is not configured (no audit_log table), falls back to file logging.
  */
 @Component
 public class QueryAuditLoggerImpl implements QueryAuditLogger {
@@ -47,13 +49,34 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
 
     private final AuditLogRepository auditLogRepository;
     private final boolean persistenceEnabled;
+    private volatile boolean dbAvailable;
     private final com.entropy.database.mcp.properties.DatabaseProperties properties;
+    private final SqlAuditService sqlAuditService;
 
-    public QueryAuditLoggerImpl(AuditLogRepository auditLogRepository,
-                                com.entropy.database.mcp.properties.DatabaseProperties properties) {
+    public QueryAuditLoggerImpl(@org.springframework.lang.Nullable AuditLogRepository auditLogRepository,
+                                com.entropy.database.mcp.properties.DatabaseProperties properties,
+                                SqlAuditService sqlAuditService) {
         this.auditLogRepository = auditLogRepository;
         this.persistenceEnabled = properties != null && properties.audit() != null && properties.audit().enabled();
         this.properties = properties;
+        this.sqlAuditService = sqlAuditService;
+        // Check if default datasource (and thus audit_log table) is available
+        this.dbAvailable = auditLogRepository != null && canInsert(auditLogRepository);
+        if (!dbAvailable) {
+            log.info("Default database not available or audit_log table missing; audit logs will be written to file only");
+        }
+    }
+
+    /**
+     * Light-weight probe: try a no-op insert to verify the audit_log table exists.
+     */
+    private boolean canInsert(AuditLogRepository repo) {
+        try {
+            repo.insert(new AuditLogEntity(null, "_probe_", "", 0, 0L, true, null, Instant.now(), null));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
@@ -91,8 +114,17 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
         buffer.offer(entry);
         evictOld();
 
-        // Persist to database asynchronously
-        if (persistenceEnabled) {
+        // Record in SqlAuditService for slow query analysis and pattern stats
+        if (sqlAuditService != null) {
+            try {
+                sqlAuditService.recordQuery(tool, sql, rowCount, durationMs, success, connectionKey);
+            } catch (Exception e) {
+                log.warn("Failed to record query in SqlAuditService: {}", e.getMessage());
+            }
+        }
+
+        // Persist to database asynchronously (only if default datasource is available)
+        if (persistenceEnabled && dbAvailable) {
             try {
                 auditLogRepository.insert(new AuditLogEntity(
                     null,
@@ -106,7 +138,9 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
                     connectionKey
                 ));
             } catch (Exception e) {
-                log.warn("Failed to persist audit log to database: {}", e.getMessage());
+                log.warn("Failed to persist audit log to database, falling back to file only", e);
+                // Disable DB persistence for subsequent calls
+                this.dbAvailable = false;
             }
         }
     }

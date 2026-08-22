@@ -18,6 +18,8 @@ package com.entropy.database.mcp.dialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 
+import java.util.List;
+
 /**
  * Oracle-specific dialect with EXPLAIN PLAN support.
  */
@@ -178,6 +180,10 @@ public class OracleDialect extends AbstractDatabaseDialect {
     @Override
     public String connectionTestQuery() {
         return "SELECT 1 FROM DUAL";
+    }
+
+    public String healthCheckSql() {
+        return "SELECT 'OK' AS status FROM DUAL";
     }
 
     /**
@@ -379,5 +385,22 @@ public class OracleDialect extends AbstractDatabaseDialect {
     public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
         config.addDataSourceProperty("oracle.jdbc.ReadTimeout", "30000");
         config.addDataSourceProperty("oracle.net.CONNECT_TIMEOUT", "10000");
+    }
+
+    public String buildUpsertSql(String tableName, List<String> allColumns, List<String> keyColumns) {
+        String columnList = String.join(", ", allColumns);
+        String placeholderList = String.join(", ", allColumns.stream().map(c -> "?").toList());
+        String keyCondition = keyColumns.stream()
+                .map(k -> "target." + k + " = source." + k)
+                .reduce((a, b) -> a + " AND " + b).orElse("1=1");
+        List<String> nonKeyColumns = allColumns.stream().filter(col -> !keyColumns.contains(col)).toList();
+        String updateSet = nonKeyColumns.stream()
+                .map(col -> "target." + col + " = source." + col)
+                .reduce((a, b) -> a + ", " + b).orElse("");
+        // Oracle MERGE requires a select from DUAL for the source
+        String selectFromDual = allColumns.stream().map(c -> c + " AS " + c).reduce((a, b) -> a + ", " + b).orElse("");
+        return String.format(
+                "MERGE INTO %s target USING (SELECT %s FROM DUAL) source ON (%s) WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
+                tableName, selectFromDual, keyCondition, updateSet, columnList, placeholderList);
     }
 }

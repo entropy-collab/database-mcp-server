@@ -73,13 +73,38 @@ public abstract class AbstractDatabaseDialect implements DatabaseDialect {
     }
 
     @Override
-    public String explainPlanSql(String sql) {
+    public String getExplainPlanSql(String sql) {
+        return explainPlanSql(sql);
+    }
+
+    @Override
+    public String getTableStatisticsSql(String tableName) {
         return null;
     }
 
     @Override
-    public String getExecutionPlanSql() {
+    public String getPaginationSql(String sql, int offset, int limit) {
         return null;
+    }
+
+    @Override
+    public boolean supportsExplainPlan() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsTableStatistics() {
+        return false;
+    }
+
+    @Override
+    public String getDialectName() {
+        return getClass().getSimpleName().toLowerCase().replace("dialect", "");
+    }
+
+    @Override
+    public String getHealthCheckSql() {
+        return "SELECT 1";
     }
 
     @Override

@@ -31,21 +31,21 @@ class ConnectionMetadataTest {
 
     @Test
     void rejectsBlankKey() {
-        assertThatThrownBy(() -> new ConnectionMetadata("", "oracle", "jdbc:oracle:...", "user", null, null, null, false, 10, 0))
+        assertThatThrownBy(() -> new ConnectionMetadata("", "oracle", "jdbc:oracle:...", "user", null, null, null, 10, 0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("key is required");
     }
 
     @Test
     void rejectsBlankDialect() {
-        assertThatThrownBy(() -> new ConnectionMetadata("key1", "", "jdbc:oracle:...", "user", null, null, null, false, 10, 0))
+        assertThatThrownBy(() -> new ConnectionMetadata("key1", "", "jdbc:oracle:...", "user", null, null, null, 10, 0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("dialect is required");
     }
 
     @Test
     void rejectsBlankJdbcUrlMasked() {
-        assertThatThrownBy(() -> new ConnectionMetadata("key1", "oracle", "", "user", null, null, null, false, 10, 0))
+        assertThatThrownBy(() -> new ConnectionMetadata("key1", "oracle", "", "user", null, null, null, 10, 0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("jdbcUrlMasked is required");
     }
@@ -53,7 +53,7 @@ class ConnectionMetadataTest {
     @Test
     void defaultsCreatedAtToNow() {
         Instant before = Instant.now();
-        ConnectionMetadata metadata = new ConnectionMetadata("key1", "oracle", "jdbc:oracle:...", "user", null, null, null, false, 10, 0);
+        ConnectionMetadata metadata = new ConnectionMetadata("key1", "oracle", "jdbc:oracle:...", "user", null, null, null, 10, 0);
         Instant after = Instant.now();
 
         assertThat(metadata.createdAt()).isAfterOrEqualTo(before).isBeforeOrEqualTo(after);
@@ -61,14 +61,14 @@ class ConnectionMetadataTest {
 
     @Test
     void defaultsLeaseTtlToThirtyMinutes() {
-        ConnectionMetadata metadata = new ConnectionMetadata("key1", "oracle", "jdbc:oracle:...", "user", null, null, null, false, 10, 0);
+        ConnectionMetadata metadata = new ConnectionMetadata("key1", "oracle", "jdbc:oracle:...", "user", null, null, null, 10, 0);
 
         assertThat(metadata.leaseTtl()).isEqualTo(Duration.ofMinutes(30));
     }
 
     @Test
     void defaultsMaxLifetimeToTwoHours() {
-        ConnectionMetadata metadata = new ConnectionMetadata("key1", "oracle", "jdbc:oracle:...", "user", null, null, null, false, 10, 0);
+        ConnectionMetadata metadata = new ConnectionMetadata("key1", "oracle", "jdbc:oracle:...", "user", null, null, null, 10, 0);
 
         assertThat(metadata.maxLifetime()).isEqualTo(Duration.ofHours(2));
     }
@@ -79,7 +79,7 @@ class ConnectionMetadataTest {
         ConnectionMetadata metadata = new ConnectionMetadata(
                 "key1", "oracle", "jdbc:oracle:...", "user",
                 createdAt, Duration.ofMinutes(15), Duration.ofHours(1),
-                true, 20, 5
+                20, 5
         );
 
         assertThat(metadata.key()).isEqualTo("key1");
@@ -89,7 +89,6 @@ class ConnectionMetadataTest {
         assertThat(metadata.createdAt()).isEqualTo(createdAt);
         assertThat(metadata.leaseTtl()).isEqualTo(Duration.ofMinutes(15));
         assertThat(metadata.maxLifetime()).isEqualTo(Duration.ofHours(1));
-        assertThat(metadata.isPrimary()).isTrue();
         assertThat(metadata.poolSize()).isEqualTo(20);
         assertThat(metadata.activeConnections()).isEqualTo(5);
     }
@@ -100,7 +99,7 @@ class ConnectionMetadataTest {
         ConnectionMetadata metadata = new ConnectionMetadata(
                 "key1", "oracle", "jdbc:oracle:...", "user",
                 createdAt, Duration.ofMinutes(30), Duration.ofHours(2),
-                false, 10, 0
+                10, 0
         );
 
         assertThat(metadata.getLeaseExpiry()).isEqualTo(createdAt.plus(Duration.ofMinutes(30)));
@@ -112,7 +111,7 @@ class ConnectionMetadataTest {
         ConnectionMetadata metadata = new ConnectionMetadata(
                 "key1", "oracle", "jdbc:oracle:...", "user",
                 createdAt, Duration.ofMinutes(30), Duration.ofHours(2),
-                false, 10, 0
+                10, 0
         );
 
         assertThat(metadata.getMaxLifetimeExpiry()).isEqualTo(createdAt.plus(Duration.ofHours(2)));
@@ -123,7 +122,7 @@ class ConnectionMetadataTest {
         ConnectionMetadata metadata = new ConnectionMetadata(
                 "key1", "oracle", "jdbc:oracle:...", "user",
                 Instant.now(), Duration.ofHours(2), Duration.ofHours(2),
-                false, 10, 0
+                10, 0
         );
 
         assertThat(metadata.getStatus()).isEqualTo("ACTIVE");

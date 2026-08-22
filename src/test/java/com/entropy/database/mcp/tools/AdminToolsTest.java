@@ -15,7 +15,6 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.facade.DatabaseFacade;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import org.junit.jupiter.api.Test;
@@ -50,44 +49,41 @@ class AdminToolsTest {
     private DynamicDataSourceManager dataSourceManager;
 
     @Autowired
-    private DatabaseFacade databaseFacade;
-
-    @Autowired
     private Environment environment;
 
     // ─── killSession validation tests ────────────────────────────────────────
 
     @Test
     void testKillSessionBlankSessionId() {
-        Map<String, Object> result = oracleSessionTools.killSession("", null, null);
+        Map<String, Object> result = oracleSessionTools.killSession("", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("sessionId cannot be blank");
     }
 
     @Test
     void testKillSessionNullSessionId() {
-        Map<String, Object> result = oracleSessionTools.killSession(null, null, null);
+        Map<String, Object> result = oracleSessionTools.killSession(null, null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("sessionId cannot be blank");
     }
 
     @Test
     void testKillSessionInvalidFormat() {
-        Map<String, Object> result = oracleSessionTools.killSession("123", null, null);
+        Map<String, Object> result = oracleSessionTools.killSession("123", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("sessionId must be in format 'sid,serial#' (e.g. '123,4567')");
     }
 
     @Test
     void testKillSessionInvalidFormatLetters() {
-        Map<String, Object> result = oracleSessionTools.killSession("abc,def", null, null);
+        Map<String, Object> result = oracleSessionTools.killSession("abc,def", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("sessionId must be in format 'sid,serial#' (e.g. '123,4567')");
     }
 
     @Test
     void testKillSessionInvalidMode() {
-        Map<String, Object> result = oracleSessionTools.killSession("123,4567", "INVALID", null);
+        Map<String, Object> result = oracleSessionTools.killSession("123,4567", "INVALID", "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("mode must be IMMEDIATE or POST_TRANSACTION");
     }
@@ -96,7 +92,7 @@ class AdminToolsTest {
     void testKillSessionValidFormat() {
         // This will fail at execution because H2 doesn't support ALTER SYSTEM,
         // but validation should pass and return an error from the database
-        Map<String, Object> result = oracleSessionTools.killSession("123,4567", null, null);
+        Map<String, Object> result = oracleSessionTools.killSession("123,4567", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("sessionId")).isEqualTo("123,4567");
         assertThat(result.get("mode")).isEqualTo("IMMEDIATE");
@@ -104,7 +100,7 @@ class AdminToolsTest {
 
     @Test
     void testKillSessionPostTransactionMode() {
-        Map<String, Object> result = oracleSessionTools.killSession("123,4567", "POST_TRANSACTION", null);
+        Map<String, Object> result = oracleSessionTools.killSession("123,4567", "POST_TRANSACTION", "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("sessionId")).isEqualTo("123,4567");
         assertThat(result.get("mode")).isEqualTo("POST_TRANSACTION");
@@ -112,7 +108,7 @@ class AdminToolsTest {
 
     @Test
     void testKillSessionLowerCaseMode() {
-        Map<String, Object> result = oracleSessionTools.killSession("123,4567", "immediate", null);
+        Map<String, Object> result = oracleSessionTools.killSession("123,4567", "immediate", "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("sessionId")).isEqualTo("123,4567");
         assertThat(result.get("mode")).isEqualTo("IMMEDIATE");
@@ -122,7 +118,7 @@ class AdminToolsTest {
 
     @Test
     void testListActiveSessions() {
-        Map<String, Object> result = databaseHealthTools.listActiveSessions(null);
+        Map<String, Object> result = databaseHealthTools.listActiveSessions("primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -132,7 +128,7 @@ class AdminToolsTest {
 
     @Test
     void testShowLocks() {
-        Map<String, Object> result = databaseHealthTools.showLocks(null);
+        Map<String, Object> result = databaseHealthTools.showLocks("primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -142,7 +138,7 @@ class AdminToolsTest {
 
     @Test
     void testShowBlockingTree() {
-        Map<String, Object> result = databaseHealthTools.showBlockingTree(null);
+        Map<String, Object> result = databaseHealthTools.showBlockingTree("primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -154,7 +150,7 @@ class AdminToolsTest {
 
     @Test
     void testListTablespaces() {
-        Map<String, Object> result = databaseHealthTools.listTablespaces(null);
+        Map<String, Object> result = databaseHealthTools.listTablespaces("primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -164,7 +160,7 @@ class AdminToolsTest {
 
     @Test
     void testListDataFiles() {
-        Map<String, Object> result = databaseHealthTools.listDataFiles(null);
+        Map<String, Object> result = databaseHealthTools.listDataFiles("primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -174,7 +170,7 @@ class AdminToolsTest {
 
     @Test
     void testEstimateTableSize() {
-        Map<String, Object> result = databaseHealthTools.estimateTableSize("MY_TABLE", null, null);
+        Map<String, Object> result = databaseHealthTools.estimateTableSize("MY_TABLE", null, "primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("tableName")).isEqualTo("MY_TABLE");
@@ -186,14 +182,14 @@ class AdminToolsTest {
 
     @Test
     void testEstimateTableSizeBlankTableName() {
-        Map<String, Object> result = databaseHealthTools.estimateTableSize("", null, null);
+        Map<String, Object> result = databaseHealthTools.estimateTableSize("", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("tableName cannot be blank");
     }
 
     @Test
     void testEstimateTableSizeNullTableName() {
-        Map<String, Object> result = databaseHealthTools.estimateTableSize(null, null, null);
+        Map<String, Object> result = databaseHealthTools.estimateTableSize(null, null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("tableName cannot be blank");
     }
@@ -202,7 +198,7 @@ class AdminToolsTest {
 
     @Test
     void testListInvalidObjects() {
-        Map<String, Object> result = databaseHealthTools.listInvalidObjects(null, null);
+        Map<String, Object> result = databaseHealthTools.listInvalidObjects(null, "primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -212,7 +208,7 @@ class AdminToolsTest {
 
     @Test
     void testGatherTableStats() {
-        Map<String, Object> result = databaseHealthTools.gatherTableStats("MY_TABLE", null, null);
+        Map<String, Object> result = databaseHealthTools.gatherTableStats("MY_TABLE", null, "primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("tableName")).isEqualTo("MY_TABLE");
@@ -224,21 +220,21 @@ class AdminToolsTest {
 
     @Test
     void testGatherTableStatsBlankTableName() {
-        Map<String, Object> result = databaseHealthTools.gatherTableStats("", null, null);
+        Map<String, Object> result = databaseHealthTools.gatherTableStats("", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("tableName cannot be blank");
     }
 
     @Test
     void testGatherTableStatsNullTableName() {
-        Map<String, Object> result = databaseHealthTools.gatherTableStats(null, null, null);
+        Map<String, Object> result = databaseHealthTools.gatherTableStats(null, null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("tableName cannot be blank");
     }
 
     @Test
     void testShowIndexStatus() {
-        Map<String, Object> result = databaseHealthTools.showIndexStatus(null, null, null);
+        Map<String, Object> result = databaseHealthTools.showIndexStatus(null, null, "primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -250,7 +246,7 @@ class AdminToolsTest {
 
     @Test
     void testFlashbackQuery() {
-        Map<String, Object> result = databaseHealthTools.flashbackQuery("MY_TABLE", "2024-01-01 00:00:00", null, null);
+        Map<String, Object> result = databaseHealthTools.flashbackQuery("MY_TABLE", "2024-01-01 00:00:00", null, "primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("tableName")).isEqualTo("MY_TABLE");
@@ -263,35 +259,35 @@ class AdminToolsTest {
 
     @Test
     void testFlashbackQueryBlankTableName() {
-        Map<String, Object> result = databaseHealthTools.flashbackQuery("", "2024-01-01", null, null);
+        Map<String, Object> result = databaseHealthTools.flashbackQuery("", "2024-01-01", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("tableName cannot be blank");
     }
 
     @Test
     void testFlashbackQueryNullTableName() {
-        Map<String, Object> result = databaseHealthTools.flashbackQuery(null, "2024-01-01", null, null);
+        Map<String, Object> result = databaseHealthTools.flashbackQuery(null, "2024-01-01", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("tableName cannot be blank");
     }
 
     @Test
     void testFlashbackQueryBlankTimestamp() {
-        Map<String, Object> result = databaseHealthTools.flashbackQuery("MY_TABLE", "", null, null);
+        Map<String, Object> result = databaseHealthTools.flashbackQuery("MY_TABLE", "", null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("timestamp cannot be blank");
     }
 
     @Test
     void testFlashbackQueryNullTimestamp() {
-        Map<String, Object> result = databaseHealthTools.flashbackQuery("MY_TABLE", null, null, null);
+        Map<String, Object> result = databaseHealthTools.flashbackQuery("MY_TABLE", null, null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("timestamp cannot be blank");
     }
 
     @Test
     void testShowUndoUsage() {
-        Map<String, Object> result = databaseHealthTools.showUndoUsage(null);
+        Map<String, Object> result = databaseHealthTools.showUndoUsage("primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -303,7 +299,7 @@ class AdminToolsTest {
 
     @Test
     void testListCurrentPrivileges() {
-        Map<String, Object> result = databaseHealthTools.listCurrentPrivileges(null);
+        Map<String, Object> result = databaseHealthTools.listCurrentPrivileges("primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("dialect")).isEqualTo("generic");
@@ -313,7 +309,7 @@ class AdminToolsTest {
 
     @Test
     void testListGrants() {
-        Map<String, Object> result = databaseHealthTools.listGrants("TEST_USER", null);
+        Map<String, Object> result = databaseHealthTools.listGrants("TEST_USER", "primary");
         assertThat(result.get("success")).isInstanceOf(Boolean.class);
         if ((boolean) result.getOrDefault("success", false)) {
             assertThat(result.get("userName")).isEqualTo("TEST_USER");
@@ -324,14 +320,14 @@ class AdminToolsTest {
 
     @Test
     void testListGrantsBlankUserName() {
-        Map<String, Object> result = databaseHealthTools.listGrants("", null);
+        Map<String, Object> result = databaseHealthTools.listGrants("", "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("userName cannot be blank");
     }
 
     @Test
     void testListGrantsNullUserName() {
-        Map<String, Object> result = databaseHealthTools.listGrants(null, null);
+        Map<String, Object> result = databaseHealthTools.listGrants(null, "primary");
         assertThat(result.get("success")).isEqualTo(false);
         assertThat(result.get("error")).isEqualTo("userName cannot be blank");
     }

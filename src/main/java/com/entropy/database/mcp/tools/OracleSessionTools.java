@@ -17,16 +17,14 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
-import com.entropy.database.mcp.dialect.DatabaseDialect;
-import com.entropy.database.mcp.facade.DatabaseFacade;
-import com.entropy.database.mcp.tools.McpToolUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
@@ -42,20 +40,11 @@ public class OracleSessionTools {
     private static final Logger log = LoggerFactory.getLogger(OracleSessionTools.class);
 
     private final DynamicDataSourceManager dataSourceManager;
-    private final DatabaseFacade databaseFacade;
-    private final DatabaseDialect primaryDialect;
-    private final JdbcTemplate primaryJdbcTemplate;
     private final boolean ddlAllowed;
 
     public OracleSessionTools(DynamicDataSourceManager dataSourceManager,
-                              DatabaseFacade databaseFacade,
-                              DatabaseDialect primaryDialect,
-                              org.springframework.jdbc.core.JdbcTemplate primaryJdbcTemplate,
-                              @org.springframework.beans.factory.annotation.Value("${entropy.mcp.database.ddl.allowed:false}") boolean ddlAllowed) {
+                              @Value("${entropy.mcp.database.ddl.allowed:false}") boolean ddlAllowed) {
         this.dataSourceManager = dataSourceManager;
-        this.databaseFacade = databaseFacade;
-        this.primaryDialect = primaryDialect;
-        this.primaryJdbcTemplate = primaryJdbcTemplate;
         this.ddlAllowed = ddlAllowed;
     }
 
@@ -63,8 +52,9 @@ public class OracleSessionTools {
     public Map<String, Object> killSession(
             @McpToolParam(description = "Session identifier in format 'sid,serial#' (e.g. '123,4567')") String sessionId,
             @McpToolParam(description = "Kill mode: IMMEDIATE (default) or POST_TRANSACTION", required = false) String mode,
-            @McpToolParam(description = "Optional BYOK connection name. Omit to use primary datasource.", required = false) String connection) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         requireNotBlank(sessionId, "sessionId");
+        requireNotBlank(connection, "connection");
         String trimmed = sessionId.trim();
         if (!trimmed.matches("\\d+,\\d+")) {
             return errorResponse(Map.of("sessionId", sessionId), "sessionId must be in format 'sid,serial#' (e.g. '123,4567')", "ValidationException");
@@ -75,52 +65,54 @@ public class OracleSessionTools {
             return errorResponse(Map.of("mode", mode), "mode must be IMMEDIATE or POST_TRANSACTION", "ValidationException");
         }
 
-        DatabaseDialect dialect;
-        JdbcTemplate jdbcTemplate;
-        if (connection == null || connection.isBlank()) {
-            dialect = primaryDialect;
-            jdbcTemplate = primaryJdbcTemplate;
-        } else {
-            ByokDataSourceContext context = dataSourceManager.acquire(connection);
-            dialect = context.getDialect();
-            jdbcTemplate = context.getJdbcTemplate();
-        }
-
-        String sql = dialect.killSessionSql(trimmed, killMode);
-        if (sql == null) {
-            return McpToolUtils.errorResponse(Map.of("sessionId", trimmed, "mode", killMode),
-                    "Kill session is not supported for dialect: " + dialect.getClass().getSimpleName(),
-                    dialect.getClass().getSimpleName());
-        }
-
         try {
-            if (connection == null || connection.isBlank()) {
-                if (!ddlAllowed) {
-                    return errorResponse(Map.of("sessionId", trimmed, "mode", killMode),
-                            "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable.",
-                            "ConfigurationException");
-                }
-                Map<String, Object> result = databaseFacade.executeDdl(sql);
-                result.put("sql", sql);
-                result.put("sessionId", trimmed);
-                result.put("mode", killMode);
-                return result;
-            } else {
-                long startTime = System.currentTimeMillis();
-                int affected = jdbcTemplate.update(sql);
-                long duration = System.currentTimeMillis() - startTime;
-                return successResponse(Map.of(
-                        "connectionName", connection,
-                        "sql", sql,
-                        "sessionId", trimmed,
-                        "mode", killMode,
-                        "affectedRows", affected,
-                        "durationMs", duration,
-                        "message", "Session killed successfully"));
+            Map<String, Object> errorCtx = buildContext(trimmed, killMode, connection);
+            if (!ddlAllowed) {
+                return errorResponse(errorCtx,
+                        "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable.",
+                        "ConfigurationException");
             }
+
+            ByokDataSourceContext context = dataSourceManager.acquire(connection);
+            var dialect = context.getDialect();
+            var jdbcTemplate = context.getJdbcTemplate();
+
+            String sql = dialect.killSessionSql(trimmed, killMode);
+            if (sql == null) {
+                Map<String, Object> ctx = new LinkedHashMap<>();
+                ctx.put("sessionId", trimmed);
+                ctx.put("mode", killMode);
+                ctx.put("connection", connection);
+                return errorResponse(ctx,
+                        "Kill session is not supported for dialect: " + dialect.getClass().getSimpleName(),
+                        dialect.getClass().getSimpleName());
+            }
+
+            long startTime = System.currentTimeMillis();
+            int affected = jdbcTemplate.update(sql);
+            long duration = System.currentTimeMillis() - startTime;
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("sql", sql);
+            result.put("sessionId", trimmed);
+            result.put("mode", killMode);
+            result.put("affectedRows", affected);
+            result.put("durationMs", duration);
+            result.put("connectionName", connection);
+            result.put("message", "Session killed successfully");
+            return successResponse(result);
         } catch (Exception e) {
-            return McpToolUtils.errorResponse(Map.of("sessionId", trimmed, "sql", sql, "mode", killMode),
+            log.error("killSession failed: sessionId={}, mode={}, connection={}", trimmed, killMode, connection, e);
+            return errorResponse(buildContext(trimmed, killMode, connection),
                     e.getMessage(), e.getClass().getSimpleName());
         }
+    }
+
+    private Map<String, Object> buildContext(String sessionId, String mode, String connection) {
+        Map<String, Object> ctx = new LinkedHashMap<>();
+        ctx.put("sessionId", sessionId);
+        ctx.put("mode", mode);
+        ctx.put("connection", connection);
+        return ctx;
     }
 }

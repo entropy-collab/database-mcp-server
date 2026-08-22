@@ -20,6 +20,9 @@ import com.entropy.database.mcp.dialect.DialectUtils;
 /**
  * BYOK connection properties.
  * Immutable DTO for database connection information provided by the caller.
+ *
+ * <p>Follows the Builder pattern (effective Java Item 2) to support fluent construction
+ * with sensible defaults, mirroring how Spring's {@code DataSourceBuilder} works.
  */
 public record ConnectionProperties(
     String jdbcUrl,
@@ -50,28 +53,96 @@ public record ConnectionProperties(
         }
     }
 
+    /**
+     * Validate that all required fields are present and well-formed.
+     * Use this before passing to factory methods for early failure.
+     */
+    public void validate() {
+        if (jdbcUrl == null || jdbcUrl.isBlank()) {
+            throw new IllegalStateException("jdbcUrl must not be blank");
+        }
+        if (username == null || username.isBlank()) {
+            throw new IllegalStateException("username must not be blank");
+        }
+        if (password == null || password.isBlank()) {
+            throw new IllegalStateException("password must not be blank");
+        }
+        if (!jdbcUrl.startsWith("jdbc:")) {
+            throw new IllegalStateException("jdbcUrl must start with 'jdbc:'");
+        }
+    }
+
     public String getCacheKey() {
         return jdbcUrl + "|" + username + "|" + dialect;
     }
 
     public static ConnectionProperties fromEnv() {
-        // For primary datasource configuration from environment variables
         String jdbcUrl = System.getenv("DB_JDBC_URL");
         String username = System.getenv("DB_USERNAME");
         String password = System.getenv("DB_PASSWORD");
         String dialect = System.getenv("DB_DIALECT");
-        
-        if (jdbcUrl == null) {
-            // Try Spring Boot style
-            jdbcUrl = System.getenv("SPRING_DATASOURCE_PRIMARY_JDBC_URL");
+
+        return builder()
+                .jdbcUrl(jdbcUrl)
+                .username(username)
+                .password(password)
+                .dialect(dialect)
+                .build();
+    }
+
+    /**
+     * Create a builder for fluent construction of ConnectionProperties.
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    /**
+     * Fluent builder for {@link ConnectionProperties}.
+     * Inspired by Spring's DataSourceBuilder.
+     */
+    public static class Builder {
+        private String jdbcUrl;
+        private String username;
+        private String password;
+        private String dialect;
+        private String driverClassName;
+        private Boolean readonly;
+
+        private Builder() {}
+
+        public Builder jdbcUrl(String jdbcUrl) {
+            this.jdbcUrl = jdbcUrl;
+            return this;
         }
-        if (username == null) {
-            username = System.getenv("SPRING_DATASOURCE_PRIMARY_USERNAME");
+
+        public Builder username(String username) {
+            this.username = username;
+            return this;
         }
-        if (password == null) {
-            password = System.getenv("SPRING_DATASOURCE_PRIMARY_PASSWORD");
+
+        public Builder password(String password) {
+            this.password = password;
+            return this;
         }
-        
-        return new ConnectionProperties(jdbcUrl, username, password, dialect, null, false);
+
+        public Builder dialect(String dialect) {
+            this.dialect = dialect;
+            return this;
+        }
+
+        public Builder driverClassName(String driverClassName) {
+            this.driverClassName = driverClassName;
+            return this;
+        }
+
+        public Builder readonly(Boolean readonly) {
+            this.readonly = readonly;
+            return this;
+        }
+
+        public ConnectionProperties build() {
+            return new ConnectionProperties(jdbcUrl, username, password, dialect, driverClassName, readonly);
+        }
     }
 }

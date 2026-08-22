@@ -37,7 +37,7 @@ public class AuditLogInitializer {
                         sql VARCHAR(2000),
                         rows INTEGER DEFAULT 0,
                         duration_ms BIGINT DEFAULT 0,
-                        success BOOLEAN DEFAULT TRUE,
+                        success INTEGER DEFAULT 1,
                         error VARCHAR(1000),
                         timestamp TIMESTAMP NOT NULL,
                         connection_key VARCHAR(200)

@@ -19,7 +19,6 @@ import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.ByokProperties;
-import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -30,16 +29,21 @@ import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.springframework.beans.factory.DisposableBean;
+
 /**
- * Central manager for all datasources (primary and BYOK).
+ * Central manager for all datasources.
  * Handles lifecycle management with TTL-based lease renewal.
+ * All connections are equal BYOK connections; there is no primary/default concept.
+ *
+ * <p>Uses {@link ByokDataSourceFactory} (factory pattern) to create per-connection
+ * infrastructure, following Spring's DataSourceBuilder pattern.
  */
-public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
+public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, DisposableBean {
     private static final Logger log = LoggerFactory.getLogger(DynamicDataSourceManagerImpl.class);
 
     private final DialectResolver dialectResolver;
-    private final ByokInfrastructureFactory infrastructureFactory;
-    private final ConnectionPoolFactory connectionPoolFactory;
+    private final ByokDataSourceFactory dataSourceFactory;
     private final com.github.benmanes.caffeine.cache.Cache<String, LeasedDataSource> leasedCache;
     private final Map<String, ConnectionMetadata> metadataRegistry;
     private final Map<String, Object> keyLocks;
@@ -47,7 +51,6 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
     private final Duration maxLifetime;
     private final int maxCachedConnections;
     private final ByokProperties byokProperties;
-    private final int fetchSize;
     private final McpMetricsCollector metricsCollector;
 
     /**
@@ -56,22 +59,18 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
      */
     public record Dependencies(
             DialectResolver dialectResolver,
-            ByokInfrastructureFactory infrastructureFactory,
-            ConnectionPoolFactory connectionPoolFactory,
+            ByokDataSourceFactory dataSourceFactory,
             ByokProperties byokProperties,
-            int fetchSize,
             McpMetricsCollector metricsCollector) {
     }
 
     public DynamicDataSourceManagerImpl(Dependencies deps) {
         this.dialectResolver = deps.dialectResolver();
-        this.infrastructureFactory = deps.infrastructureFactory();
-        this.connectionPoolFactory = deps.connectionPoolFactory();
+        this.dataSourceFactory = deps.dataSourceFactory();
         this.byokProperties = deps.byokProperties();
         this.leaseDuration = deps.byokProperties().leaseDuration();
         this.maxLifetime = deps.byokProperties().maxLifetime();
         this.maxCachedConnections = deps.byokProperties().maxCachedConnections();
-        this.fetchSize = deps.fetchSize();
         this.metricsCollector = deps.metricsCollector();
 
         this.metadataRegistry = new ConcurrentHashMap<>();
@@ -96,8 +95,6 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
 
     /**
      * Acquire a datasource context by key.
-     * For primary datasource, use key="primary".
-     * For BYOK, use the connection's cache key.
      */
     @Override
     public ByokDataSourceContext acquire(String key, ConnectionProperties connection) {
@@ -160,8 +157,8 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
     }
 
     /**
-     * Register an existing Spring-managed datasource (e.g. primary) as a BYOK connection.
-     * The datasource is NOT closed when the lease expires (managed by Spring).
+     * Register an existing datasource as a BYOK connection.
+     * The datasource is NOT closed when the lease expires (managed externally).
      */
     @Override
     public void registerExisting(String key, DataSource existingDataSource, DatabaseDialect dialect) {
@@ -174,20 +171,11 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
                 leasedCache.invalidate(key);
             }
 
-            // Create JdbcTemplate from existing datasource
-            JdbcTemplate jdbcTemplate = new JdbcTemplate(existingDataSource);
-
-            // Assemble context (closeable=false because Spring manages this datasource)
-            ByokInfrastructure infrastructure = infrastructureFactory.create(key, jdbcTemplate, dialect, fetchSize);
-            ByokDataSourceContext context = new ByokDataSourceContext(
-                    key, existingDataSource, dialect, jdbcTemplate, infrastructure
-            );
-
+            ByokDataSourceContext context = dataSourceFactory.createExisting(key, existingDataSource, dialect);
             LeasedDataSource leased = new LeasedDataSource(key, context, leaseDuration, maxLifetime, false);
             leasedCache.put(key, leased);
 
-            // Register metadata for primary
-            registerMetadata(key, null, dialect, existingDataSource, true);
+            registerMetadata(key, null, dialect, existingDataSource);
 
             log.info("Registered existing datasource as BYOK connection: {}", key);
             if (metricsCollector != null) {
@@ -202,24 +190,13 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
     private LeasedDataSource createLeasedDataSource(String key, ConnectionProperties connection) {
         log.info("Creating new datasource: {}", key);
 
-        HikariDataSource dataSource = null;
+        ByokDataSourceContext context = null;
         try {
             // 1. Resolve dialect BEFORE creating datasource
             DatabaseDialect dialect = dialectResolver.resolve(connection.dialect(), null);
 
-            // 2. Create DataSource using centralized connection pool factory
-            dataSource = (HikariDataSource) connectionPoolFactory.createDataSource(connection, dialect);
-
-            // 3. Create JdbcTemplate
-            JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-
-            // 4. Create per-datasource infrastructure
-            ByokInfrastructure infrastructure = infrastructureFactory.create(key, jdbcTemplate, dialect, fetchSize);
-
-            // 5. Assemble context
-            ByokDataSourceContext context = new ByokDataSourceContext(
-                    key, dataSource, dialect, jdbcTemplate, infrastructure
-            );
+            // 2. Create full context via unified factory
+            context = dataSourceFactory.create(key, connection, dialect);
 
             LeasedDataSource leased = new LeasedDataSource(
                     key, context, leaseDuration, maxLifetime
@@ -229,11 +206,12 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
             }
             return leased;
         } catch (Exception e) {
-            if (dataSource != null) {
+            // Close any partially created resources
+            if (context != null) {
                 try {
-                    dataSource.close();
+                    context.close();
                 } catch (Exception closeEx) {
-                    log.warn("Failed to close datasource after creation failure: {}", key, closeEx);
+                    log.warn("Failed to close context after creation failure: {}", key, closeEx);
                 }
             }
             throw e;
@@ -242,33 +220,25 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
 
     // ─── Metadata Registry ──────────────────────────────────────────────────
 
-    /**
-     * Register connection metadata for observability and management.
-     */
     private void registerMetadata(String key, ConnectionProperties connection, DatabaseDialect dialect,
-                                  DataSource dataSource, boolean isPrimary) {
+                                  DataSource dataSource) {
         var metadata = new ConnectionMetadata(
                 key,
                 dialect.getClass().getSimpleName(),
-                maskKey(connection != null ? connection.jdbcUrl() : "primary"),
+                maskKey(connection != null ? connection.jdbcUrl() : "external"),
                 "system",
                 java.time.Instant.now(),
                 leaseDuration,
                 maxLifetime,
-                isPrimary,
-                isPrimary ? 0 : byokProperties.poolSize(),
+                byokProperties.poolSize(),
                 0
         );
         metadataRegistry.put(key, metadata);
         log.debug("Registered connection metadata: {} -> {}", key, metadata);
     }
 
-    /**
-     * Mask password in URL for logging.
-     */
     private String maskKey(String jdbcUrl) {
         if (jdbcUrl == null) return "null";
-        // Simple masking: replace password if present
         int atIndex = jdbcUrl.indexOf('@');
         if (atIndex > 0 && jdbcUrl.contains("//")) {
             String prefix = jdbcUrl.substring(0, jdbcUrl.indexOf("//") + 2);
@@ -280,36 +250,22 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
 
     // ─── Public Metadata API ────────────────────────────────────────────────
 
-    /**
-     * Get metadata for a specific connection.
-     *
-     * @return ConnectionMetadata or null if not found
-     */
     @Override
     public ConnectionMetadata getConnectionMetadata(String key) {
         if (key == null || key.isBlank()) return null;
         return metadataRegistry.get(key);
     }
 
-    /**
-     * List all registered connection keys.
-     */
     @Override
     public Collection<String> listConnectionKeys() {
         return metadataRegistry.keySet();
     }
 
-    /**
-     * Get total number of registered connections.
-     */
     @Override
     public int getConnectionCount() {
         return metadataRegistry.size();
     }
 
-    /**
-     * Get all connection metadata entries.
-     */
     @Override
     public Collection<ConnectionMetadata> getAllConnectionMetadata() {
         return metadataRegistry.values();
@@ -317,24 +273,35 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager {
 
     // ─── Shutdown ───────────────────────────────────────────────────────────
 
-    /**
-     * Shutdown all datasources.
-     */
     @Override
     public void shutdown() {
         for (LeasedDataSource leased : leasedCache.asMap().values()) {
-            leased.close();
+            try {
+                leased.close();
+            } catch (Exception e) {
+                log.warn("Failed to close datasource during shutdown: {}", leased.getKey(), e);
+            }
         }
         leasedCache.invalidateAll();
         metadataRegistry.clear();
         log.info("All datasources shut down");
     }
 
-    /**
-     * Get current cache size (number of active leased datasources).
-     */
+    @Override
+    public void destroy() {
+        shutdown();
+    }
+
     @Override
     public int getActiveConnectionCount() {
         return (int) leasedCache.asMap().size();
+    }
+
+    /**
+     * Force Caffeine to check for expired entries and trigger removal listener.
+     */
+    @Override
+    public void evictExpired() {
+        leasedCache.cleanUp();
     }
 }

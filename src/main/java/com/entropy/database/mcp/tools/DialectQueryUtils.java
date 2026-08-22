@@ -18,7 +18,8 @@ package com.entropy.database.mcp.tools;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
@@ -27,8 +28,12 @@ import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 
 /**
  * Shared utilities for executing dialect-specific queries.
+ *
+ * All methods require an explicit connection name; there is no default connection.
  */
 public final class DialectQueryUtils {
+
+    private static final Logger log = LoggerFactory.getLogger(DialectQueryUtils.class);
 
     private DialectQueryUtils() {
     }
@@ -36,40 +41,64 @@ public final class DialectQueryUtils {
     public static String getDialectName(DynamicDataSourceManager dataSourceManager, String connection) {
         try {
             if (connection == null || connection.isBlank()) {
-                return "generic";
+                throw new IllegalArgumentException("Connection is required.");
             }
             ByokDataSourceContext context = dataSourceManager.acquire(connection);
             return context.getDialect().getClass().getSimpleName();
         } catch (Exception e) {
+            log.warn("Failed to determine dialect for connection '{}', returning 'generic'", connection, e);
             return "generic";
         }
     }
 
-    public static Map<String, Object> executeDialectQuery(DynamicDataSourceManager dataSourceManager,
-                                                           DatabaseDialect primaryDialect,
-                                                           JdbcTemplate primaryJdbcTemplate,
-                                                           String connection,
-                                                           java.util.function.Function<DatabaseDialect, String> sqlProvider) {
-        return executeDialectQuery(dataSourceManager, primaryDialect, primaryJdbcTemplate, connection, sqlProvider, List.of());
+    /**
+     * Execute a dialect-specific health check query.
+     * Connection is required - no default connection is used.
+     */
+    public static Map<String, Object> checkHealth(DynamicDataSourceManager dataSourceManager, String connection) {
+        try {
+            if (connection == null || connection.isBlank()) {
+                throw new IllegalArgumentException("Connection is required.");
+            }
+            ByokDataSourceContext context = dataSourceManager.acquire(connection);
+            DatabaseDialect dialect = context.getDialect();
+            var jdbcTemplate = context.getJdbcTemplate();
+
+            String sql = dialect.getHealthCheckSql();
+            if (sql == null || sql.isBlank()) {
+                throw new IllegalStateException("Health check not supported for dialect: " + dialect.getClass().getSimpleName());
+            }
+
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+            return successResponse(Map.of(
+                    "connection", connection,
+                    "dialect", dialect.getClass().getSimpleName(),
+                    "status", "healthy",
+                    "rows", rows
+            ));
+        } catch (Exception e) {
+            log.warn("Health check failed for connection '{}': {}", connection, e.getMessage(), e);
+            return McpToolUtils.errorResponse(Map.of("connection", connection), e.getMessage(), e.getClass().getSimpleName());
+        }
     }
 
     public static Map<String, Object> executeDialectQuery(DynamicDataSourceManager dataSourceManager,
-                                                           DatabaseDialect primaryDialect,
-                                                           JdbcTemplate primaryJdbcTemplate,
+                                                           String connection,
+                                                           java.util.function.Function<DatabaseDialect, String> sqlProvider) {
+        return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of());
+    }
+
+    public static Map<String, Object> executeDialectQuery(DynamicDataSourceManager dataSourceManager,
                                                            String connection,
                                                            java.util.function.Function<DatabaseDialect, String> sqlProvider,
                                                            List<Object> argsList) {
         try {
-            DatabaseDialect dialect;
-            JdbcTemplate jdbcTemplate;
             if (connection == null || connection.isBlank()) {
-                dialect = primaryDialect;
-                jdbcTemplate = primaryJdbcTemplate;
-            } else {
-                ByokDataSourceContext context = dataSourceManager.acquire(connection);
-                dialect = context.getDialect();
-                jdbcTemplate = context.getJdbcTemplate();
+                throw new IllegalArgumentException("Connection is required.");
             }
+            ByokDataSourceContext context = dataSourceManager.acquire(connection);
+            DatabaseDialect dialect = context.getDialect();
+            var jdbcTemplate = context.getJdbcTemplate();
 
             String sql = sqlProvider.apply(dialect);
             if (sql == null || sql.isBlank()) {
@@ -89,19 +118,18 @@ public final class DialectQueryUtils {
             }
             return successResponse(Map.of("rows", rows));
         } catch (Exception e) {
-            throw new RuntimeException(e.getMessage(), e);
+            log.warn("executeDialectQuery failed for connection '{}': {}", connection, e.getMessage(), e);
+            throw new RuntimeException("Dialect query execution failed: " + e.getMessage(), e);
         }
     }
 
     public static Map<String, Object> executeDialectQuery(DynamicDataSourceManager dataSourceManager,
-                                                           DatabaseDialect primaryDialect,
-                                                           JdbcTemplate primaryJdbcTemplate,
                                                            String connection,
                                                            java.util.function.Function<DatabaseDialect, String> sqlProvider,
                                                            Object... args) {
         if (args == null || args.length == 0) {
-            return executeDialectQuery(dataSourceManager, primaryDialect, primaryJdbcTemplate, connection, sqlProvider, List.of());
+            return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of());
         }
-        return executeDialectQuery(dataSourceManager, primaryDialect, primaryJdbcTemplate, connection, sqlProvider, List.of(args));
+        return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of(args));
     }
 }

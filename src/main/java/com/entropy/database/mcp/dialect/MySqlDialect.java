@@ -18,6 +18,8 @@ package com.entropy.database.mcp.dialect;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.zaxxer.hikari.HikariConfig;
 
+import java.util.List;
+
 public class MySqlDialect extends AbstractDatabaseDialect {
 
     @Override
@@ -87,6 +89,15 @@ public class MySqlDialect extends AbstractDatabaseDialect {
             SELECT '' AS name, '' AS minimum_value, '' AS maximum_value, '' AS increment, 0 AS cache_size
             FROM dual WHERE 1 = 0
             """;
+    }
+
+    @Override
+    public String connectionTestQuery() {
+        return "SELECT 1";
+    }
+
+    public String healthCheckSql() {
+        return "SELECT 'OK' AS status";
     }
 
     @Override
@@ -238,5 +249,17 @@ public class MySqlDialect extends AbstractDatabaseDialect {
                 WHERE grantee = ?
                 ORDER BY grantee, privilege
                 """;
+    }
+
+    @Override
+    public String buildUpsertSql(String tableName, List<String> allColumns, List<String> keyColumns) {
+        String columnList = String.join(", ", allColumns);
+        String placeholderList = String.join(", ", allColumns.stream().map(c -> "?").toList());
+        List<String> nonKeyColumns = allColumns.stream().filter(col -> !keyColumns.contains(col)).toList();
+        String updateSet = nonKeyColumns.stream()
+                .map(col -> col + " = VALUES(" + col + ")")
+                .reduce((a, b) -> a + ", " + b).orElse("");
+        return String.format("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
+                tableName, columnList, placeholderList, updateSet);
     }
 }

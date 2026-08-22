@@ -16,8 +16,9 @@
 package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.config.EtlConfig;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
+import com.entropy.database.mcp.byok.ConnectionProperties;
+import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.etl.JobExecutionEngine;
@@ -65,6 +66,31 @@ public class EtlTools {
 
     // ─── Connection Management (from DataMigrationTools) ────────────────────
 
+    private void validateTableName(String tableName) {
+        validateIdentifier(tableName, "tableName");
+    }
+
+    /**
+     * Common parameter validation for insert operations.
+     */
+    private void validateInsertParams(String connectionName, String tableName, List<?> rows) {
+        requireNotBlank(connectionName, "connectionName");
+        requireNotBlank(tableName, "tableName");
+        validateTableName(tableName);
+        requireNotEmpty(rows, "rows");
+    }
+
+    /**
+     * Common parameter validation for transform operations.
+     */
+    private void validateTransformParams(String connectionName, String sourceTable, String targetTable, List<String> columnMapping) {
+        requireNotBlank(connectionName, "connectionName");
+        requireNotBlank(sourceTable, "sourceTable");
+        requireNotBlank(targetTable, "targetTable");
+        validateTableName(targetTable);
+        requireNotEmpty(columnMapping, "columnMapping");
+    }
+
     @McpTool(description = "Create a named BYOK connection to a remote database")
     public Map<String, Object> createNamedConnection(
             @McpToolParam(description = "Connection name for reuse") String name,
@@ -73,8 +99,13 @@ public class EtlTools {
             @McpToolParam(description = "Database password") String password,
             @McpToolParam(description = "Database dialect (oracle, mysql, postgres, sqlserver)") String dialect) {
         try {
-            com.entropy.database.mcp.byok.ConnectionProperties properties = new com.entropy.database.mcp.byok.ConnectionProperties(
-                    jdbcUrl, username, password, dialect, null, false);
+            ConnectionProperties properties = ConnectionProperties.builder()
+                    .jdbcUrl(jdbcUrl)
+                    .username(username)
+                    .password(password)
+                    .dialect(dialect)
+                    .build();
+            properties.validate();
             ByokDataSourceContext context = dataSourceManager.acquire(name, properties);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             String testSql = context.getDialect().connectionTestQuery();
@@ -94,13 +125,14 @@ public class EtlTools {
 
     @McpTool(description = "Batch insert rows into a remote table via BYOK connection")
     public Map<String, Object> insertData(
-            @McpToolParam(description = "BYOK connection name") String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Target table name") String tableName,
             @McpToolParam(description = "List of rows to insert (each map is a row)") List<Map<String, Object>> rows,
             @McpToolParam(description = "Batch size for JDBC batch update") Integer batchSize) {
         try {
             requireNotBlank(connectionName, "connectionName");
             requireNotBlank(tableName, "tableName");
+            validateTableName(tableName);
             requireNotEmpty(rows, "rows");
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
@@ -109,6 +141,9 @@ public class EtlTools {
             String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
             String sql = String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columnList, placeholderList);
             int size = batchSize != null ? batchSize : etlConfig.batchSize();
+            if (size <= 0) {
+                throw new IllegalArgumentException("batchSize must be positive, got: " + size);
+            }
             long startTime = System.currentTimeMillis();
             int[][] updateCounts = jdbcTemplate.batchUpdate(sql, rows, size, (ps, row) -> {
                 for (int i = 0; i < columns.size(); i++) {
@@ -143,6 +178,7 @@ public class EtlTools {
             @McpToolParam(description = "Target table name") String targetTable,
             @McpToolParam(description = "Batch size for insertion") Integer batchSize) {
         try {
+            validateTableName(targetTable);
             ByokDataSourceContext sourceContext = dataSourceManager.acquire(sourceConnectionName);
             JdbcTemplate sourceJdbc = sourceContext.getJdbcTemplate();
             List<Map<String, Object>> rows = sourceJdbc.queryForList(sourceSql);
@@ -156,6 +192,9 @@ public class EtlTools {
             String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
             String insertSql = String.format("INSERT INTO %s (%s) VALUES (%s)", targetTable, columnList, placeholderList);
             int size = batchSize != null ? batchSize : 1000;
+            if (size <= 0) {
+                throw new IllegalArgumentException("batchSize must be positive, got: " + size);
+            }
             long startTime = System.currentTimeMillis();
             int[][] updateCounts = targetJdbc.batchUpdate(insertSql, rows, size, (ps, row) -> {
                 for (int i = 0; i < columns.size(); i++) {
@@ -185,16 +224,13 @@ public class EtlTools {
 
     @McpTool(description = "Transform and insert data with column mapping (ETL helper)")
     public Map<String, Object> transformAndInsert(
-            @McpToolParam(description = "BYOK connection name") String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Source table name") String sourceTable,
             @McpToolParam(description = "Target table name") String targetTable,
             @McpToolParam(description = "Column mappings (e.g., ['id:ID', 'name:FULL_NAME:upper'])") List<String> columnMapping,
             @McpToolParam(description = "Optional WHERE clause for filtering", required = false) String whereClause) {
         try {
-            requireNotBlank(connectionName, "connectionName");
-            requireNotBlank(sourceTable, "sourceTable");
-            requireNotBlank(targetTable, "targetTable");
-            requireNotEmpty(columnMapping, "columnMapping");
+            validateTransformParams(connectionName, sourceTable, targetTable, columnMapping);
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             List<String> sourceColumns = new ArrayList<>();
@@ -231,6 +267,7 @@ public class EtlTools {
             selectSql.append(String.join(", ", selectExprs));
             selectSql.append(" FROM ").append(sourceTable);
             if (whereClause != null && !whereClause.isBlank()) {
+                validateWhereClause(whereClause, "whereClause");
                 selectSql.append(" WHERE ").append(whereClause);
             }
 
@@ -270,40 +307,25 @@ public class EtlTools {
 
     @McpTool(description = "Upsert data into a table (insert or update based on key columns)")
     public Map<String, Object> upsertData(
-            @McpToolParam(description = "BYOK connection name") String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Target table name") String tableName,
             @McpToolParam(description = "Key columns for matching (e.g., ['id'])") List<String> keyColumns,
             @McpToolParam(description = "List of rows to upsert") List<Map<String, Object>> rows) {
         try {
             requireNotBlank(connectionName, "connectionName");
             requireNotBlank(tableName, "tableName");
+            validateTableName(tableName);
             requireNotEmpty(rows, "rows");
             requireNotEmpty(keyColumns, "keyColumns");
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
-            String dialect = context.getDialect().getClass().getSimpleName().toLowerCase();
+            DatabaseDialect dialect = context.getDialect();
             List<String> allColumns = rows.get(0).keySet().stream().toList();
-            List<String> nonKeyColumns = allColumns.stream().filter(col -> !keyColumns.contains(col)).toList();
-            String columnList = String.join(", ", allColumns);
-            String placeholderList = String.join(", ", allColumns.stream().map(c -> "?").toList());
-            String upsertSql;
-            if (dialect.contains("postgres") || dialect.contains("oracle")) {
-                if (dialect.contains("postgres")) {
-                    String keyList = String.join(", ", keyColumns);
-                    String updateSet = nonKeyColumns.stream().map(col -> col + " = EXCLUDED." + col).reduce((a, b) -> a + ", " + b).orElse("");
-                    upsertSql = String.format("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
-                            tableName, columnList, placeholderList, keyList, updateSet);
-                } else {
-                    String keyCondition = keyColumns.stream().map(k -> "target." + k + " = source." + k).reduce((a, b) -> a + " AND " + b).orElse("");
-                    String updateSet = nonKeyColumns.stream().map(col -> "target." + col + " = source." + col).reduce((a, b) -> a + ", " + b).orElse("");
-                    upsertSql = String.format(
-                            "MERGE INTO %s target USING (SELECT %s FROM DUAL) source ON (%s) WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
-                            tableName, columnList.replace(", ", ", source."), keyCondition, updateSet, columnList, placeholderList);
-                }
-            } else {
-                String updateSet = nonKeyColumns.stream().map(col -> col + " = VALUES(" + col + ")").reduce((a, b) -> a + ", " + b).orElse("");
-                upsertSql = String.format("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
-                        tableName, columnList, placeholderList, updateSet);
+            String upsertSql = dialect.buildUpsertSql(tableName, allColumns, keyColumns);
+            if (upsertSql == null) {
+                return errorResponse(Map.of("connectionName", connectionName, "tableName", tableName),
+                        "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName(),
+                        "UnsupportedOperationException");
             }
             long startTime = System.currentTimeMillis();
             int[][] updateCounts = jdbcTemplate.batchUpdate(upsertSql, rows, 1000, (ps, row) -> {
@@ -334,7 +356,7 @@ public class EtlTools {
 
     @McpTool(description = "Validate data quality in a table (nulls, duplicates, types)")
     public Map<String, Object> validateDataQuality(
-            @McpToolParam(description = "BYOK connection name") String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Table name to validate") String tableName,
             @McpToolParam(description = "Columns to check (null for all)", required = false) List<String> columns) {
         try {
@@ -395,7 +417,7 @@ public class EtlTools {
 
     @McpTool(description = "Export query results to a table with automatic batching")
     public Map<String, Object> exportQueryToTable(
-            @McpToolParam(description = "BYOK connection name") String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Source SELECT query") String sourceSql,
             @McpToolParam(description = "Target table name") String targetTable,
             @McpToolParam(description = "Batch size for processing", required = false) Integer batchSize) {
@@ -450,17 +472,36 @@ public class EtlTools {
 
     @McpTool(description = "Submit an ETL job for execution (MigrationJob DSL)")
     public Map<String, Object> submitEtlJob(
-            @McpToolParam(description = "Job definition (id, name, description, steps)") Map<String, Object> jobDefinition) {
+            @McpToolParam(description = "Job definition (id, name, description, steps)") Object jobDefinition) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> jd = (Map<String, Object>) jobDefinition;
         try {
-            String jobId = (String) jobDefinition.get("id");
-            String jobName = (String) jobDefinition.get("name");
-            String description = (String) jobDefinition.getOrDefault("description", "");
-            List<Map<String, Object>> stepDefs = (List<Map<String, Object>>) jobDefinition.get("steps");
+            String jobId = (String) jd.get("id");
+            String jobName = (String) jd.get("name");
+            String description = (String) jd.getOrDefault("description", "");
+            @SuppressWarnings("unchecked")
+            List<?> rawSteps = (List<?>) jd.get("steps");
+            if (!(rawSteps instanceof List<?>)) {
+                throw new IllegalArgumentException("steps must be a list");
+            }
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> stepDefs = (List<Map<String, Object>>) rawSteps;
+            if (stepDefs == null) {
+                throw new IllegalArgumentException("steps must not be null");
+            }
             requireNotEmpty(stepDefs, "steps");
             List<Step> steps = new ArrayList<>();
             for (Map<String, Object> stepDef : stepDefs) {
                 String stepId = (String) stepDef.get("id");
                 String typeStr = (String) stepDef.get("type");
+                if (stepId == null || stepId.isBlank()) {
+                    log.warn("Skipping step with null or blank id");
+                    continue;
+                }
+                if (typeStr == null || typeStr.isBlank()) {
+                    log.warn("Skipping step with null or blank type for step id: {}", stepId);
+                    continue;
+                }
                 StepType type = StepType.from(typeStr);
                 List<String> dependsOn = new ArrayList<>();
                 if (stepDef.containsKey("dependsOn")) {
@@ -480,7 +521,11 @@ public class EtlTools {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> params = new HashMap<>();
                 if (stepDef.containsKey("params")) {
-                    params.putAll((Map<String, Object>) stepDef.get("params"));
+                    Object rawParams = stepDef.get("params");
+                    if (!(rawParams instanceof Map<?, ?>)) {
+                        throw new IllegalArgumentException("params must be a map");
+                    }
+                    params.putAll((Map<String, Object>) rawParams);
                 }
                 steps.add(new Step(stepId, type, dependsOn, connection, sourceSql, targetTable, targetConnection, params));
             }

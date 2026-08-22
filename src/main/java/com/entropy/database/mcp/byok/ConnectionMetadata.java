@@ -32,7 +32,6 @@ public record ConnectionMetadata(
     Instant createdAt,
     java.time.Duration leaseTtl,
     java.time.Duration maxLifetime,
-    boolean isPrimary,
     int poolSize,
     int activeConnections
 ) {

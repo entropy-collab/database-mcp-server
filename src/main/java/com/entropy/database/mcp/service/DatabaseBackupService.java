@@ -19,21 +19,23 @@ import java.util.Map;
 
 /**
  * Interface for database backup and schema comparison services.
+ *
+ * All methods require an explicit connection name; there is no default connection.
  */
 public interface DatabaseBackupService {
 
     /**
      * Backup table schema definition as DDL statements.
      */
-    Map<String, Object> backupSchema(String tableName);
+    Map<String, Object> backupSchema(String tableName, String connection);
 
     /**
      * Backup table data as INSERT statements.
      */
-    Map<String, Object> backupData(String tableName, int maxRows);
+    Map<String, Object> backupData(String tableName, int maxRows, String connection);
 
     /**
      * Compare schema differences between two tables.
      */
-    Map<String, Object> diffSchema(String sourceTable, String targetTable);
+    Map<String, Object> diffSchema(String sourceTable, String targetTable, String connection);
 }

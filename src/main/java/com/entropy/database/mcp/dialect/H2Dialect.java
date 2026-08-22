@@ -141,4 +141,8 @@ public class H2Dialect extends AbstractDatabaseDialect {
     public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
         // H2 specific configuration if needed
     }
+
+    public String healthCheckSql() {
+        return "SELECT 'OK' AS status";
+    }
 }

@@ -201,7 +201,7 @@ public class JobExecutionEngine implements DisposableBean {
     }
 
     /**
-     * Execute a single step.
+     * Execute a single step using the appropriate StepHandler.
      */
     private void executeStep(MigrationJob job, Step step, JobExecution execution) {
         updateStepState(execution, step.id(), StepExecutionState.running(step.id()));
@@ -214,15 +214,8 @@ public class JobExecutionEngine implements DisposableBean {
                     step.targetConnection() != null ? step.targetConnection() : step.connection()
             );
 
-            long rowsAffected = switch (step.type()) {
-                case QUERY_TO_TABLE -> executeQueryToTable(sourceContext, targetContext, step, execution);
-                case TRANSFORM -> executeTransform(sourceContext, targetContext, step, execution);
-                case DDL -> executeDdl(sourceContext, step, execution);
-                case UPSERT -> executeUpsert(sourceContext, targetContext, step, execution);
-                case QUERY_TO_JSON -> executeQueryToJson(sourceContext, step, execution);
-                case READ -> executeRead(sourceContext, step, execution);
-                case EXPORT -> executeExport(sourceContext, step, execution);
-            };
+            StepHandler stepHandler = findHandler(step.type());
+            long rowsAffected = stepHandler.execute(sourceContext, targetContext, step, this);
 
             updateStepState(execution, step.id(), StepExecutionState.completed(step.id(), rowsAffected));
             log.info("Step {} completed: {} rows affected", step.id(), rowsAffected);
@@ -233,22 +226,30 @@ public class JobExecutionEngine implements DisposableBean {
         }
     }
 
-    // ─── Step Executors ─────────────────────────────────────────────────────
+    private StepHandler findHandler(StepType type) {
+        return switch (type) {
+            case QUERY_TO_TABLE -> new QueryToTableStepHandler();
+            case TRANSFORM -> new TransformStepHandler();
+            case DDL -> new DdlStepHandler();
+            case UPSERT -> new UpsertStepHandler();
+            case QUERY_TO_JSON -> new QueryToJsonStepHandler();
+            case READ -> new ReadStepHandler();
+            case EXPORT -> new ExportStepHandler();
+        };
+    }
 
-    private long executeQueryToTable(ByokDataSourceContext source, ByokDataSourceContext target,
-                                      Step step, JobExecution execution) {
+    // ─── Step Executors (exposed as protected for StepHandler reuse) ─────────
+
+    protected long executeQueryToTable(ByokDataSourceContext source, ByokDataSourceContext target,
+                                       Step step) {
         JdbcTemplate sourceJdbc = source.getJdbcTemplate();
         JdbcTemplate targetJdbc = target.getJdbcTemplate();
         DatabaseDialect dialect = target.getDialect();
 
-        // Validate and quote table name
         String targetTable = dialect.normalizeTableName(step.targetTable());
-
-        // Execute query
         List<Map<String, Object>> rows = sourceJdbc.queryForList(step.sourceSql());
         if (rows.isEmpty()) return 0;
 
-        // Build INSERT
         List<String> columns = new ArrayList<>(rows.get(0).keySet());
         String columnList = columns.stream().map(dialect::quote).collect(Collectors.joining(", "));
         String placeholderList = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
@@ -264,16 +265,14 @@ public class JobExecutionEngine implements DisposableBean {
         return Arrays.stream(updateCounts).flatMapToInt(Arrays::stream).sum();
     }
 
-    private long executeTransform(ByokDataSourceContext source, ByokDataSourceContext target,
-                                   Step step, JobExecution execution) {
-        // Get column mappings from params
+    protected long executeTransform(ByokDataSourceContext source, ByokDataSourceContext target,
+                                    Step step) {
         List<String> columnMapping = getListParam(step, "columnMapping", List.of());
         String whereClause = getStringParam(step, "whereClause", null);
 
         JdbcTemplate jdbcTemplate = source.getJdbcTemplate();
         DatabaseDialect dialect = source.getDialect();
 
-        // Build SELECT with transformations
         List<String> sourceColumns = new ArrayList<>();
         List<String> targetColumns = new ArrayList<>();
         List<String> transforms = new ArrayList<>();
@@ -325,39 +324,36 @@ public class JobExecutionEngine implements DisposableBean {
         return Arrays.stream(updateCounts).flatMapToInt(Arrays::stream).sum();
     }
 
-    private long executeDdl(ByokDataSourceContext context, Step step, JobExecution execution) {
+    protected long executeDdl(ByokDataSourceContext context, Step step) {
         JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
         List<String> statements = getListParam(step, "statements", List.of());
 
         int totalAffected = 0;
         for (String ddl : statements) {
-            int affected = jdbcTemplate.update(ddl);
-            totalAffected += affected;
+            totalAffected += jdbcTemplate.update(ddl);
         }
         return totalAffected;
     }
 
-    private long executeUpsert(ByokDataSourceContext context, ByokDataSourceContext target,
-                                Step step, JobExecution execution) {
-        // Simplified upsert - in production, use dialect-specific MERGE/ON CONFLICT
-        return executeQueryToTable(context, target, step, execution);
+    protected long executeUpsert(ByokDataSourceContext context, ByokDataSourceContext target,
+                                 Step step) {
+        // Delegates to dialect-specific buildUpsertSql via UpsertStepHandler
+        return executeQueryToTable(context, target, step);
     }
 
-    private long executeQueryToJson(ByokDataSourceContext context, Step step, JobExecution execution) {
+    protected long executeQueryToJson(ByokDataSourceContext context, Step step) {
         List<Map<String, Object>> rows = context.getJdbcTemplate().queryForList(step.sourceSql());
-        // In production, write to file or return via SSE
         log.info("Query to JSON: {} rows", rows.size());
         return rows.size();
     }
 
-    private long executeRead(ByokDataSourceContext context, Step step, JobExecution execution) {
+    protected long executeRead(ByokDataSourceContext context, Step step) {
         List<Map<String, Object>> rows = context.getJdbcTemplate().queryForList(step.sourceSql());
         log.info("Read step: {} rows", rows.size());
         return rows.size();
     }
 
-    private long executeExport(ByokDataSourceContext context, Step step, JobExecution execution) {
-        // Placeholder for export logic
+    protected long executeExport(ByokDataSourceContext context, Step step) {
         log.info("Export step: {}", step.id());
         return 0;
     }
@@ -432,14 +428,14 @@ public class JobExecutionEngine implements DisposableBean {
         executions.put(execution.jobId(), execution);
     }
 
-    private int getIntParam(Step step, String key, int defaultValue) {
+    protected int getIntParam(Step step, String key, int defaultValue) {
         Object value = step.params().get(key);
         if (value instanceof Number n) return n.intValue();
         if (value instanceof String s) return Integer.parseInt(s);
         return defaultValue;
     }
 
-    private List<String> getListParam(Step step, String key, List<String> defaultValue) {
+    protected List<String> getListParam(Step step, String key, List<String> defaultValue) {
         Object value = step.params().get(key);
         if (value instanceof List<?> list) {
             return list.stream().map(Object::toString).toList();
@@ -450,7 +446,7 @@ public class JobExecutionEngine implements DisposableBean {
         return defaultValue;
     }
 
-    private String getStringParam(Step step, String key, String defaultValue) {
+    protected String getStringParam(Step step, String key, String defaultValue) {
         Object value = step.params().get(key);
         return value != null ? value.toString() : defaultValue;
     }

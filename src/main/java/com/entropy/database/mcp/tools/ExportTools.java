@@ -16,7 +16,7 @@
 package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.config.QueryConfig;
-import com.entropy.database.mcp.facade.DatabaseFacade;
+import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.util.QueryUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -39,12 +39,12 @@ public class ExportTools {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final int MAX_EXPORT_LIMIT = 10000;
 
-    private final DatabaseFacade databaseFacade;
+    private final RoutingDatabaseFacade routingFacade;
     private final int maxExportRows;
 
-    public ExportTools(DatabaseFacade databaseFacade,
+    public ExportTools(RoutingDatabaseFacade routingFacade,
                        QueryConfig queryConfig) {
-        this.databaseFacade = databaseFacade;
+        this.routingFacade = routingFacade;
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
 
@@ -55,18 +55,20 @@ public class ExportTools {
     @McpTool(description = "Execute a query and export results to CSV format")
     public String exportCsv(
             @McpToolParam(description = "SQL query to execute") String sql,
-            @McpToolParam(description = "Maximum number of rows") int maxRows) {
+            @McpToolParam(description = "Maximum number of rows") int maxRows,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         int limit = computeExportLimit(maxRows);
-        var result = databaseFacade.executeQuery(sql, limit, null);
+        var result = routingFacade.executeQuery(sql, limit, null, connection);
         return QueryUtils.toCsv(result.rows(), result.columns());
     }
 
     @McpTool(description = "Execute a query and export results to JSON format")
     public String exportJson(
             @McpToolParam(description = "SQL query to execute") String sql,
-            @McpToolParam(description = "Maximum number of rows") int maxRows) {
+            @McpToolParam(description = "Maximum number of rows") int maxRows,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         int limit = computeExportLimit(maxRows);
-        var result = databaseFacade.executeQuery(sql, limit, null);
+        var result = routingFacade.executeQuery(sql, limit, null, connection);
         try {
             return OBJECT_MAPPER.writeValueAsString(Map.of(
                     "columns", result.columns(),
@@ -74,11 +76,13 @@ public class ExportTools {
                     "rowCount", result.rows().size()
             ));
         } catch (Exception e) {
-            log.warn("exportJson failed: {}", e.getMessage());
+            log.warn("exportJson failed: {}", e.getMessage(), e);
+            Map<String, Object> errorCtx = Map.of("sql", sql, "maxRows", maxRows, "connection", connection,
+                    "success", false, "error", e.getMessage(), "cause", e.getClass().getSimpleName());
             try {
-                return OBJECT_MAPPER.writeValueAsString(errorResponse("Export to JSON failed", e.getMessage()));
-            } catch (Exception ex) {
-                return "{\"error\": \"Export to JSON failed\", \"cause\": \"" + e.getMessage() + "\"}";
+                return OBJECT_MAPPER.writeValueAsString(errorCtx);
+            } catch (Exception ignored) {
+                return "{\"success\":false,\"error\":\"" + e.getMessage() + "\"}";
             }
         }
     }

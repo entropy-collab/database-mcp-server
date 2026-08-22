@@ -1,19 +1,30 @@
 package com.entropy.database.mcp;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.util.List;
 import java.util.Map;
 
+@ExtendWith(SpringExtension.class)
 @SpringBootTest(properties = {
-    "spring.datasource.primary.jdbc-url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1",
-    "spring.datasource.primary.username=sa",
-    "spring.datasource.primary.password="
+    "entropy.mcp.database.enabled=true",
+    "entropy.mcp.database.dialect=h2"
 })
 public class TestH2Schemas {
+
+    @DynamicPropertySource
+    static void registerH2DataSource(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.jdbc-url", () -> "jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        registry.add("spring.datasource.username", () -> "sa");
+        registry.add("spring.datasource.password", () -> "");
+    }
 
     @Autowired
     private JdbcTemplate jdbcTemplate;

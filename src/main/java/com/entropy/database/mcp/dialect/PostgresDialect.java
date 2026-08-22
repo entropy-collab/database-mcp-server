@@ -18,6 +18,8 @@ package com.entropy.database.mcp.dialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 
+import java.util.List;
+
 public class PostgresDialect extends AbstractDatabaseDialect {
 
     @Override
@@ -89,6 +91,10 @@ public class PostgresDialect extends AbstractDatabaseDialect {
             WHERE sequence_schema = ?
             ORDER BY sequence_name
             """;
+    }
+
+    public String healthCheckSql() {
+        return "SELECT 'OK' AS status";
     }
 
     @Override
@@ -264,5 +270,22 @@ public class PostgresDialect extends AbstractDatabaseDialect {
                 WHERE grantee = ?
                 ORDER BY grantee, privilege
                 """;
+    }
+
+    @Override
+    public String buildUpsertSql(String tableName, List<String> allColumns, List<String> keyColumns) {
+        String columnList = String.join(", ", allColumns);
+        String placeholderList = String.join(", ", allColumns.stream().map(c -> "?").toList());
+        String keyList = String.join(", ", keyColumns);
+        List<String> nonKeyColumns = allColumns.stream().filter(col -> !keyColumns.contains(col)).toList();
+        if (nonKeyColumns.isEmpty()) {
+            return String.format("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO NOTHING",
+                    tableName, columnList, placeholderList, keyList);
+        }
+        String updateSet = nonKeyColumns.stream()
+                .map(col -> col + " = EXCLUDED." + col)
+                .reduce((a, b) -> a + ", " + b).orElse("");
+        return String.format("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+                tableName, columnList, placeholderList, keyList, updateSet);
     }
 }

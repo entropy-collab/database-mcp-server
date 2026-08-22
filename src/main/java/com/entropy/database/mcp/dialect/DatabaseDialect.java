@@ -58,13 +58,79 @@ public interface DatabaseDialect {
             """;
     }
 
-    default String explainPlanSql(String sql) {
-        return null; // Not supported
+    /**
+     * Generate EXPLAIN PLAN SQL for the given query.
+     * Returns null if not supported.
+     */
+    default String getExplainPlanSql(String sql) {
+        return explainPlanSql(sql);
     }
 
-    default String getExecutionPlanSql() {
-        return null; // Not supported
+    /**
+     * Generate EXPLAIN PLAN SQL for the given query.
+     * Deprecated: use getExplainPlanSql instead.
+     * @deprecated Use {@link #getExplainPlanSql(String)} instead.
+     */
+    @Deprecated
+    default String explainPlanSql(String sql) {
+        return null;
     }
+
+    /**
+     * Get table row count SQL for the given table name.
+     * Returns null if not supported.
+     */
+    default String getTableRowCountSql(String tableName) {
+        return null;
+    }
+
+    /**
+     * Build UPSERT SQL for the given table and columns.
+     * Returns null if not supported.
+     */
+    default String buildUpsertSql(String tableName, java.util.List<String> allColumns, java.util.List<String> keyColumns) {
+        return null;
+    }
+
+    /**
+     * Get table statistics SQL for the given table name.
+     * Returns null if not supported.
+     */
+    default String getTableStatisticsSql(String tableName) {
+        return null;
+    }
+
+    /**
+     * Apply pagination to the given SQL.
+     * Returns null if not supported.
+     */
+    default String getPaginationSql(String sql, int offset, int limit) {
+        return null;
+    }
+
+    /**
+     * Check if this dialect supports EXPLAIN PLAN.
+     */
+    default boolean supportsExplainPlan() {
+        return false;
+    }
+
+    /**
+     * Check if this dialect supports table statistics queries.
+     */
+    default boolean supportsTableStatistics() {
+        return false;
+    }
+
+    /**
+     * Get the dialect name (e.g., "oracle", "mysql", "postgres").
+     */
+    String getDialectName();
+
+    /**
+     * Get the health check SQL for this dialect.
+     */
+    String getHealthCheckSql();
 
     /**
      * SQL to search tables by keyword across all schemas.

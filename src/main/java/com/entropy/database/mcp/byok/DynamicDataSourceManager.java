@@ -23,15 +23,13 @@ import javax.sql.DataSource;
 import java.util.Collection;
 
 /**
- * Central manager for all datasources (primary and BYOK).
- * Handles lifecycle management with TTL-based lease renewal.
+ * Central manager for all datasources.
+ * All connections are equal BYOK connections; there is no primary/default concept.
  */
 public interface DynamicDataSourceManager {
 
     /**
      * Acquire a datasource context by key.
-     * For primary datasource, use key="primary".
-     * For BYOK, use the connection's cache key.
      */
     ByokDataSourceContext acquire(String key, ConnectionProperties connection);
 
@@ -42,8 +40,8 @@ public interface DynamicDataSourceManager {
     ByokDataSourceContext acquire(String key);
 
     /**
-     * Register an existing Spring-managed datasource (e.g. primary) as a BYOK connection.
-     * The datasource is NOT closed when the lease expires (managed by Spring).
+     * Register an existing datasource as a BYOK connection.
+     * The datasource is NOT closed when the lease expires (managed externally).
      */
     void registerExisting(String key, DataSource existingDataSource, DatabaseDialect dialect);
 
@@ -78,4 +76,10 @@ public interface DynamicDataSourceManager {
      * Get current cache size (number of active leased datasources).
      */
     int getActiveConnectionCount();
+
+    /**
+     * Force Caffeine to evict expired entries and trigger removal listener.
+     * This is a no-op if no entries have expired.
+     */
+    void evictExpired();
 }

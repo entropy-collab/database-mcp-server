@@ -16,111 +16,175 @@
 package com.entropy.database.mcp.facade;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.ConnectionProperties;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.domain.PaginatedQueryResult;
+import com.entropy.database.mcp.stream.SseStreamManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Routing facade that delegates to either the primary datasource or a BYOK datasource
- * based on the provided connection properties.
- *
- * <p>When no connection is provided, operations are routed to the primary datasource.
- * When connection is provided, a BYOK datasource is acquired and used for the operation.
+ * Routing facade that delegates to BYOK datasources only.
+ * All connections are equal; there is no default connection.
  */
 @Service
-public class RoutingDatabaseFacade {
+public class RoutingDatabaseFacade implements DatabaseOperations {
 
-    private final DatabaseOperations primaryFacade;
+    private static final Logger log = LoggerFactory.getLogger(RoutingDatabaseFacade.class);
+
     private final DynamicDataSourceManager dynamicDataSourceManager;
 
-    public RoutingDatabaseFacade(DatabaseOperations primaryFacade,
-                                 DynamicDataSourceManager dynamicDataSourceManager) {
-        this.primaryFacade = primaryFacade;
+    public RoutingDatabaseFacade(DynamicDataSourceManager dynamicDataSourceManager) {
         this.dynamicDataSourceManager = dynamicDataSourceManager;
     }
 
     // ─── Helper ────────────────────────────────────────────────────────────
 
-    private DatabaseOperations resolveFacade(ConnectionProperties connection) {
-        if (connection == null) {
-            return primaryFacade;
+    private ByokDataSourceContext resolveContext(String connection) {
+        if (connection == null || connection.isBlank()) {
+            throw new IllegalArgumentException(buildConnectionRequiredMessage());
         }
-        ByokDataSourceContext context = dynamicDataSourceManager.acquire(
-                connection.getCacheKey(), connection);
-        return new ByokDatabaseFacade(context);
+        try {
+            return dynamicDataSourceManager.acquire(connection);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(buildConnectionNotFoundMessage(connection) + e.getMessage(), e);
+        }
+    }
+
+    private String buildConnectionRequiredMessage() {
+        Collection<String> registered = dynamicDataSourceManager.listConnectionKeys();
+        if (registered.isEmpty()) {
+            return """
+                    Connection is required but not provided.
+                    No connections are registered yet.
+                    To get started:
+                      1. Call createNamedConnection with: name, jdbcUrl, username, password, dialect
+                      2. Then pass the connection name to this tool.
+                    For help, call prompt("database-quick-start").""";
+        }
+        return """
+                Connection is required but not provided.
+                Registered connections: %s
+                Pass the connection name explicitly, or call createNamedConnection first.
+                """.formatted(registered);
+    }
+
+    private String buildConnectionNotFoundMessage(String connection) {
+        Collection<String> registered = dynamicDataSourceManager.listConnectionKeys();
+        String tip = registered.isEmpty()
+                ? "No connections registered. Call createNamedConnection first."
+                : "Available connections: " + registered;
+        return "Connection not found: " + connection + ". " + tip + " ";
+    }
+
+    private ByokDatabaseFacade resolveFacade(String connection) {
+        return new ByokDatabaseFacade(resolveContext(connection));
     }
 
     // ─── Read Operations ───────────────────────────────────────────────────
 
-    public List<Map<String, Object>> listTables(String schema, ConnectionProperties connection) {
-        return resolveFacade(connection).listTables(schema);
+    @Override
+    public List<Map<String, Object>> listTables(String schema, String connection) {
+        return resolveFacade(connection).listTables(schema, connection);
     }
 
-    public List<Map<String, Object>> searchTables(String keyword, ConnectionProperties connection) {
-        return resolveFacade(connection).searchTables(keyword);
+    @Override
+    public List<Map<String, Object>> searchTables(String keyword, String connection) {
+        return resolveFacade(connection).searchTables(keyword, connection);
     }
 
-    public List<String> listSchemas(ConnectionProperties connection) {
-        return resolveFacade(connection).listSchemas();
+    @Override
+    public List<String> listSchemas(String connection) {
+        return resolveFacade(connection).listSchemas(connection);
     }
 
-    public Map<String, Object> describeTable(String table, String schema, ConnectionProperties connection) {
-        return resolveFacade(connection).describeTable(table, schema);
+    @Override
+    public Map<String, Object> describeTable(String table, String schema, String connection) {
+        return resolveFacade(connection).describeTable(table, schema, connection);
     }
 
-    public List<Map<String, Object>> listIndexes(String table, String schema, ConnectionProperties connection) {
-        return resolveFacade(connection).listIndexes(table, schema);
+    @Override
+    public List<Map<String, Object>> listIndexes(String table, String schema, String connection) {
+        return resolveFacade(connection).listIndexes(table, schema, connection);
     }
 
-    public List<Map<String, Object>> listViews(String schema, ConnectionProperties connection) {
-        return resolveFacade(connection).listViews(schema);
+    @Override
+    public List<Map<String, Object>> listViews(String schema, String connection) {
+        return resolveFacade(connection).listViews(schema, connection);
     }
 
-    public List<Map<String, Object>> listSequences(String schema, ConnectionProperties connection) {
-        return resolveFacade(connection).listSequences(schema);
+    @Override
+    public List<Map<String, Object>> listSequences(String schema, String connection) {
+        return resolveFacade(connection).listSequences(schema, connection);
     }
 
-    public com.entropy.database.mcp.domain.PaginatedQueryResult executeQuery(
-            String sql, int maxRows, String continuationToken, ConnectionProperties connection) {
-        return resolveFacade(connection).executeQuery(sql, maxRows, continuationToken);
+    @Override
+    public PaginatedQueryResult executeQuery(
+            String sql, int maxRows, String continuationToken, String connection) {
+        return resolveFacade(connection).executeQuery(sql, maxRows, continuationToken, connection);
     }
 
-    public Map<String, Object> getDatabaseInfo(ConnectionProperties connection) {
-        return resolveFacade(connection).getDatabaseInfo();
+    @Override
+    public PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
+                                                    SseStreamManager.QueryExecutor<PaginatedQueryResult> executor, String connection) {
+        return resolveFacade(connection).executeQueryWithSse(sql, maxRows, continuationToken, executor, connection);
+    }
+
+    @Override
+    public List<Map<String, Object>> executeNamedQuery(
+            String sql, Map<String, Object> params, String connection) {
+        return resolveFacade(connection).executeNamedQuery(sql, params, connection);
+    }
+
+    @Override
+    public Map<String, Object> getDatabaseInfo(String connection) {
+        return resolveFacade(connection).getDatabaseInfo(connection);
     }
 
     // ─── Execution Plan ────────────────────────────────────────────────────
 
-    public com.entropy.database.mcp.domain.PlanAnalysis explainPlan(String sql, ConnectionProperties connection) {
-        return resolveFacade(connection).explainPlan(sql);
+    @Override
+    public com.entropy.database.mcp.domain.PlanAnalysis explainPlan(String sql, String connection) {
+        return resolveFacade(connection).explainPlan(sql, connection);
     }
 
     // ─── Write Operations ──────────────────────────────────────────────────
 
-    public Map<String, Object> executeDdl(String sql, ConnectionProperties connection) {
-        return resolveFacade(connection).executeDdl(sql);
+    @Override
+    public Map<String, Object> executeDdl(String sql, String connection) {
+        return resolveFacade(connection).executeDdl(sql, connection);
     }
 
-    // ─── Metadata Operations ───────────────────────────────────────────────
+    // ─── Metadata Operations ────────────────────────────────────────────────
 
-    public Map<String, Object> backupSchema(String tableName, ConnectionProperties connection) {
-        return resolveFacade(connection).backupSchema(tableName);
+    @Override
+    public Map<String, Object> backupSchema(String tableName, String connection) {
+        return resolveFacade(connection).backupSchema(tableName, connection);
     }
 
-    public Map<String, Object> backupData(String tableName, int maxRows, ConnectionProperties connection) {
-        return resolveFacade(connection).backupData(tableName, maxRows);
+    @Override
+    public Map<String, Object> backupData(String tableName, int maxRows, String connection) {
+        return resolveFacade(connection).backupData(tableName, maxRows, connection);
     }
 
-    public Map<String, Object> diffSchema(String sourceTable, String targetTable, ConnectionProperties connection) {
-        return resolveFacade(connection).diffSchema(sourceTable, targetTable);
+    @Override
+    public Map<String, Object> diffSchema(String sourceTable, String targetTable, String connection) {
+        return resolveFacade(connection).diffSchema(sourceTable, targetTable, connection);
+    }
+
+    @Override
+    public void clearCache(String connection) {
+        resolveFacade(connection).clearCache(connection);
     }
 
     // ─── Statistics ────────────────────────────────────────────────────────
 
-    public Map<String, Object> getStatistics(ConnectionProperties connection) {
-        return resolveFacade(connection).getStatistics();
+    @Override
+    public Map<String, Object> getStatistics(String connection) {
+        return resolveFacade(connection).getStatistics(connection);
     }
 }

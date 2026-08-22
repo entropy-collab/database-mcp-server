@@ -89,4 +89,8 @@ public class SqliteDialect extends AbstractDatabaseDialect {
             WHERE 1 = 0
             """;
     }
+
+    public String healthCheckSql() {
+        return "SELECT 'OK' AS status";
+    }
 }

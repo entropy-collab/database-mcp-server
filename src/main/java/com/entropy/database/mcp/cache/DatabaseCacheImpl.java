@@ -117,7 +117,7 @@ public class DatabaseCacheImpl implements DatabaseCache {
         try {
             return queryCache.get(fullKey, k -> loader.apply(key));
         } catch (Exception e) {
-            log.warn("Failed to load query cache for key {}: {}", key, e.getMessage());
+            log.warn("Failed to load query cache for key {}: {}", key, e.getMessage(), e);
             return null;
         }
     }

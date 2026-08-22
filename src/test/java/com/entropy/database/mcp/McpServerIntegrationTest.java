@@ -38,9 +38,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
     properties = {"entropy.mcp.security.enabled=false",
                   "spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration,org.springframework.boot.autoconfigure.security.servlet.SecurityFilterAutoConfiguration",
-                  "spring.datasource.primary.jdbc-url=jdbc:h2:mem:mcpdb;DB_CLOSE_DELAY=-1",
-                  "spring.datasource.primary.username=sa",
-                  "spring.datasource.primary.password=",
                   "entropy.mcp.database.dialect=generic",
                   "entropy.mcp.gateway.enabled=false",
                   "entropy.mcp.security.test-mode=true"})

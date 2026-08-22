@@ -164,4 +164,8 @@ public class GenericDialect extends AbstractDatabaseDialect {
     public String listGrantsSql(String userName) {
         return "SELECT ? AS grantee, 'SELECT' AS privilege, 'NO' AS grantable, CURRENT_USER AS grantor";
     }
+
+    public String healthCheckSql() {
+        return "SELECT 'OK' AS status";
+    }
 }

@@ -16,12 +16,9 @@
 package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.ConnectionProperties;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
-import com.entropy.database.mcp.facade.DatabaseFacade;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.security.SqlValidator;
-import com.entropy.database.mcp.util.ConnectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
@@ -50,19 +47,16 @@ public class DdlExecutionTools {
     private final RoutingDatabaseFacade routingFacade;
     private final DynamicDataSourceManager dataSourceManager;
     private final SqlValidator sqlValidator;
-    private final DatabaseFacade databaseFacade;
     private final boolean ddlAllowed;
     private final boolean gatewayEnabled;
 
     public DdlExecutionTools(RoutingDatabaseFacade routingFacade,
                              DynamicDataSourceManager dataSourceManager,
                              SqlValidator sqlValidator,
-                             DatabaseFacade databaseFacade,
                              org.springframework.core.env.Environment environment) {
         this.routingFacade = routingFacade;
         this.dataSourceManager = dataSourceManager;
         this.sqlValidator = sqlValidator;
-        this.databaseFacade = databaseFacade;
         this.ddlAllowed = Boolean.parseBoolean(environment.getProperty("entropy.mcp.database.ddl.allowed", "false"));
         this.gatewayEnabled = Boolean.parseBoolean(environment.getProperty("entropy.mcp.gateway.enabled", "false"));
     }
@@ -71,50 +65,50 @@ public class DdlExecutionTools {
         return gatewayEnabled;
     }
 
-    private ConnectionProperties parseConnection(String connectionJson) {
-        return ConnectionUtils.parseConnection(connectionJson);
-    }
-
     // ─── DDL (from WriteTools) ───────────────────────────────────────────────
 
     @McpTool(description = "Execute a DDL statement (CREATE/ALTER/DROP)")
     public Map<String, Object> executeDdl(
             @McpToolParam(description = "DDL SQL statement") String sql,
-            @McpToolParam(description = "Optional BYOK connection JSON (jdbcUrl, username, password, dialect). Omit to use primary datasource.", required = false) String connection) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!ddlAllowed) {
             return errorResponse(Map.of(), "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable.", "DisabledException");
         }
-        return routingFacade.executeDdl(sql, parseConnection(connection));
+        return routingFacade.executeDdl(sql, connection);
     }
 
     @McpTool(description = "Backup table schema definition as DDL statements")
     public Map<String, Object> backupSchema(
             @McpToolParam(description = "Table name") String tableName,
-            @McpToolParam(description = "Optional BYOK connection JSON. Omit to use primary datasource.", required = false) String connection) {
-        return routingFacade.backupSchema(tableName, parseConnection(connection));
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        return routingFacade.backupSchema(tableName, connection);
     }
 
     @McpTool(description = "Backup table data as INSERT statements")
     public Map<String, Object> backupData(
             @McpToolParam(description = "Table name") String tableName,
             @McpToolParam(description = "Maximum rows to backup") int maxRows,
-            @McpToolParam(description = "Optional BYOK connection JSON. Omit to use primary datasource.", required = false) String connection) {
-        return routingFacade.backupData(tableName, maxRows, parseConnection(connection));
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        if (maxRows < 0) {
+            return errorResponse(Map.of("tableName", tableName, "maxRows", maxRows, "connection", connection),
+                    "maxRows must be non-negative", "ValidationException");
+        }
+        return routingFacade.backupData(tableName, maxRows, connection);
     }
 
     @McpTool(description = "Compare schema differences between two tables")
     public Map<String, Object> diffSchema(
             @McpToolParam(description = "Source table name") String sourceTable,
             @McpToolParam(description = "Target table name") String targetTable,
-            @McpToolParam(description = "Optional BYOK connection JSON. Omit to use primary datasource.", required = false) String connection) {
-        return routingFacade.diffSchema(sourceTable, targetTable, parseConnection(connection));
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        return routingFacade.diffSchema(sourceTable, targetTable, connection);
     }
 
     // ─── Remote DDL (from RemoteDdlTools) ───────────────────────────────────
 
     @McpTool(description = "Execute a single DDL statement on a remote database")
     public Map<String, Object> executeDdlRemote(
-            @McpToolParam(description = "BYOK connection name") String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "DDL statement (CREATE TABLE, ALTER TABLE, DROP INDEX, etc.)") String ddl) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of(), "Gateway is not enabled", "DisabledException");
@@ -141,29 +135,29 @@ public class DdlExecutionTools {
 
     @McpTool(description = "Execute multiple DDL statements in a transaction on a remote database")
     public Map<String, Object> executeDdlBatch(
-            @McpToolParam(description = "BYOK connection name") String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "List of DDL statements to execute") List<String> statements) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of(), "Gateway is not enabled", "DisabledException");
         }
         requireNotEmpty(statements, "statements");
 
+        ByokDataSourceContext context = null;
         Connection connection = null;
         try {
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
+            context = dataSourceManager.acquire(connectionName);
+            connection = context.getDataSource().getConnection();
+            connection.setAutoCommit(false);
+
             long startTime = System.currentTimeMillis();
             List<Map<String, Object>> results = new ArrayList<>();
             boolean allSuccess = true;
-
-            connection = jdbcTemplate.getDataSource().getConnection();
-            connection.setAutoCommit(false);
 
             for (String ddl : statements) {
                 try {
                     sqlValidator.validateDdl(ddl);
                     long stmtStart = System.currentTimeMillis();
-                    jdbcTemplate.execute(ddl);
+                    connection.createStatement().execute(ddl);
                     long stmtDuration = System.currentTimeMillis() - stmtStart;
                     results.add(Map.of("ddl", ddl, "success", true, "durationMs", stmtDuration));
                 } catch (Exception e) {
@@ -183,8 +177,8 @@ public class DdlExecutionTools {
             return successResponse(Map.of(
                     "connectionName", connectionName,
                     "totalStatements", statements.size(),
-                    "succeeded", results.stream().filter(r -> (boolean) r.get("success")).count(),
-                    "failed", results.stream().filter(r -> !(boolean) r.get("success")).count(),
+                    "succeeded", results.stream().filter(r -> Boolean.TRUE.equals(r.get("success"))).count(),
+                    "failed", results.stream().filter(r -> !Boolean.TRUE.equals(r.get("success"))).count(),
                     "results", results,
                     "durationMs", totalDuration,
                     "message", allSuccess ? "All DDL statements executed successfully" : "Transaction rolled back due to failure"
@@ -194,14 +188,16 @@ public class DdlExecutionTools {
         } finally {
             if (connection != null) {
                 try {
-                    connection.setAutoCommit(true);
-                } catch (Exception e) {
-                    log.warn("Failed to reset autoCommit", e);
-                }
-                try {
                     connection.close();
                 } catch (Exception e) {
                     log.warn("Failed to close connection", e);
+                }
+            }
+            if (context != null) {
+                try {
+                    context.close();
+                } catch (Exception e) {
+                    log.warn("Failed to close context", e);
                 }
             }
         }

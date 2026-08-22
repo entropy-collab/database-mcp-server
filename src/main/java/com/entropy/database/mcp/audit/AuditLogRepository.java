@@ -60,7 +60,7 @@ public class AuditLogRepository {
                 entity.connectionKey()
             );
         } catch (Exception e) {
-            log.warn("Failed to persist audit log entry: {}", e.getMessage());
+            log.warn("Failed to persist audit log entry", e);
         }
     }
 
@@ -106,7 +106,7 @@ public class AuditLogRepository {
         try {
             return jdbcTemplate.update("DELETE FROM audit_log WHERE timestamp < ?", before);
         } catch (Exception e) {
-            log.warn("Failed to delete old audit logs: {}", e.getMessage());
+            log.warn("Failed to delete old audit logs", e);
             return 0;
         }
     }

@@ -160,6 +160,9 @@ public class DataMaskingServiceImpl implements DataMaskingService {
         // Partial mask if no rule matches but column should be masked
         if (shouldMaskColumn(columnName) && value.length() > 6) {
             return value.substring(0, 3) + "****" + value.substring(value.length() - 3);
+        } else if (shouldMaskColumn(columnName)) {
+            // Too short for partial mask - fully redact
+            return "****";
         }
         
         return value;

@@ -28,7 +28,6 @@ import java.util.stream.Collectors;
 
 import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
 import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
-import static com.entropy.database.mcp.util.ValidationUtils.requireNotBlank;
 
 /**
  * Connection administration tools.
@@ -59,7 +58,6 @@ public class ConnectionAdminTools {
                                 "dialect", meta.dialect(),
                                 "jdbcUrlMasked", meta.jdbcUrlMasked(),
                                 "owner", meta.owner(),
-                                "isPrimary", Boolean.toString(meta.isPrimary()),
                                 "status", meta.getStatus(),
                                 "createdAt", meta.createdAt().toString(),
                                 "leaseExpiry", meta.getLeaseExpiry().toString(),
@@ -94,7 +92,6 @@ public class ConnectionAdminTools {
             detail.put("dialect", meta.dialect());
             detail.put("jdbcUrlMasked", meta.jdbcUrlMasked());
             detail.put("owner", meta.owner());
-            detail.put("isPrimary", Boolean.toString(meta.isPrimary()));
             detail.put("status", meta.getStatus());
             detail.put("createdAt", meta.createdAt().toString());
             detail.put("leaseTtl", meta.leaseTtl().toString());
@@ -128,4 +125,6 @@ public class ConnectionAdminTools {
     public Map<String, Object> getActiveConnectionCount() {
         return getConnectionCount();
     }
+
+
 }

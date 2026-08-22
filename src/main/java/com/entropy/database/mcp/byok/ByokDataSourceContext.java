@@ -24,8 +24,12 @@ import com.entropy.database.mcp.security.QueryAuditLogger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
 
 /**
  * Context for a single BYOK datasource.
@@ -38,6 +42,7 @@ public class ByokDataSourceContext {
     private final DataSource dataSource;
     private final DatabaseDialect dialect;
     private final JdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate namedParameterJdbcTemplate;
     private final ByokInfrastructure infrastructure;
 
     public ByokDataSourceContext(String key,
@@ -49,11 +54,20 @@ public class ByokDataSourceContext {
         this.dataSource = dataSource;
         this.dialect = dialect;
         this.jdbcTemplate = jdbcTemplate;
+        this.namedParameterJdbcTemplate = new NamedParameterJdbcTemplate(jdbcTemplate);
         this.infrastructure = infrastructure;
     }
 
     public String getKey() {
         return key;
+    }
+
+    public String connectionName() {
+        return key;
+    }
+
+    public String tenantId() {
+        return null;
     }
 
     public DataSource getDataSource() {
@@ -66,6 +80,10 @@ public class ByokDataSourceContext {
 
     public JdbcTemplate getJdbcTemplate() {
         return jdbcTemplate;
+    }
+
+    public NamedParameterJdbcTemplate getNamedParameterJdbcTemplate() {
+        return namedParameterJdbcTemplate;
     }
 
     public DatabaseCache getCache() {
@@ -90,6 +108,30 @@ public class ByokDataSourceContext {
 
     public ExecutionPlanRepository getExecutionPlanRepository() {
         return infrastructure.executionPlanRepository();
+    }
+
+    public Connection getConnection() throws SQLException {
+        return dataSource.getConnection();
+    }
+
+    public DatabaseMetaData getConnectionMetadata() throws SQLException {
+        try (Connection conn = getConnection()) {
+            return conn.getMetaData();
+        }
+    }
+
+    public boolean isValid() {
+        try (Connection conn = getConnection()) {
+            return conn.isValid(2);
+        } catch (SQLException e) {
+            log.warn("Connection validation failed for {}: {}", key, e.getMessage(), e);
+            return false;
+        }
+    }
+
+    public void renewLease() {
+        // Lease renewal is managed by LeasedDataSource, not the context itself.
+        // This method is a no-op for backward compatibility.
     }
 
     public void close() {

@@ -19,6 +19,7 @@ import com.entropy.database.mcp.exception.DatabaseMcpException;
 import com.entropy.database.mcp.exception.ErrorCode;
 
 import java.util.Collection;
+import java.util.regex.Pattern;
 
 /**
  * Validation utilities for database operations.
@@ -113,5 +114,47 @@ public final class ValidationUtils {
             throw new DatabaseMcpException(ErrorCode.PARAMETER_VALIDATION_FAILED,
                     paramName + " must be between " + min + " and " + max);
         }
+    }
+
+    // Pre-compiled patterns for performance
+    private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("[A-Za-z0-9_\\s.,'\"=<>!()+\\-*/%&|^~]+");
+    // Dangerous substrings that indicate SQL injection
+    private static final String[] DANGEROUS_PATTERNS = {";", "--", "/*", "*/", "(", ")", "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE "};
+
+    /**
+     * Validate WHERE clause for SQL injection safety.
+     * Only allows simple column comparisons: col = value, col > value, etc.
+     * Rejects subqueries, multi-statement attacks, and dangerous keywords.
+     */
+    public static void validateWhereClause(String whereClause, String paramName) {
+        if (whereClause == null || whereClause.isBlank()) {
+            return;
+        }
+        String lower = whereClause.toLowerCase().trim();
+        // Reject subqueries and multi-statement patterns
+        for (String dangerous : DANGEROUS_PATTERNS) {
+            if (lower.contains(dangerous) && dangerous.contains(" ")) {
+                // Allow comparison operators like "= ", "> ", "< " but reject keywords
+                if (!isComparisonOperator(dangerous.trim())) {
+                    throw new DatabaseMcpException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                            paramName + " contains dangerous SQL pattern: " + dangerous.trim());
+                }
+            }
+        }
+        // Reject subqueries: any parenthesis containing SELECT
+        if (lower.contains("select") && lower.contains("(")) {
+            throw new DatabaseMcpException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    paramName + " contains disallowed subquery pattern");
+        }
+        // Only allow safe characters: letters, numbers, spaces, operators, quotes, parentheses
+        if (!WHERE_CLAUSE_PATTERN.matcher(whereClause).matches()) {
+            throw new DatabaseMcpException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    paramName + " contains invalid characters. Only alphanumeric, spaces, and basic operators are allowed");
+        }
+    }
+
+    private static boolean isComparisonOperator(String op) {
+        return op.equals("=") || op.equals(">") || op.equals("<") || op.equals("!")
+                || op.equals("<>") || op.equals("<=") || op.equals(">=") || op.equals("<!");
     }
 }

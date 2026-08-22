@@ -35,8 +35,7 @@ import java.util.Collection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -46,19 +45,7 @@ class DynamicDataSourceManagerImplTest {
     private DialectResolver dialectResolver;
 
     @Mock
-    private SqlValidator sqlValidator;
-
-    @Mock
-    private DataMaskingService maskingService;
-
-    @Mock
-    private QueryAuditLogger queryAuditLogger;
-
-    @Mock
-    private ByokInfrastructureFactory infrastructureFactory;
-
-    @Mock
-    private ConnectionPoolFactory connectionPoolFactory;
+    private ByokDataSourceFactory dataSourceFactory;
 
     @Mock
     private McpMetricsCollector metricsCollector;
@@ -75,10 +62,8 @@ class DynamicDataSourceManagerImplTest {
         return new DynamicDataSourceManagerImpl(
                 new DynamicDataSourceManagerImpl.Dependencies(
                         dialectResolver,
-                        infrastructureFactory,
-                        connectionPoolFactory,
+                        dataSourceFactory,
                         properties,
-                        100,
                         metricsCollector
                 )
         );
@@ -87,22 +72,19 @@ class DynamicDataSourceManagerImplTest {
     @Test
     void acquireNewConnection() {
         DynamicDataSourceManagerImpl manager = createManager();
-        ConnectionProperties connection = new ConnectionProperties(
-                "jdbc:mysql://localhost:3306/test",
-                "user",
-                "pass",
-                "mysql",
-                "com.mysql.cj.jdbc.Driver",
-                false
-        );
+        ConnectionProperties connection = ConnectionProperties.builder()
+                .jdbcUrl("jdbc:mysql://localhost:3306/test")
+                .username("user")
+                .password("pass")
+                .dialect("mysql")
+                .driverClassName("com.mysql.cj.jdbc.Driver")
+                .build();
         DatabaseDialect dialect = mock(DatabaseDialect.class);
-        HikariDataSource dataSource = mock(HikariDataSource.class);
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        ByokInfrastructure infrastructure = mock(ByokInfrastructure.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
 
         when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
-        when(connectionPoolFactory.createDataSource(connection, dialect)).thenReturn(dataSource);
-        when(infrastructureFactory.create(anyString(), any(JdbcTemplate.class), any(DatabaseDialect.class), anyInt())).thenReturn(infrastructure);
+        when(dataSourceFactory.create("key1", connection, dialect)).thenReturn(context);
+        when(context.getKey()).thenReturn("key1");
 
         ByokDataSourceContext result = manager.acquire("key1", connection);
 
@@ -114,22 +96,18 @@ class DynamicDataSourceManagerImplTest {
     @Test
     void acquireExistingConnection() {
         DynamicDataSourceManagerImpl manager = createManager();
-        ConnectionProperties connection = new ConnectionProperties(
-                "jdbc:mysql://localhost:3306/test",
-                "user",
-                "pass",
-                "mysql",
-                "com.mysql.cj.jdbc.Driver",
-                false
-        );
+        ConnectionProperties connection = ConnectionProperties.builder()
+                .jdbcUrl("jdbc:mysql://localhost:3306/test")
+                .username("user")
+                .password("pass")
+                .dialect("mysql")
+                .driverClassName("com.mysql.cj.jdbc.Driver")
+                .build();
         DatabaseDialect dialect = mock(DatabaseDialect.class);
-        HikariDataSource dataSource = mock(HikariDataSource.class);
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        ByokInfrastructure infrastructure = mock(ByokInfrastructure.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
 
         when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
-        when(connectionPoolFactory.createDataSource(connection, dialect)).thenReturn(dataSource);
-        when(infrastructureFactory.create(anyString(), any(JdbcTemplate.class), any(DatabaseDialect.class), anyInt())).thenReturn(infrastructure);
+        when(dataSourceFactory.create("key1", connection, dialect)).thenReturn(context);
 
         // First acquire - creates new connection
         manager.acquire("key1", connection);
@@ -151,22 +129,18 @@ class DynamicDataSourceManagerImplTest {
     @Test
     void acquireExistingKeyReturnsContext() {
         DynamicDataSourceManagerImpl manager = createManager();
-        ConnectionProperties connection = new ConnectionProperties(
-                "jdbc:mysql://localhost:3306/test",
-                "user",
-                "pass",
-                "mysql",
-                "com.mysql.cj.jdbc.Driver",
-                false
-        );
+        ConnectionProperties connection = ConnectionProperties.builder()
+                .jdbcUrl("jdbc:mysql://localhost:3306/test")
+                .username("user")
+                .password("pass")
+                .dialect("mysql")
+                .driverClassName("com.mysql.cj.jdbc.Driver")
+                .build();
         DatabaseDialect dialect = mock(DatabaseDialect.class);
-        HikariDataSource dataSource = mock(HikariDataSource.class);
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        ByokInfrastructure infrastructure = mock(ByokInfrastructure.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
 
         when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
-        when(connectionPoolFactory.createDataSource(connection, dialect)).thenReturn(dataSource);
-        when(infrastructureFactory.create(anyString(), any(JdbcTemplate.class), any(DatabaseDialect.class), anyInt())).thenReturn(infrastructure);
+        when(dataSourceFactory.create("key1", connection, dialect)).thenReturn(context);
 
         manager.acquire("key1", connection);
         ByokDataSourceContext result = manager.acquire("key1");
@@ -179,10 +153,9 @@ class DynamicDataSourceManagerImplTest {
         DynamicDataSourceManagerImpl manager = createManager();
         DatabaseDialect dialect = mock(DatabaseDialect.class);
         DataSource dataSource = mock(DataSource.class);
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        ByokInfrastructure infrastructure = mock(ByokInfrastructure.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
 
-        when(infrastructureFactory.create(anyString(), any(JdbcTemplate.class), any(DatabaseDialect.class), anyInt())).thenReturn(infrastructure);
+        when(dataSourceFactory.createExisting(anyString(), any(DataSource.class), any(DatabaseDialect.class))).thenReturn(context);
 
         manager.registerExisting("primary", dataSource, dialect);
 
@@ -194,22 +167,18 @@ class DynamicDataSourceManagerImplTest {
     @Test
     void shutdownClearsAll() {
         DynamicDataSourceManagerImpl manager = createManager();
-        ConnectionProperties connection = new ConnectionProperties(
-                "jdbc:mysql://localhost:3306/test",
-                "user",
-                "pass",
-                "mysql",
-                "com.mysql.cj.jdbc.Driver",
-                false
-        );
+        ConnectionProperties connection = ConnectionProperties.builder()
+                .jdbcUrl("jdbc:mysql://localhost:3306/test")
+                .username("user")
+                .password("pass")
+                .dialect("mysql")
+                .driverClassName("com.mysql.cj.jdbc.Driver")
+                .build();
         DatabaseDialect dialect = mock(DatabaseDialect.class);
-        HikariDataSource dataSource = mock(HikariDataSource.class);
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        ByokInfrastructure infrastructure = mock(ByokInfrastructure.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
 
         when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
-        when(connectionPoolFactory.createDataSource(connection, dialect)).thenReturn(dataSource);
-        when(infrastructureFactory.create(anyString(), any(JdbcTemplate.class), any(DatabaseDialect.class), anyInt())).thenReturn(infrastructure);
+        when(dataSourceFactory.create("key1", connection, dialect)).thenReturn(context);
 
         manager.acquire("key1", connection);
         assertThat(manager.getActiveConnectionCount()).isEqualTo(1);
@@ -225,10 +194,9 @@ class DynamicDataSourceManagerImplTest {
         DynamicDataSourceManagerImpl manager = createManager();
         DatabaseDialect dialect = mock(DatabaseDialect.class);
         DataSource dataSource = mock(DataSource.class);
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        ByokInfrastructure infrastructure = mock(ByokInfrastructure.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
 
-        when(infrastructureFactory.create(anyString(), any(JdbcTemplate.class), any(DatabaseDialect.class), anyInt())).thenReturn(infrastructure);
+        when(dataSourceFactory.createExisting(anyString(), any(DataSource.class), any(DatabaseDialect.class))).thenReturn(context);
 
         manager.registerExisting("primary", dataSource, dialect);
 
@@ -250,7 +218,6 @@ class DynamicDataSourceManagerImplTest {
     void maskKeyWithPassword() {
         DynamicDataSourceManagerImpl manager = createManager();
 
-        // Access via reflection to test private method
         try {
             java.lang.reflect.Method method = DynamicDataSourceManagerImpl.class.getDeclaredMethod("maskKey", String.class);
             method.setAccessible(true);

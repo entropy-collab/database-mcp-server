@@ -122,7 +122,10 @@ public record DatabaseProperties(
         int retentionDays,
         int maxBufferSize,
         int sqlTruncateLength,
-        int entrySqlTruncateLength
+        int entrySqlTruncateLength,
+        long slowQueryThresholdMs,
+        int maxSlowQueries,
+        int maxSqlPatterns
     ) {
         public AuditProperties {
             enabled = Boolean.TRUE.equals(enabled);
@@ -130,10 +133,13 @@ public record DatabaseProperties(
             maxBufferSize = maxBufferSize > 0 ? maxBufferSize : 100;
             sqlTruncateLength = sqlTruncateLength > 0 ? sqlTruncateLength : 200;
             entrySqlTruncateLength = entrySqlTruncateLength > 0 ? entrySqlTruncateLength : 500;
+            slowQueryThresholdMs = slowQueryThresholdMs > 0 ? slowQueryThresholdMs : 5000;
+            maxSlowQueries = maxSlowQueries > 0 ? maxSlowQueries : 1000;
+            maxSqlPatterns = maxSqlPatterns > 0 ? maxSqlPatterns : 500;
         }
 
         public AuditProperties(boolean enabled, int retentionDays) {
-            this(enabled, retentionDays, 100, 200, 500);
+            this(enabled, retentionDays, 100, 200, 500, 5000, 1000, 500);
         }
     }
 

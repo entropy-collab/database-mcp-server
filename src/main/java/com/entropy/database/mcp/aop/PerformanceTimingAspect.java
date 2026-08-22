@@ -47,8 +47,7 @@ public class PerformanceTimingAspect {
         this.auditLogger = auditLogger;
     }
 
-    @Around("execution(* com.entropy.database.mcp.facade.DatabaseFacade.*(..)) || " +
-            "execution(* com.entropy.database.mcp.facade.RoutingDatabaseFacade.*(..)) || " +
+    @Around("execution(* com.entropy.database.mcp.facade.RoutingDatabaseFacade.*(..)) || " +
             "execution(* com.entropy.database.mcp.facade.ByokDatabaseFacade.*(..)) || " +
             "execution(* com.entropy.database.mcp.repository.ExecutionPlanRepositoryImpl.*(..)) || " +
             "execution(* com.entropy.database.mcp.byok.DynamicDataSourceManagerImpl.*(..)) || " +
@@ -74,13 +73,23 @@ public class PerformanceTimingAspect {
 
     private void recordSuccess(String toolName, String sql, int rows, long duration, String connectionKey) {
         healthMonitor.recordQuery(duration, rows, true);
-        auditLogger.log(toolName, sql, rows, duration, true, (String) null, connectionKey != null ? connectionKey : "primary");
+        try {
+            auditLogger.log(toolName, sql, rows, duration, true, (String) null,
+                    connectionKey != null ? connectionKey : "primary");
+        } catch (Exception e) {
+            log.warn("Failed to record audit log for {}", toolName, e);
+        }
         metricsCollector.recordToolExecution(toolName, duration);
     }
 
     private void recordFailure(String toolName, String sql, long duration, Exception e, String connectionKey) {
         healthMonitor.recordQuery(duration, 0, false);
-        auditLogger.log(toolName, sql, 0, duration, false, e.getMessage(), connectionKey != null ? connectionKey : "primary");
+        try {
+            auditLogger.log(toolName, sql, 0, duration, false, e.getMessage(),
+                    connectionKey != null ? connectionKey : "primary");
+        } catch (Exception ex) {
+            log.warn("Failed to record audit log for {}", toolName, ex);
+        }
         metricsCollector.recordToolExecution(toolName, duration);
     }
 

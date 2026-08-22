@@ -35,7 +35,6 @@ import java.util.Map;
  * Execution plan analysis repository.
  * Provides standardized EXPLAIN PLAN functionality across dialects.
  */
-@Repository
 public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionPlanRepositoryImpl.class);
@@ -57,13 +56,12 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
      */
     @Override
     public StandardizedPlan getExecutionPlan(String sql) {
-        String dialectName = detectDialect();
-
+        String dialectName = dialect.getClass().getSimpleName();
         return switch (dialectName) {
-            case "oracle" -> getOracleExecutionPlan(sql);
-            case "postgres" -> getPostgresExecutionPlan(sql);
-            case "mysql" -> getMysqlExecutionPlan(sql);
-            default -> getGenericExecutionPlan(sql);
+            case "OracleDialect" -> getOracleExecutionPlan(sql);
+            case "PostgresDialect" -> getPostgresExecutionPlan(sql);
+            case "MySqlDialect" -> getMysqlExecutionPlan(sql);
+            default -> createDefaultPlan(sql);
         };
     }
 
@@ -142,7 +140,7 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
             return createDefaultPlan(sql);
 
         } catch (Exception e) {
-            log.warn("Failed to get Oracle execution plan, using fallback: {}", e.getMessage());
+            log.warn("Failed to get Oracle execution plan, using fallback", e);
             return createDefaultPlan(sql);
         }
     }
@@ -171,7 +169,7 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
             return createDefaultPlan(sql);
 
         } catch (Exception e) {
-            log.warn("Failed to get PostgreSQL execution plan, using fallback: {}", e.getMessage());
+            log.warn("Failed to get PostgreSQL execution plan, using fallback", e);
             return createDefaultPlan(sql);
         }
     }
@@ -215,28 +213,12 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
             return createDefaultPlan(sql);
 
         } catch (Exception e) {
-            log.warn("Failed to get MySQL execution plan, using fallback: {}", e.getMessage());
+            log.warn("Failed to get MySQL execution plan, using fallback", e);
             return createDefaultPlan(sql);
         }
     }
 
-    private StandardizedPlan getGenericExecutionPlan(String sql) {
-        return createDefaultPlan(sql);
-    }
-
     // ─── Helpers ──────────────────────────────────────────────────────────
-
-    private String detectDialect() {
-        try (var conn = jdbcTemplate.getDataSource().getConnection()) {
-            String url = conn.getMetaData().getURL();
-            if (url.contains("oracle")) return "oracle";
-            if (url.contains("postgres")) return "postgres";
-            if (url.contains("mysql")) return "mysql";
-        } catch (Exception e) {
-            // Fallback
-        }
-        return "generic";
-    }
 
     private StandardizedPlan createDefaultPlan(String sql) {
         return new StandardizedPlan(

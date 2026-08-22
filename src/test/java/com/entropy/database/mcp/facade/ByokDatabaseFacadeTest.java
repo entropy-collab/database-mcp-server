@@ -83,7 +83,7 @@ class ByokDatabaseFacadeTest {
         List<Map<String, Object>> expected = List.of(Map.of("name", "users"));
         when(readRepository.listTables("PUBLIC")).thenReturn(expected);
 
-        List<Map<String, Object>> result = facade.listTables("PUBLIC");
+        List<Map<String, Object>> result = facade.listTables("PUBLIC", "test-connection");
 
         assertThat(result).isSameAs(expected);
         verify(readRepository).listTables("PUBLIC");
@@ -95,7 +95,7 @@ class ByokDatabaseFacadeTest {
         PaginatedQueryResult expected = new PaginatedQueryResult(List.of("id"), List.of(Map.of("id", 1)), null, false);
         when(readRepository.executeQuery("SELECT 1", 100, null)).thenReturn(expected);
 
-        PaginatedQueryResult result = facade.executeQuery("SELECT 1", 100, null);
+        PaginatedQueryResult result = facade.executeQuery("SELECT 1", 100, null, "test-connection");
 
         assertThat(result).isSameAs(expected);
         verify(readRepository).executeQuery("SELECT 1", 100, null);
@@ -107,7 +107,7 @@ class ByokDatabaseFacadeTest {
         PlanAnalysis expected = mock(PlanAnalysis.class);
         when(executionPlanRepository.analyzeExecutionPlan("SELECT 1")).thenReturn(expected);
 
-        PlanAnalysis result = facade.explainPlan("SELECT 1");
+        PlanAnalysis result = facade.explainPlan("SELECT 1", "test-connection");
 
         assertThat(result).isSameAs(expected);
         verify(executionPlanRepository).analyzeExecutionPlan("SELECT 1");
@@ -119,7 +119,7 @@ class ByokDatabaseFacadeTest {
         Map<String, Object> expected = Map.of("rows", 1);
         when(writeRepository.executeDdl("CREATE TABLE test (id INT)")).thenReturn(expected);
 
-        Map<String, Object> result = facade.executeDdl("CREATE TABLE test (id INT)");
+        Map<String, Object> result = facade.executeDdl("CREATE TABLE test (id INT)", "test-connection");
 
         assertThat(result).isSameAs(expected);
         verify(writeRepository).executeDdl("CREATE TABLE test (id INT)");
@@ -129,7 +129,7 @@ class ByokDatabaseFacadeTest {
     void backupSchemaThrowsUnsupportedOperation() {
         ByokDatabaseFacade facade = createFacade();
 
-        assertThatThrownBy(() -> facade.backupSchema("users"))
+        assertThatThrownBy(() -> facade.backupSchema("users", "test-connection"))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("backupSchema is not supported for BYOK connections");
     }
@@ -138,7 +138,7 @@ class ByokDatabaseFacadeTest {
     void backupDataThrowsUnsupportedOperation() {
         ByokDatabaseFacade facade = createFacade();
 
-        assertThatThrownBy(() -> facade.backupData("users", 100))
+        assertThatThrownBy(() -> facade.backupData("users", 100, "test-connection"))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("backupData is not supported for BYOK connections");
     }
@@ -147,7 +147,7 @@ class ByokDatabaseFacadeTest {
     void diffSchemaThrowsUnsupportedOperation() {
         ByokDatabaseFacade facade = createFacade();
 
-        assertThatThrownBy(() -> facade.diffSchema("users", "orders"))
+        assertThatThrownBy(() -> facade.diffSchema("users", "orders", "test-connection"))
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage("diffSchema is not supported for BYOK connections");
     }
@@ -157,7 +157,7 @@ class ByokDatabaseFacadeTest {
         ByokDatabaseFacade facade = createFacade();
         doNothing().when(cache).invalidateAll();
 
-        facade.clearCache();
+        facade.clearCache("test-connection");
 
         verify(cache).invalidateAll();
     }
@@ -170,7 +170,7 @@ class ByokDatabaseFacadeTest {
         when(queryStats.toSummary()).thenReturn(queryStatsSummary);
         when(cache.getStatistics()).thenReturn(cacheStats);
 
-        Map<String, Object> stats = facade.getStatistics();
+        Map<String, Object> stats = facade.getStatistics("test-connection");
 
         assertThat(stats).containsKeys("queryStats", "cacheStats");
         assertThat(stats.get("queryStats")).isSameAs(queryStatsSummary);

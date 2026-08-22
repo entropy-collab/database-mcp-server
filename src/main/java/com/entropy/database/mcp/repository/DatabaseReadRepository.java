@@ -105,7 +105,7 @@ public class DatabaseReadRepository {
         String cacheKey = "tables:" + schema;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
-            return (List<Map<String, Object>>) cached;
+            return checkType(cached, cacheKey, "List<Map<String, Object>>");
         }
         String sql = dialect.tablesQuery(schema);
         List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema);
@@ -121,7 +121,7 @@ public class DatabaseReadRepository {
         String cacheKey = "tables_all:" + keyword;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
-            return (List<Map<String, Object>>) cached;
+            return checkType(cached, cacheKey, "List<Map<String, Object>>");
         }
         String sql = dialect.searchTablesQuery(keyword);
         List<Map<String, Object>> result;
@@ -157,7 +157,7 @@ public class DatabaseReadRepository {
         String cacheKey = "columns:" + schema + "." + table;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
-            return (Map<String, Object>) cached;
+            return checkType(cached, cacheKey, "Map<String, Object>");
         }
         String sql = dialect.columnsQuery(table, schema);
         List<Map<String, Object>> columns = jdbcTemplate.queryForList(sql, schema, normalizeTableName(table));
@@ -176,7 +176,7 @@ public class DatabaseReadRepository {
         String cacheKey = "indexes:" + schema + "." + table;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
-            return (List<Map<String, Object>>) cached;
+            return checkType(cached, cacheKey, "List<Map<String, Object>>");
         }
         String sql = dialect.indexesQuery(table, schema);
         List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema, normalizeTableName(table));
@@ -189,7 +189,7 @@ public class DatabaseReadRepository {
         String cacheKey = "views:" + schema;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
-            return (List<Map<String, Object>>) cached;
+            return checkType(cached, cacheKey, "List<Map<String, Object>>");
         }
         String sql = dialect.viewsQuery(schema);
         List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema);
@@ -202,7 +202,7 @@ public class DatabaseReadRepository {
         String cacheKey = "sequences:" + schema;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
-            return (List<Map<String, Object>>) cached;
+            return checkType(cached, cacheKey, "List<Map<String, Object>>");
         }
         String sql = dialect.sequencesQuery(schema);
         List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema);
@@ -310,9 +310,18 @@ public class DatabaseReadRepository {
 
     // ─── Private helpers ──────────────────────────────────────────────────
 
+    private static final MessageDigest SHA256;
+    static {
+        try {
+            SHA256 = MessageDigest.getInstance("SHA-256");
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize SHA-256", e);
+        }
+    }
+
     private static String sha256(String input) {
         try {
-            byte[] hash = MessageDigest.getInstance("SHA-256").digest(input.getBytes());
+            byte[] hash = SHA256.digest(input.getBytes());
             StringBuilder sb = new StringBuilder(64);
             for (byte b : hash) {
                 sb.append(String.format("%02x", b));
@@ -367,6 +376,20 @@ public class DatabaseReadRepository {
             return null;
         }
         return dialect.normalizeTableName(table);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> T checkType(Object cached, String cacheKey, String expectedType) {
+        if (cached == null) {
+            throw new IllegalStateException("Cache miss for key: " + cacheKey);
+        }
+        if (!(cached instanceof List) && !(cached instanceof Map)) {
+            log.warn("Cache entry for {} has unexpected type {}, expected {}", cacheKey,
+                    cached.getClass().getName(), expectedType);
+            throw new IllegalStateException("Cache type mismatch for key: " + cacheKey
+                    + " - got " + cached.getClass().getSimpleName());
+        }
+        return (T) cached;
     }
 
     public Map<String, Object> getDatabaseInfo() {

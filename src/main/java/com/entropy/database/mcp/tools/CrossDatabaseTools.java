@@ -15,22 +15,26 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.byok.ByokDataSourceContext;
+import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.config.QueryConfig;
-import com.entropy.database.mcp.facade.DatabaseFacade;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.gateway.FederatedQueryGateway;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.stream.SseStreamManager;
 import com.entropy.database.mcp.util.ValidationUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
 import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
@@ -42,35 +46,36 @@ import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 @ConditionalOnProperty(name = "entropy.mcp.gateway.enabled", havingValue = "true")
 public class CrossDatabaseTools {
 
+    private static final Logger log = LoggerFactory.getLogger(CrossDatabaseTools.class);
+
     private static final String GATEWAY_NOT_ENABLED_MSG = "Cross-database gateway is not enabled";
     private static final String FEDERATED_GATEWAY_NOT_ENABLED_MSG = "Federated gateway is not enabled";
     private static final int DEFAULT_CROSS_DB_MAX_ROWS = 100;
     private static final int DEFAULT_COMPLEX_ANALYTICS_MAX_ROWS = 50;
     private static final int MAX_CTE_ROWS = 50000;
 
+    private static final Pattern IDENTIFIER_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]{0,127}$");
+
     private final RoutingDatabaseFacade routingFacade;
     private final SqlValidator sqlValidator;
     private final SseStreamManager sseStreamManager;
-    private final DatabaseFacade databaseFacade;
     private final FederatedQueryGateway gateway;
-    private final JdbcTemplate primaryJdbcTemplate;
+    private final DynamicDataSourceManager dataSourceManager;
     private final boolean gatewayEnabled;
     private final int maxExportRows;
 
     public CrossDatabaseTools(RoutingDatabaseFacade routingFacade,
                               SqlValidator sqlValidator,
                               SseStreamManager sseStreamManager,
-                              DatabaseFacade databaseFacade,
                               FederatedQueryGateway gateway,
-                              JdbcTemplate primaryJdbcTemplate,
+                              DynamicDataSourceManager dataSourceManager,
                               QueryConfig queryConfig,
                               Environment environment) {
         this.routingFacade = routingFacade;
         this.sqlValidator = sqlValidator;
         this.sseStreamManager = sseStreamManager;
-        this.databaseFacade = databaseFacade;
         this.gateway = gateway;
-        this.primaryJdbcTemplate = primaryJdbcTemplate;
+        this.dataSourceManager = dataSourceManager;
         this.gatewayEnabled = Boolean.parseBoolean(environment.getProperty("entropy.mcp.gateway.enabled", "false"));
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
@@ -82,14 +87,15 @@ public class CrossDatabaseTools {
     @McpTool(description = "Execute a cross-database JOIN query using Oracle DB Link syntax (@db_link)")
     public Map<String, Object> queryCrossDatabaseJoin(
             @McpToolParam(description = "SQL query with @db_link syntax") String sql,
-            @McpToolParam(description = "Maximum rows to return") Integer maxRows) {
+            @McpToolParam(description = "Maximum rows to return") Integer maxRows,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("sql", sql), GATEWAY_NOT_ENABLED_MSG, "DisabledException");
         }
         try {
             int limit = maxRows != null ? maxRows : DEFAULT_CROSS_DB_MAX_ROWS;
             String limitedSql = String.format("SELECT * FROM (%s) WHERE ROWNUM <= %d", sql, limit);
-            List<Map<String, Object>> rows = primaryJdbcTemplate.queryForList(limitedSql);
+            List<Map<String, Object>> rows = dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(limitedSql);
             return successResponse(Map.of("sql", sql, "rowCount", rows.size(), "data", rows));
         } catch (Exception e) {
             return errorResponse(Map.of("sql", sql), e.getMessage(), e.getClass().getSimpleName());
@@ -99,19 +105,23 @@ public class CrossDatabaseTools {
     @McpTool(description = "List tables from a remote database via DB Link")
     public List<Map<String, Object>> listRemoteTables(
             @McpToolParam(description = "Database link name") String dbLinkName,
-            @McpToolParam(description = "Remote schema owner (use 'USER' for current user)") String owner) {
+            @McpToolParam(description = "Remote schema owner (use 'USER' for current user)") String owner,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) {
             return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "owner", owner),
                     GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
         }
+        ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         try {
+            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+            JdbcTemplate jdbc = ctx.getJdbcTemplate();
             String sql;
             if ("USER".equalsIgnoreCase(owner)) {
                 sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = USER", dbLinkName);
-                return primaryJdbcTemplate.queryForList(sql);
+                return jdbc.queryForList(sql);
             } else {
                 sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName);
-                return primaryJdbcTemplate.queryForList(sql, owner.toUpperCase());
+                return jdbc.queryForList(sql, owner.toUpperCase());
             }
         } catch (Exception e) {
             return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "owner", owner),
@@ -122,17 +132,20 @@ public class CrossDatabaseTools {
     @McpTool(description = "Describe a remote table's columns via DB Link")
     public List<Map<String, Object>> describeRemoteTable(
             @McpToolParam(description = "Database link name") String dbLinkName,
-            @McpToolParam(description = "Remote table name") String remoteTable) {
+            @McpToolParam(description = "Remote table name") String remoteTable,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) {
             return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
                     GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
         }
+        ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
+        ValidationUtils.validateIdentifier(remoteTable, "remoteTable");
         try {
             String sql = String.format(
                     "SELECT column_name, data_type, data_length, nullable " +
                     "FROM all_tab_columns@%s WHERE table_name = UPPER(?) ORDER BY column_id",
                     dbLinkName);
-            return primaryJdbcTemplate.queryForList(sql, remoteTable.toUpperCase());
+            return dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(sql, remoteTable.toUpperCase());
         } catch (Exception e) {
             return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
                     e.getMessage(), e.getClass().getSimpleName()));
@@ -146,10 +159,15 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Partition date in YYYYMMDD") String partitionDate,
             @McpToolParam(description = "Start date for remote quality table (e.g., 2026-02-01)") String startDate,
             @McpToolParam(description = "End date for remote quality table (e.g., 2026-02-28)") String endDate,
-            @McpToolParam(description = "Maximum rows to return") Integer maxRows) {
+            @McpToolParam(description = "Maximum rows to return") Integer maxRows,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("dbLinkName", dbLinkName, "localTablePrefix", localTablePrefix, "partitionDate", partitionDate),
                     GATEWAY_NOT_ENABLED_MSG, "DisabledException");
+        }
+        ValidationUtils.validateIdentifier(localTablePrefix, "localTablePrefix");
+        if (!partitionDate.matches("\\d{8}")) {
+            throw new IllegalArgumentException("partitionDate must be in YYYYMMDD format");
         }
         String localTable = localTablePrefix + partitionDate;
         int limit = maxRows != null ? maxRows : 50;
@@ -198,7 +216,7 @@ public class CrossDatabaseTools {
 
         try {
             long startTime = System.currentTimeMillis();
-            List<Map<String, Object>> rows = primaryJdbcTemplate.queryForList(sql);
+            List<Map<String, Object>> rows = dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(sql);
             long duration = System.currentTimeMillis() - startTime;
 
             return successResponse(Map.of(
@@ -284,7 +302,8 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Remote port") String port,
             @McpToolParam(description = "Remote service name") String serviceName,
             @McpToolParam(description = "Remote username") String username,
-            @McpToolParam(description = "Remote password") String password) {
+            @McpToolParam(description = "Remote password") String password,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("dbLinkName", dbLinkName, "host", host, "port", port, "serviceName", serviceName, "username", username),
                     "Cross-database gateway is not enabled", "DisabledException");
@@ -302,18 +321,20 @@ public class CrossDatabaseTools {
                 dbLinkName, username, escapedPassword, host, port, serviceName);
 
         try {
-            primaryJdbcTemplate.execute(dblinkSql);
+            dataSourceManager.acquire(connection).getJdbcTemplate().execute(dblinkSql);
             return successResponse(Map.of(
                     "dbLinkName", dbLinkName,
                     "message", String.format("Database link '%s' created successfully", dbLinkName)));
         } catch (Exception e) {
+            log.warn("Failed to create DB link '{}': {}", dbLinkName, e.getMessage(), e);
             return errorResponse(Map.of("dbLinkName", dbLinkName), e.getMessage(), e.getClass().getSimpleName());
         }
     }
 
     @McpTool(description = "Drop an Oracle Database Link")
     public Map<String, Object> dropDbLink(
-            @McpToolParam(description = "Name of the database link to drop") String dbLinkName) {
+            @McpToolParam(description = "Name of the database link to drop") String dbLinkName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("dbLinkName", dbLinkName),
                     GATEWAY_NOT_ENABLED_MSG, "DisabledException");
@@ -321,7 +342,7 @@ public class CrossDatabaseTools {
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
         try {
-            primaryJdbcTemplate.execute(dropSql);
+            dataSourceManager.acquire(connection).getJdbcTemplate().execute(dropSql);
             return successResponse(Map.of(
                     "dbLinkName", dbLinkName,
                     "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
@@ -333,7 +354,8 @@ public class CrossDatabaseTools {
     @McpTool(description = "Test database link connectivity by querying a remote table")
     public Map<String, Object> testDbLink(
             @McpToolParam(description = "Database link name") String dbLinkName,
-            @McpToolParam(description = "Remote table name to query") String remoteTable) {
+            @McpToolParam(description = "Remote table name to query") String remoteTable,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) {
             return errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
                     GATEWAY_NOT_ENABLED_MSG, "DisabledException");
@@ -342,7 +364,7 @@ public class CrossDatabaseTools {
         ValidationUtils.validateIdentifier(remoteTable, "remoteTable");
         String sql = String.format("SELECT COUNT(*) as cnt FROM %s@%s", remoteTable, dbLinkName);
         try {
-            Integer count = primaryJdbcTemplate.queryForObject(sql, Integer.class);
+            Integer count = dataSourceManager.acquire(connection).getJdbcTemplate().queryForObject(sql, Integer.class);
             return successResponse(Map.of(
                     "dbLink", dbLinkName,
                     "remoteTable", remoteTable,

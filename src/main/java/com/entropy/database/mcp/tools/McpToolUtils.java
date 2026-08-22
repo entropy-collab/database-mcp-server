@@ -55,6 +55,19 @@ public final class McpToolUtils {
     }
 
     /**
+     * Create a standardized success response map, injecting the connection name
+     * into the data payload so callers can always see which connection was used.
+     */
+    public static Map<String, Object> successResponse(Map<String, Object> data, String connection) {
+        Map<String, Object> result = new LinkedHashMap<>(data);
+        result.put("success", true);
+        if (connection != null && !connection.isBlank()) {
+            result.put("connection", connection);
+        }
+        return result;
+    }
+
+    /**
      * Create a standardized success response map with a single key-value pair.
      */
     public static Map<String, Object> successResponse(String key, Object value) {

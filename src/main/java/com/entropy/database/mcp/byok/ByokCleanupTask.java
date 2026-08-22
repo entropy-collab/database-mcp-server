@@ -22,8 +22,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * Scheduled cleanup task for expired BYOK datasources.
- * Proactively removes datasources that have exceeded their max lifetime
- * or have not been accessed within the lease TTL.
+ * Proactively removes expired and idle connections from the cache.
  */
 @Component
 public class ByokCleanupTask {
@@ -37,17 +36,15 @@ public class ByokCleanupTask {
     }
 
     /**
-     * Cleanup expired datasources every 5 minutes.
-     * This is a safety net in addition to Caffeine's expireAfterAccess.
+     * Cleanup expired and idle BYOK connections every 5 minutes.
+     * Forces Caffeine cache to evict entries that have exceeded their lease duration.
      */
     @Scheduled(fixedRateString = "${entropy.mcp.database.byok.cleanup-interval:300000}")
     public void cleanupExpired() {
         int beforeSize = dynamicDataSourceManager.getActiveConnectionCount();
         
-        // DynamicDataSourceManager's cache already has a removal listener that closes datasources.
-        // We just need to trigger cleanup of expired entries.
-        // Caffeine's expireAfterAccess handles TTL-based expiry automatically.
-        // Here we can add additional logic if needed.
+        // Force Caffeine to check for expired entries and trigger removal listener
+        dynamicDataSourceManager.evictExpired();
         
         int afterSize = dynamicDataSourceManager.getActiveConnectionCount();
         if (beforeSize != afterSize) {

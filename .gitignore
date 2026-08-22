@@ -108,3 +108,6 @@ replay_pid*
 # Test data
 test-mcp-*.json
 code-smell-report.md
+quality-check-report.md
+$CSV
+scripts/

@@ -136,4 +136,8 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
             config.addDataSourceProperty("prepStmtCacheSqlLimit", String.valueOf(properties.preparedStatement().sqlLimit()));
         }
     }
+
+    public String healthCheckSql() {
+        return "SELECT 'OK' AS status";
+    }
 }

@@ -136,7 +136,7 @@ public class FederatedQueryGateway {
                         "data", rows
                     ));
                 } catch (Exception e) {
-                    log.warn("Failed to query database {}: {}", dbId, e.getMessage());
+                    log.warn("Failed to query database {}", dbId, e);
                     results.put(dbId, Map.of(
                         "status", "error",
                         "error", e.getMessage()
@@ -187,7 +187,7 @@ public class FederatedQueryGateway {
             info.put("status", "connected");
             return info;
         } catch (Exception e) {
-            log.warn("Failed to get info for database {}: {}", databaseId, e.getMessage());
+            log.warn("Failed to get info for database {}: {}", databaseId, e.getMessage(), e);
             return Map.of("id", databaseId, "status", "error", "error", e.getMessage());
         }
     }
@@ -211,7 +211,7 @@ public class FederatedQueryGateway {
                         "data", rows
                     ));
                 } catch (Exception e) {
-                    log.warn("Failed to query database {}: {}", dbId, e.getMessage());
+                    log.warn("Failed to query database {}", dbId, e);
                     results.put(dbId, Map.of(
                         "status", "error",
                         "error", e.getMessage()
@@ -272,7 +272,7 @@ public class FederatedQueryGateway {
             if (url.contains("mysql")) return "mysql";
             return "generic";
         } catch (Exception e) {
-            log.warn("Failed to detect dialect for datasource, defaulting to generic: {}", e.getMessage());
+            log.warn("Failed to detect dialect for datasource, defaulting to generic", e);
             return "generic";
         }
     }

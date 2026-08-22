@@ -15,10 +15,11 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.facade.DatabaseFacade;
+import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
+import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.Map;
@@ -33,20 +34,22 @@ public class CacheAdminTools {
 
     private static final Logger log = LoggerFactory.getLogger(CacheAdminTools.class);
 
-    private final DatabaseFacade databaseFacade;
+    private final RoutingDatabaseFacade routingFacade;
 
-    public CacheAdminTools(DatabaseFacade databaseFacade) {
-        this.databaseFacade = databaseFacade;
+    public CacheAdminTools(RoutingDatabaseFacade routingFacade) {
+        this.routingFacade = routingFacade;
     }
 
     @McpTool(description = "Clear all cached query results and metadata")
-    public Map<String, Object> clearCache() {
-        databaseFacade.clearCache();
+    public Map<String, Object> clearCache(
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        routingFacade.clearCache(connection);
         return successResponse(Map.of("status", "Cache cleared successfully"));
     }
 
     @McpTool(description = "Get database query statistics and cache metrics")
-    public Map<String, Object> getStatistics() {
-        return databaseFacade.getStatistics();
+    public Map<String, Object> getStatistics(
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        return routingFacade.getStatistics(connection);
     }
 }

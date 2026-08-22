@@ -21,9 +21,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 
 @SpringBootTest(properties = {
-    "spring.datasource.primary.jdbc-url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1",
-    "spring.datasource.primary.username=sa",
-    "spring.datasource.primary.password=",
     "entropy.mcp.database.enabled=true",
     "entropy.mcp.database.dialect=generic",
     "entropy.mcp.security.enabled=false",
