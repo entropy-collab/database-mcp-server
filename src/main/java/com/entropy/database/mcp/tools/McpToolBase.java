@@ -57,11 +57,11 @@ public abstract class McpToolBase {
         try {
             return action.get();
         } catch (McpToolException e) {
-            log.warn("Tool validation error: {}", e.getMessage());
+            log.warn("Tool validation error: {}", e.getMessage(), e);
             throw e;
         } catch (Exception e) {
-            log.warn("Tool execution failed: {}", e.getMessage(), e);
-            throw new McpToolException(ErrorCode.SYSTEM_ERROR, e.getMessage(), e);
+            log.warn("Tool execution failed: {}", e.getClass().getSimpleName(), e);
+            throw new McpToolException(ErrorCode.SYSTEM_ERROR, "An unexpected error occurred. Check server logs for details.", e);
         }
     }
 

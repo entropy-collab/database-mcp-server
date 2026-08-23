@@ -415,7 +415,7 @@ public class DatabaseReadRepository {
                 "user", meta.getUserName()
             );
         } catch (Exception e) {
-            return Map.of("error", e.getMessage());
+            return Map.of("error", "Connection information unavailable");
         }
     }
 }

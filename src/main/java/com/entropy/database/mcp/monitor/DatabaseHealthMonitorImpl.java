@@ -56,7 +56,7 @@ public class DatabaseHealthMonitorImpl implements DatabaseHealthMonitor {
             status.put("user", meta.getUserName());
         } catch (Exception e) {
             status.put("status", "unhealthy");
-            status.put("error", e.getMessage());
+            status.put("error", "Connection health check failed");
         }
         return status;
     }

@@ -49,15 +49,21 @@ public class QueryTools extends McpToolBase {
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
 
-    @McpTool(description = "Execute a SQL SELECT query with pagination support")
+    @McpTool(description = "[PREREQ] Call createNamedConnection first to register a database connection. Then execute a SQL SELECT query with pagination support. Pass the connection name via the 'connection' parameter.")
     public Map<String, Object> executeQuery(
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
             @McpToolParam(description = "Continuation token for pagination. Omit or pass empty string for first page.", required = false) String continuationToken,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
-            log.debug("executeQuery called: sql={}, maxRows={}, token={}, connection={}", sql, maxRows, continuationToken, connection);
-            var result = routingFacade.executeQuery(sql, maxRows, continuationToken, connection);
+            // Sanitise log output to avoid leaking SQL or sensitive tokens into debug logs.
+            String sqlTruncated = (sql != null && sql.length() > 200) ? sql.substring(0, 200) + "..." : sql;
+            String tokenMasked = (continuationToken != null)
+                    ? continuationToken.substring(0, Math.min(8, continuationToken.length())) + "..."
+                    : null;
+            log.debug("executeQuery called: sql={}, maxRows={}, token={}, connection={}",
+                    sqlTruncated, maxRows, tokenMasked, connection);
+            var result = routingFacade.executeQuery(sql, maxRows != null ? maxRows : 100, continuationToken, connection);
             List<Map<String, Object>> safeRows = QueryUtils.makeSerializable(result.rows());
             Map<String, Object> resultMap = new HashMap<>();
             resultMap.put("columns", result.columns());
@@ -124,6 +130,12 @@ public class QueryTools extends McpToolBase {
             @McpToolParam(description = "Parameters as key-value pairs", required = false) Map<String, Object> params,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) throws Exception {
         return safeExecute(() -> {
+            if (table == null || table.isBlank()) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "table must not be blank");
+            }
+            if (params != null && params.isEmpty()) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "params must not be empty for this template");
+            }
             String template = ToolParams.TEMPLATES.get(templateName);
             if (template == null) {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Unknown template: " + templateName
@@ -140,7 +152,9 @@ public class QueryTools extends McpToolBase {
                 sql = sql.replace("{condition}", (String) boundParams.getOrDefault("condition", "1=1"));
             }
 
-            log.debug("executeSqlTemplate: template={}, table={}, schema={}, params={}", templateName, qualifiedTable, schema, boundParams);
+            log.debug("executeSqlTemplate: template={}, table={}, schema={}, paramsSize={}",
+                    templateName, qualifiedTable, schema,
+                    boundParams != null ? boundParams.size() : 0);
             sqlValidator.validateSelect(sql);
 
             List<Map<String, Object>> rows = routingFacade.executeNamedQuery(sql, boundParams, connection);

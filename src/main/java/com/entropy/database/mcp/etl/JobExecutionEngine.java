@@ -20,6 +20,7 @@ import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.config.EtlConfig;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
+import com.entropy.database.mcp.security.SqlValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
@@ -44,8 +45,11 @@ import java.util.stream.Collectors;
 public class JobExecutionEngine implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(JobExecutionEngine.class);
+    private static final int DEFAULT_ETL_THREADS = 4;
+    private static final int DEFAULT_BATCH_SIZE = 1000;
 
     private final DynamicDataSourceManager dataSourceManager;
+    private final SqlValidator sqlValidator;
 
     // Active job executions (in-memory for demo; in production use a persistent store)
     private final Map<String, JobExecution> executions = new ConcurrentHashMap<>();
@@ -56,14 +60,23 @@ public class JobExecutionEngine implements DisposableBean {
 
     public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                               McpMetricsCollector metricsCollector) {
-        this(dataSourceManager, metricsCollector, new EtlConfig(4, 1000), null);
+        this(dataSourceManager, metricsCollector, new EtlConfig(DEFAULT_ETL_THREADS, DEFAULT_BATCH_SIZE), null);
     }
 
     public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                               McpMetricsCollector metricsCollector,
                               EtlConfig etlConfig,
                               TaskExecutor taskExecutor) {
+        this(dataSourceManager, metricsCollector, etlConfig, taskExecutor, null);
+    }
+
+    public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
+                              McpMetricsCollector metricsCollector,
+                              EtlConfig etlConfig,
+                              TaskExecutor taskExecutor,
+                              SqlValidator sqlValidator) {
         this.dataSourceManager = dataSourceManager;
+        this.sqlValidator = sqlValidator;
         this.etlConfig = etlConfig;
         this.metricsCollector = metricsCollector;
         this.taskExecutor = taskExecutor;
@@ -222,7 +235,7 @@ public class JobExecutionEngine implements DisposableBean {
 
         } catch (Exception e) {
             log.error("Step {} failed", step.id(), e);
-            updateStepState(execution, step.id(), StepExecutionState.failed(step.id(), e.getMessage()));
+            updateStepState(execution, step.id(), StepExecutionState.failed(step.id(), "执行失败"));
         }
     }
 
@@ -247,15 +260,18 @@ public class JobExecutionEngine implements DisposableBean {
         DatabaseDialect dialect = target.getDialect();
 
         String targetTable = dialect.normalizeTableName(step.targetTable());
+        if (sqlValidator != null) {
+            sqlValidator.validateSelect(step.sourceSql());
+        }
         List<Map<String, Object>> rows = sourceJdbc.queryForList(step.sourceSql());
         if (rows.isEmpty()) return 0;
 
         List<String> columns = new ArrayList<>(rows.get(0).keySet());
-        String columnList = columns.stream().map(dialect::quote).collect(Collectors.joining(", "));
-        String placeholderList = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
+        String columnList = String.join(", ", columns.stream().map(dialect::quote).toList());
+        String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
         String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
 
-        int batchSize = getIntParam(step, "batchSize", etlConfig != null ? etlConfig.batchSize() : 1000);
+        int batchSize = getIntParam(step, "batchSize", etlConfig != null ? etlConfig.batchSize() : DEFAULT_BATCH_SIZE);
         int[][] updateCounts = targetJdbc.batchUpdate(insertSql, rows, batchSize, (ps, row) -> {
             for (int i = 0; i < columns.size(); i++) {
                 ps.setObject(i + 1, row.get(columns.get(i)));
@@ -272,6 +288,10 @@ public class JobExecutionEngine implements DisposableBean {
 
         JdbcTemplate jdbcTemplate = source.getJdbcTemplate();
         DatabaseDialect dialect = source.getDialect();
+
+        if (sqlValidator != null) {
+            sqlValidator.validateSelect(step.sourceSql());
+        }
 
         List<String> sourceColumns = new ArrayList<>();
         List<String> targetColumns = new ArrayList<>();
@@ -301,7 +321,7 @@ public class JobExecutionEngine implements DisposableBean {
             selectExprs.add(expr + " AS " + dialect.quote(targetColumns.get(i)));
         }
         selectSql.append(String.join(", ", selectExprs));
-        selectSql.append(" FROM ").append(dialect.normalizeTableName(step.sourceSql()));
+        selectSql.append(" FROM (").append(step.sourceSql()).append(") AS _src");
         if (whereClause != null && !whereClause.isBlank()) {
             selectSql.append(" WHERE ").append(whereClause);
         }
@@ -310,11 +330,11 @@ public class JobExecutionEngine implements DisposableBean {
         if (rows.isEmpty()) return 0;
 
         String targetTable = dialect.normalizeTableName(step.targetTable());
-        String columnList = targetColumns.stream().map(dialect::quote).collect(Collectors.joining(", "));
-        String placeholderList = targetColumns.stream().map(c -> "?").collect(Collectors.joining(", "));
+        String columnList = String.join(", ", targetColumns.stream().map(dialect::quote).toList());
+        String placeholderList = String.join(", ", targetColumns.stream().map(c -> "?").toList());
         String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
 
-        int batchSize = getIntParam(step, "batchSize", 1000);
+        int batchSize = getIntParam(step, "batchSize", DEFAULT_BATCH_SIZE);
         int[][] updateCounts = jdbcTemplate.batchUpdate(insertSql, rows, batchSize, (ps, row) -> {
             for (int i = 0; i < targetColumns.size(); i++) {
                 ps.setObject(i + 1, row.get(targetColumns.get(i)));

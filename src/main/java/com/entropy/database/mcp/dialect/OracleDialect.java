@@ -126,7 +126,9 @@ public class OracleDialect extends AbstractDatabaseDialect {
         if (lastRowid == null || lastRowid.isBlank()) {
             return "SELECT * FROM (" + sql + ") WHERE ROWNUM <= " + limit;
         }
-        long offset = Long.parseLong(lastRowid);
+        long offset;
+        try { offset = Long.parseLong(lastRowid); }
+        catch (NumberFormatException e) { return "SELECT * FROM (" + sql + ") WHERE ROWNUM <= " + limit; }
         return """
             SELECT * FROM (
                 SELECT inner_.*, ROWNUM rnum FROM (

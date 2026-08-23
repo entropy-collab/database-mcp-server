@@ -91,7 +91,7 @@ public class CdcServiceImpl implements CdcService {
         String sql = dialect.cdcReadChangesSql(schema, table, fromLsn);
         if (sql == null) {
             log.warn("CDC read not supported for dialect '{}'", dialect.getDialectName());
-            return Collections.emptyList();
+            return List.of();
         }
 
         List<CdcChangeEvent> events = new ArrayList<>();
@@ -114,7 +114,7 @@ public class CdcServiceImpl implements CdcService {
                 lastEventTimes.put(connection, System.currentTimeMillis());
             }
         } catch (Exception e) {
-            log.warn("Failed to read CDC changes for {}.{}: {}", schema, table, e.getMessage());
+            log.warn("Failed to read CDC changes for {}.{}: {}", schema, table, e.getMessage(), e);
         }
         return events;
     }
@@ -168,7 +168,7 @@ public class CdcServiceImpl implements CdcService {
                 .filter(v -> v != null)
                 .map(Object::toString)
                 .findFirst()
-                .map(s -> s.isEmpty() ? 0L : Math.abs(s.hashCode()))
+                .map(s -> s.isEmpty() ? 0L : Math.floorMod(s.hashCode(), Long.MAX_VALUE))
                 .orElse(0L);
     }
 

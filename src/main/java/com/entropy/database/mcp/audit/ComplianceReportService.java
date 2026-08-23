@@ -70,15 +70,15 @@ public class ComplianceReportService {
                             "rows", e.rows(),
                             "durationMs", e.durationMs()
                     ))
-                    .collect(Collectors.toList());
+                    .toList();
 
             report.put("status", "completed");
             report.put("totalEntries", logs.size());
             report.put("entries", entries);
         } catch (Exception e) {
-            log.warn("Failed to generate data access report: {}", e.getMessage());
+            log.warn("Failed to generate data access report: {}", e.getMessage(), e);
             report.put("status", "error");
-            report.put("error", e.getMessage());
+            report.put("error", "Report generation failed");
         }
 
         return report;
@@ -141,9 +141,9 @@ public class ComplianceReportService {
             report.put("toolBreakdown", toolBreakdown);
             report.put("connectionBreakdown", connectionBreakdown);
         } catch (Exception e) {
-            log.warn("Failed to generate protection report: {}", e.getMessage());
+            log.warn("Failed to generate protection report: {}", e.getMessage(), e);
             report.put("status", "error");
-            report.put("error", e.getMessage());
+            report.put("error", "Report generation failed");
         }
 
         return report;

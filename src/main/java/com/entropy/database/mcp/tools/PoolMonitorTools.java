@@ -62,7 +62,7 @@ public class PoolMonitorTools extends McpToolBase {
             Map<String, HikariPoolStats> allStats = dataSourceManager.getPoolStats();
             HikariPoolStats stats = allStats.get(connectionName);
             if (stats == null) {
-                throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found or not yet acquired: " + connectionName + " (connectionName=" + connectionName + ")");
+                throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found or not yet acquired: " + connectionName, connectionName);
             }
             return success(stats.toMap());
         });

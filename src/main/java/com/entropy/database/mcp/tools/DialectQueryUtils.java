@@ -76,7 +76,7 @@ public final class DialectQueryUtils {
             ));
         } catch (Exception e) {
             log.warn("Health check failed for connection '{}': {}", connection, e.getMessage(), e);
-            throw new IllegalStateException("Health check failed for connection '" + connection + "': " + e.getMessage(), e);
+            throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED, "Health check failed for connection '" + connection + "'", e);
         }
     }
 
@@ -115,7 +115,7 @@ public final class DialectQueryUtils {
             return McpToolUtils.success(Map.of("rows", rows));
         } catch (Exception e) {
             log.warn("executeDialectQuery failed for connection '{}': {}", connection, e.getMessage(), e);
-            throw new RuntimeException("Dialect query execution failed: " + e.getMessage(), e);
+            throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED, "Dialect query execution failed", e);
         }
     }
 
@@ -126,7 +126,7 @@ public final class DialectQueryUtils {
         if (args == null || args.length == 0) {
             return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of());
         }
-        return executeDialectQuery(dataSourceManager, connection, sqlProvider, java.util.Arrays.asList(args));
+        return executeDialectQuery(dataSourceManager, connection, sqlProvider, java.util.Arrays.stream(args).toList());
     }
 
     private static void requireConnection(String connection) {

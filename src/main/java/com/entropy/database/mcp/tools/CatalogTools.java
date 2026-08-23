@@ -23,7 +23,6 @@ import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * Data catalog and metadata management tools.
@@ -94,7 +93,7 @@ public class CatalogTools extends McpToolBase {
                         m.put("columnCount", e.columns().size());
                         return m;
                     })
-                    .collect(Collectors.toList()));
+                    .toList());
             return success(result);
         });
     }
@@ -109,7 +108,7 @@ public class CatalogTools extends McpToolBase {
 
             int maxResults = (limit != null && limit > 0) ? limit : props.maxSearchResults();
             List<DataCatalogEntry> entries = catalogService.searchAssets(keyword, connection);
-            entries = entries.stream().limit(maxResults).collect(Collectors.toList());
+            entries = entries.stream().limit(maxResults).toList();
 
             Map<String, Object> result = context("connection", connection, "keyword", keyword);
             result.put("resultCount", entries.size());
@@ -124,7 +123,7 @@ public class CatalogTools extends McpToolBase {
                         m.put("maxSensitivity", e.maxSensitivity().getEn());
                         return m;
                     })
-                    .collect(Collectors.toList()));
+                    .toList());
             return success(result);
         });
     }
@@ -171,7 +170,7 @@ public class CatalogTools extends McpToolBase {
                         m.put("suggestedClassification", c.suggestedClassification());
                         return m;
                     })
-                    .collect(Collectors.toList()));
+                    .toList());
             return success(result);
         });
     }
@@ -199,6 +198,6 @@ public class CatalogTools extends McpToolBase {
             m.put("category", c.detectedCategory());
             m.put("suggestion", c.suggestedClassification());
             return m;
-        }).collect(Collectors.toList());
+        }).toList();
     }
 }

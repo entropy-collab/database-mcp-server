@@ -16,6 +16,8 @@
 package com.entropy.database.mcp.util;
 
 import com.entropy.database.mcp.byok.ConnectionProperties;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
@@ -23,7 +25,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  */
 public final class ConnectionUtils {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .configure(JsonParser.Feature.STRICT_DUPLICATE_DETECTION, true);
 
     private ConnectionUtils() {
         // Utility class
@@ -42,7 +46,7 @@ public final class ConnectionUtils {
         try {
             return MAPPER.readValue(connectionJson, ConnectionProperties.class);
         } catch (Exception e) {
-            throw new IllegalArgumentException("Invalid connection JSON: " + e.getMessage(), e);
+            throw new IllegalArgumentException("Invalid connection configuration", e);
         }
     }
 }

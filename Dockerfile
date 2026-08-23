@@ -1,9 +1,8 @@
-# syntax=docker/dockerfile:1
 # 构建前提：本地先执行 mvn clean install -DskipTests
 # 构建命令：
 #   docker buildx build --platform linux/amd64 -t database-mcp-server:latest .
 
-FROM --platform=$TARGETPLATFORM eclipse-temurin:17-jre
+FROM eclipse-temurin:25-jdk
 
 # Install curl for health checks with Aliyun mirror
 RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g; s/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \

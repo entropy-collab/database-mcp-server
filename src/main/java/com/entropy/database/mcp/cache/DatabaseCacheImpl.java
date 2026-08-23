@@ -57,7 +57,7 @@ public class DatabaseCacheImpl implements DatabaseCache {
             int maxSize,
             Duration queryTtl,
             Duration metadataTtl) {
-        
+
         this.queryTtl = queryTtl;
         this.metadataTtl = metadataTtl;
         this.queryCacheSize = maxSize / 10;  // Query cache is smaller
@@ -81,22 +81,19 @@ public class DatabaseCacheImpl implements DatabaseCache {
             log.info("DatabaseCache initialized: querySize={}, metadataSize={}, queryTTL={}ms, metadataTTL={}ms",
                 queryCacheSize, metadataCacheSize, queryTtl.toMillis(), metadataTtl.toMillis());
 
-            // Initialize Bloom filter for query pre-check
+            // Initialize Bloom filter for query pre-check.
+            // Bounded to at most 10000 entries — BloomFilter is a growing data structure with no eviction,
+            // so we cap capacity to avoid unbounded memory growth.
+            int bloomCapacity = Math.min(queryCacheSize * 10, 10000);
             this.queryBloomFilter = BloomFilter.create(
                 (Funnel<String>) (str, into) -> into.putString(str, StandardCharsets.UTF_8),
-                queryCacheSize * 10,  // expected inserts: 10x cache size
+                bloomCapacity,
                 0.01                 // false positive rate: 1%
             );
 
         } catch (Exception e) {
-            log.error("Failed to initialize Caffeine cache, using fallback", e);
-            this.queryCache = null;
-            this.metadataCache = null;
-            this.queryBloomFilter = BloomFilter.create(
-                (Funnel<String>) (str, into) -> into.putString(str, StandardCharsets.UTF_8),
-                1000,
-                0.01
-            );
+            log.error("Failed to initialize Caffeine cache, using fallback BloomFilter only", e);
+            // queryCache and metadataCache remain null — all get/put calls will safely degrade
         }
     }
 

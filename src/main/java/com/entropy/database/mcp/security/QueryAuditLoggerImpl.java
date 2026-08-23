@@ -29,7 +29,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.stream.Collectors;
+import java.util.regex.Pattern;
 
 /**
  * Query audit logger for tracking database operations.
@@ -44,6 +44,11 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
 
     // Bounded buffer: keeps last 100 audit entries for SSE/polling consumers
     private static final int MAX_BUFFER_SIZE = 100;
+
+    // Sensitive patterns to mask in audit SQL logs
+    private static final Pattern SENSITIVE_VALUE_PATTERN = Pattern.compile(
+            "(?i)('\\s*(password|passwd|pwd|secret|token|api_key|credential)\\s*'=\\s*)'[^']*'",
+            Pattern.CASE_INSENSITIVE);
 
     private final ConcurrentLinkedQueue<Map<String, Object>> buffer = new ConcurrentLinkedQueue<>();
 
@@ -91,10 +96,11 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     @Override
     @Async
     public void log(String tool, String sql, int rowCount, long durationMs, boolean success, @Nullable String error, @Nullable String connectionKey) {
+        String safeSql = maskSensitiveValues(sql);
         auditLog.info(
             "mcp.db.audit tool={} sql=\"{}\" rows={} durationMs={} success={} error={} connection={}",
             tool,
-            truncate(sql, properties.audit().sqlTruncateLength()),
+            truncate(safeSql, properties.audit().sqlTruncateLength()),
             rowCount,
             durationMs,
             success,
@@ -104,7 +110,7 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
 
         Map<String, Object> entry = Map.of(
             "tool", tool,
-            "sql", truncate(sql, properties.audit().entrySqlTruncateLength()),
+            "sql", truncate(safeSql, properties.audit().entrySqlTruncateLength()),
             "rows", rowCount,
             "durationMs", durationMs,
             "success", success,
@@ -117,9 +123,9 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
         // Record in SqlAuditService for slow query analysis and pattern stats
         if (sqlAuditService != null) {
             try {
-                sqlAuditService.recordQuery(tool, sql, rowCount, durationMs, success, connectionKey);
+                sqlAuditService.recordQuery(tool, safeSql, rowCount, durationMs, success, connectionKey);
             } catch (Exception e) {
-                log.warn("Failed to record query in SqlAuditService: {}", e.getMessage());
+                log.warn("Failed to record query in SqlAuditService: {}", e.getMessage(), e);
             }
         }
 
@@ -129,7 +135,7 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
                 auditLogRepository.insert(new AuditLogEntity(
                     null,
                     tool,
-                    sql,
+                    safeSql,
                     rowCount,
                     durationMs,
                     success,
@@ -147,17 +153,20 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
 
     /**
      * Returns the most recent {@code limit} buffered audit log entries, newest first.
+     * Uses toArray() to take a consistent snapshot, avoiding ConcurrentModificationException
+     * that could occur with direct stream() on a concurrent queue during concurrent writes.
      */
     @SuppressWarnings("unchecked")
     @Override
     public List<Map<String, Object>> getRecentLogs(int limit) {
-        return buffer.stream()
+        Map<String, Object>[] snapshot = buffer.toArray(new Map[0]);
+        return java.util.Arrays.stream(snapshot)
             .sorted((a, b) -> ((String) b.get("timestamp")).compareTo((String) a.get("timestamp")))
             .limit(limit)
-            .collect(Collectors.toList());
+            .toList();
     }
 
-    private void evictOld() {
+    private synchronized void evictOld() {
         while (buffer.size() > MAX_BUFFER_SIZE) {
             buffer.poll();
         }
@@ -166,5 +175,13 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     private static String truncate(String s, int max) {
         if (s == null) return "";
         return s.length() <= max ? s : s.substring(0, max) + "...";
+    }
+
+    /**
+     * Mask sensitive field values in SQL strings to prevent password/secret leakage in audit logs.
+     */
+    private static String maskSensitiveValues(String sql) {
+        if (sql == null || sql.isEmpty()) return sql;
+        return SENSITIVE_VALUE_PATTERN.matcher(sql).replaceAll("$1***REDACTED***");
     }
 }

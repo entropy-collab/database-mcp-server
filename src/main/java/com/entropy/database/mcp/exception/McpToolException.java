@@ -26,18 +26,42 @@ import java.util.Map;
 public class McpToolException extends RuntimeException {
 
     private final ErrorCode errorCode;
+    private final String connection;
 
     public McpToolException(ErrorCode errorCode, String message) {
         super(message);
         this.errorCode = errorCode;
+        this.connection = null;
     }
 
     public McpToolException(ErrorCode errorCode, String message, Throwable cause) {
         super(message, cause);
         this.errorCode = errorCode;
+        this.connection = null;
+    }
+
+    public McpToolException(ErrorCode errorCode, String message, String connection) {
+        super(message);
+        this.errorCode = errorCode;
+        this.connection = connection;
+    }
+
+    public McpToolException(ErrorCode errorCode, String message, Throwable cause, String connection) {
+        super(message, cause);
+        this.errorCode = errorCode;
+        this.connection = connection;
     }
 
     public ErrorCode getErrorCode() { return errorCode; }
+    public String getConnection() { return connection; }
+
+    @Override
+    public String getMessage() {
+        if (connection != null && !connection.isBlank()) {
+            return "connection=" + connection + " | " + super.getMessage();
+        }
+        return super.getMessage();
+    }
 
     /**
      * Returns a minimal error response map compatible with the legacy
@@ -47,6 +71,9 @@ public class McpToolException extends RuntimeException {
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("error", errorCode.getCode());
         r.put("message", getMessage());
+        if (connection != null && !connection.isBlank()) {
+            r.put("connection", connection);
+        }
         return r;
     }
 }

@@ -93,7 +93,7 @@ public class ResourceTools {
                     new McpSchema.TextResourceContents(
                             "schema://tables/" + connection,
                             "application/json",
-                            "{\"error\": \"" + e.getMessage() + "\"}"
+                            "{\"error\": \"Table listing failed\"}"
                     )
             ));
         }

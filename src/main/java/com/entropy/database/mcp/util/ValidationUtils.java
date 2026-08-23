@@ -117,7 +117,8 @@ public final class ValidationUtils {
     }
 
     // Pre-compiled patterns for performance
-    private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("[A-Za-z0-9_\\s.,'\"=<>!()+\\-*/%&|^~]+");
+    // Only allow: letters, digits, underscores, whitespace, comparison operators, quotes, and basic math in values
+    private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("[A-Za-z0-9_\\s.,'\"=<>!%+-]+");
     // Dangerous substrings that indicate SQL injection
     private static final String[] DANGEROUS_PATTERNS = {";", "--", "/*", "*/", "(", ")", "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE "};
 
@@ -131,6 +132,11 @@ public final class ValidationUtils {
             return;
         }
         String lower = whereClause.toLowerCase().trim();
+        // Reject multi-statement attacks: semicolon not allowed anywhere in WHERE clause
+        if (whereClause.contains(";")) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    paramName + " contains disallowed semicolon");
+        }
         // Reject subqueries and multi-statement patterns
         for (String dangerous : DANGEROUS_PATTERNS) {
             if (lower.contains(dangerous) && dangerous.contains(" ")) {
@@ -155,6 +161,6 @@ public final class ValidationUtils {
 
     private static boolean isComparisonOperator(String op) {
         return op.equals("=") || op.equals(">") || op.equals("<") || op.equals("!")
-                || op.equals("<>") || op.equals("<=") || op.equals(">=") || op.equals("<!");
+                || op.equals("<>") || op.equals("<=") || op.equals(">=");
     }
 }

@@ -22,7 +22,6 @@ import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * Data lineage analysis MCP tools.
@@ -92,7 +91,7 @@ public class LineageTools extends McpToolBase {
                 result.put("anomalies", analysis.anomalies().stream()
                         .map(a -> Map.<String, Object>of("type", a.type(), "description", a.description(),
                                 "affectedTables", a.affectedTables()))
-                        .collect(Collectors.toList()));
+                        .toList());
             }
             return success(result);
         });
@@ -158,7 +157,7 @@ public class LineageTools extends McpToolBase {
                     "sourceTable", e.sourceTable(), "targetTable", e.targetTable(),
                     "sourceColumn", e.sourceColumn(), "targetColumn", e.targetColumn(),
                     "type", e.type().name()
-            )).collect(Collectors.toList());
+            )).toList();
             return success(Map.of("connection", connectionName, "totalEdges", items.size(), "edges", items));
         });
     }
@@ -201,7 +200,7 @@ public class LineageTools extends McpToolBase {
                 "sourceTable", e.sourceTable(), "targetTable", e.targetTable(),
                 "sourceColumn", e.sourceColumn(), "targetColumn", e.targetColumn(),
                 "type", e.type().name()
-        )).collect(Collectors.toList());
+        )).toList();
         return success(Map.of("direction", direction, "table", table, "connection", connection,
                 "edgeCount", edges.size(), "edges", items));
     }
@@ -211,7 +210,7 @@ public class LineageTools extends McpToolBase {
                 "sourceTable", e.sourceTable(), "targetTable", e.targetTable(),
                 "sourceColumn", e.sourceColumn(), "targetColumn", e.targetColumn(),
                 "type", e.type().name()
-        )).collect(Collectors.toList());
+        )).toList();
     }
 
     private String buildMermaidForEdges(List<LineageEdge> edges, String table, String direction) {

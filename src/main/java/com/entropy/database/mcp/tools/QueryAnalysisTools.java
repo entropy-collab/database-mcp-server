@@ -247,7 +247,7 @@ public class QueryAnalysisTools extends McpToolBase {
             extractFromSelect(sql, tables);
         }
 
-        return tables.stream().distinct().collect(java.util.stream.Collectors.toList());
+        return tables.stream().distinct().toList();
     }
 
     private void extractFromSelect(String sql, List<String> tables) {

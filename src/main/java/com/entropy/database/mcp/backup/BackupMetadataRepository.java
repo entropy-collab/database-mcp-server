@@ -24,7 +24,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * In-memory backup metadata store with auto-cleanup of expired records.
@@ -60,7 +59,7 @@ public class BackupMetadataRepository {
                 .filter(m -> tableName == null || tableName.isBlank() || tableName.equals(m.tableName()))
                 .sorted(Comparator.comparing(BackupMetadata::createdAt).reversed())
                 .limit(limit)
-                .collect(Collectors.toList());
+                .toList();
     }
 
     public BackupMetadata latestFor(String connectionKey, String tableName) {

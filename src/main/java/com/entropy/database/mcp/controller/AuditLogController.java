@@ -26,7 +26,6 @@ import org.springframework.web.bind.annotation.RestController;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/audit")
@@ -53,7 +52,7 @@ public class AuditLogController {
         if (operation != null && !operation.isBlank()) {
             return all.stream()
                     .filter(log -> operation.equals(log.get("tool")))
-                    .collect(Collectors.toList());
+                    .toList();
         }
         return all;
     }
@@ -85,7 +84,7 @@ public class AuditLogController {
                     "timestamp", entity.timestamp().toString(),
                     "connectionKey", entity.connectionKey()
                 ))
-                .collect(Collectors.toList());
+                .toList();
     }
 
     private static Instant parseInstant(String value) {

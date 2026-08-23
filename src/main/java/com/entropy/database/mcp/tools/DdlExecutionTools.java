@@ -101,6 +101,7 @@ public class DdlExecutionTools extends McpToolBase {
         if (!isGatewayEnabled()) {
             throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Gateway is not enabled");
         }
+        validateRequired(connectionName, "connectionName");
         return safeExecute(() -> {
             sqlValidator.validateDdl(ddl);
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
@@ -141,12 +142,14 @@ public class DdlExecutionTools extends McpToolBase {
                     try {
                         sqlValidator.validateDdl(ddl);
                         long stmtStart = System.currentTimeMillis();
-                        connection.createStatement().execute(ddl);
+                        try (var stmt = connection.createStatement()) {
+                            stmt.execute(ddl);
+                        }
                         long stmtDuration = System.currentTimeMillis() - stmtStart;
                         results.add(Map.of("ddl", ddl, "success", true, "durationMs", stmtDuration));
                     } catch (Exception e) {
                         allSuccess = false;
-                        results.add(Map.of("ddl", ddl, "success", false, "error", e.getMessage()));
+                        results.add(Map.of("ddl", ddl, "success", false, "error", "DDL execution failed"));
                         // Stop on first failure — transaction will be rolled back at method end
                         break;
                     }
@@ -169,11 +172,11 @@ public class DdlExecutionTools extends McpToolBase {
                         "message", allSuccess ? "All DDL statements executed successfully" : "Transaction rolled back due to failure"
                 ));
             } finally {
-                // Close connection first; then close context (which returns connection to pool)
+                // Close the borrowed physical connection to return it to the pool.
+                // Do NOT call context.close() — that would close the entire HikariCP pool.
                 if (connection != null) {
                     try { connection.close(); } catch (Exception e) { log.warn("Failed to close connection", e); }
                 }
-                try { context.close(); } catch (Exception e) { log.warn("Failed to close context", e); }
             }
         });
     }
@@ -195,7 +198,7 @@ public class DdlExecutionTools extends McpToolBase {
                     results.add(Map.of("ddl", ddl, "valid", true));
                 } catch (Exception e) {
                     allValid = false;
-                    results.add(Map.of("ddl", ddl, "valid", false, "error", e.getMessage()));
+                    results.add(Map.of("ddl", ddl, "valid", false, "error", "Validation failed"));
                 }
             }
 

@@ -33,7 +33,13 @@ public final class ToolParams {
      * Marked {@code required = false} because callers should supply it
      * when they know the connection; omit it when the AI can infer it.
      */
-    public static final String CONNECTION_DESCRIPTION = "BYOK connection name";
+    public static final String CONNECTION_DESCRIPTION = """
+            BYOK connection name to target a specific database.\
+            REQUIRED when multiple connections are registered;\
+            OPTIONAL when only one connection exists (used automatically).\
+            Connection registration is asynchronous — after creating a connection with\
+            createNamedConnection, wait a moment before querying (use describeConnection first\
+            to confirm it is active).""";
 
     /**
      * Standard SQL templates shared across tool classes.

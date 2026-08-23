@@ -87,7 +87,7 @@ public class QualityCheckService {
         // Duplicate check on all columns
         if (!columns.isEmpty()) {
             String columnList = columns.stream().map(dialect::quote).reduce((a, b) -> a + ", " + b).orElse("");
-            Long dupCount = queryDuplicateGroups(jdbc, tableName, columnList);
+            Long dupCount = queryDuplicateGroups(jdbc, tableName, columnList, dialect);
             if (dupCount != null && dupCount > 0) {
                 double dupRatePct = totalRows > 0 ? (dupCount * 100.0 / totalRows) : 0;
                 double thresholdPct = properties.defaultDuplicateRateThreshold() * 100;
@@ -110,7 +110,7 @@ public class QualityCheckService {
                     issues.add(issue);
                 }
             } catch (Exception e) {
-                log.warn("Rule evaluation failed for rule '{}': {}", rule.id(), e.getMessage());
+                log.warn("Rule evaluation failed for rule '{}': {}", rule.id(), e.getMessage(), e);
             }
         }
 
@@ -204,7 +204,7 @@ public class QualityCheckService {
                     String.format("Range violation rate: %.2f%% (min=%s, max=%s)",
                             violationRate, min != null ? min : "null", max != null ? max : "null"));
         } catch (Exception e) {
-            log.warn("Range check failed for column '{}': {}", col, e.getMessage());
+            log.warn("Range check failed for column '{}': {}", col, e.getMessage(), e);
             return null;
         }
     }
@@ -220,7 +220,7 @@ public class QualityCheckService {
                     rule.severity().name(), value, rule.threshold(), totalRows, 0,
                     "Custom SQL condition: " + truncate(sql, 100));
         } catch (Exception e) {
-            log.warn("Custom SQL rule '{}' failed: {}", rule.id(), e.getMessage());
+            log.warn("Custom SQL rule '{}' failed: {}", rule.id(), e.getMessage(), e);
             return null;
         }
     }
@@ -233,7 +233,7 @@ public class QualityCheckService {
                     "SELECT COUNT(*) FROM " + dialect.quote(tableName), Integer.class);
             return count != null ? count : 0;
         } catch (Exception e) {
-            log.warn("Failed to count rows in table '{}': {}", tableName, e.getMessage());
+            log.warn("Failed to count rows in table '{}': {}", tableName, e.getMessage(), e);
             return 0;
         }
     }
@@ -245,7 +245,7 @@ public class QualityCheckService {
                     .map(row -> (String) row.get("column_name"))
                     .toList();
         } catch (Exception e) {
-            log.warn("Failed to list columns for table '{}': {}", tableName, e.getMessage());
+            log.warn("Failed to list columns for table '{}': {}", tableName, e.getMessage(), e);
             return List.of();
         }
     }
@@ -259,19 +259,19 @@ public class QualityCheckService {
                     Integer.class);
             return count != null ? count : 0;
         } catch (Exception e) {
-            log.warn("Null check failed for column '{}': {}", column, e.getMessage());
+            log.warn("Null check failed for column '{}': {}", column, e.getMessage(), e);
             return 0;
         }
     }
 
-    private Long queryDuplicateGroups(JdbcTemplate jdbc, String tableName, String columnList) {
+    private Long queryDuplicateGroups(JdbcTemplate jdbc, String tableName, String columnList, DatabaseDialect dialect) {
         try {
             return jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + tableName
+                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + dialect.quote(tableName)
                             + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)",
                     Long.class);
         } catch (Exception e) {
-            log.warn("Duplicate check failed: {}", e.getMessage());
+            log.warn("Duplicate check failed for table '{}'", tableName);
             return 0L;
         }
     }

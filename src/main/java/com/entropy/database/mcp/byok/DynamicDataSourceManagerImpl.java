@@ -49,7 +49,10 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     private final com.github.benmanes.caffeine.cache.Cache<String, LeasedDataSource> leasedCache;
     private final Map<String, ConnectionMetadata> metadataRegistry;
     private final Map<String, String> contentFingerprintToKey; // content fingerprint → canonical key
-    private final Map<String, Object> keyLocks;
+    // Use Caffeine with TTL to prevent unbounded growth of keyLocks entries.
+    // Entries expire after 2x leaseDuration with no access, avoiding memory leak.
+    private final com.github.benmanes.caffeine.cache.Cache<String, Object> keyLocks;
+
     private final Duration leaseDuration;
     private final Duration maxLifetime;
     private final int maxCachedConnections;
@@ -78,21 +81,31 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
         this.metadataRegistry = new ConcurrentHashMap<>();
         this.contentFingerprintToKey = new ConcurrentHashMap<>();
-        this.keyLocks = new ConcurrentHashMap<>();
+        this.keyLocks = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
+                .expireAfterAccess(leaseDuration.multipliedBy(2))
+                .build();
+
 
         this.leasedCache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
                 .maximumSize(maxCachedConnections)
                 .expireAfterAccess(leaseDuration)
                 .removalListener((String key, LeasedDataSource value, com.github.benmanes.caffeine.cache.RemovalCause cause) -> {
+                    // Removal listener runs on a background thread; use synchronized to
+                    // ensure atomicity of multi-map cleanup (metadataRegistry, contentFingerprintToKey).
+                    // NOTE: keyLocks entry is intentionally left for shutdown-phase cleanup
+                    // to avoid race with threads that may still hold the lock.
+                    synchronized (keyLocks) {
+                        metadataRegistry.remove(key);
+                        contentFingerprintToKey.values().removeIf(v -> v.equals(key));
+                    }
+                    if (metricsCollector != null) {
+                        metricsCollector.recordByokConnectionRemoved();
+                    }
+                    // Close datasource OUTSIDE the synchronized block to avoid holding
+                    // the global keyLocks lock while waiting for HikariCP to drain connections.
                     if (value != null) {
                         log.info("Removing expired datasource: {} (cause: {})", key, cause);
                         value.close();
-                    }
-                    metadataRegistry.remove(key);
-                    contentFingerprintToKey.values().remove(key);
-                    keyLocks.remove(key);
-                    if (metricsCollector != null) {
-                        metricsCollector.recordByokConnectionRemoved();
                     }
                 })
                 .build();
@@ -136,7 +149,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             }
         }
 
-        Object lock = keyLocks.computeIfAbsent(key, k -> new Object());
+        Object lock = keyLocks.get(key, k -> new Object());
         boolean created = false;
         synchronized (lock) {
             // Double-check after acquiring lock
@@ -202,7 +215,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      */
     @Override
     public void registerExisting(String key, DataSource existingDataSource, DatabaseDialect dialect) {
-        Object lock = keyLocks.computeIfAbsent(key, k -> new Object());
+        Object lock = keyLocks.get(key, k -> new Object());
         synchronized (lock) {
             LeasedDataSource existing = leasedCache.getIfPresent(key);
             if (existing != null) {

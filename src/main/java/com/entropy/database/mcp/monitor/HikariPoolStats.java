@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.monitor;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -58,7 +59,7 @@ public record HikariPoolStats(
         if (connectionName == null || connectionName.isBlank()) {
             throw new IllegalArgumentException("connectionName is required");
         }
-        healthWarnings = java.util.Collections.unmodifiableList(healthWarnings != null ? healthWarnings : java.util.List.of());
+        healthWarnings = healthWarnings != null ? healthWarnings : List.of();
     }
 
     /**

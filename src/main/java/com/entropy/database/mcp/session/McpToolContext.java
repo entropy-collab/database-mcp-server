@@ -19,6 +19,9 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * Thread-local MCP tool context providing per-request isolation.
  *
@@ -46,6 +49,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class McpToolContext {
 
+    private static final Logger log = LoggerFactory.getLogger(McpToolContext.class);
     private static final ThreadLocal<McpToolContext> HOLDER = new ThreadLocal<>();
     private static final ThreadLocal<Long> SESSION_ID_HOLDER = new ThreadLocal<>();
 
@@ -101,7 +105,8 @@ public class McpToolContext {
         onCloseHooks.forEach(hook -> {
             try {
                 hook.run();
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                log.warn("Close hook failed for context", e);
             }
         });
         onCloseHooks.clear();

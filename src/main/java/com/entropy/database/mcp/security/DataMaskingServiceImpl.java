@@ -23,7 +23,6 @@ import org.springframework.stereotype.Component;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * Sensitive data auto-masking service.
@@ -85,14 +84,14 @@ public class DataMaskingServiceImpl implements DataMaskingService {
 
         return rows.stream()
             .map(row -> maskRow(row, maskColumns))
-            .collect(Collectors.toList());
+            .toList();
     }
 
     @Override
     public List<String> getMaskColumnsForSchema(List<String> columnNames) {
         return columnNames.stream()
             .filter(name -> shouldMaskColumn(name))
-            .collect(Collectors.toList());
+            .toList();
     }
 
     // ─── Private helpers ──────────────────────────────────────────────────

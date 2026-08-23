@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.session;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -58,7 +59,7 @@ import org.springframework.stereotype.Component;
 public class MultiSessionContext {
 
     /** Default TTL for cached entries in minutes. */
-    public static final long DEFAULT_TTL_MINUTES = 30;
+    public static final long DEFAULT_TTL_MINUTES = 60;
 
     /** Namespace for query results shared across tools. */
     public static final String NAMESPACE_QUERIES = "queries";
@@ -183,9 +184,9 @@ public class MultiSessionContext {
      */
     public java.util.Set<String> keys(String namespace) {
         var nsMap = store.get(currentSessionId());
-        if (nsMap == null) return java.util.Set.of();
+        if (nsMap == null) return Set.of();
         var keyMap = nsMap.get(namespace);
-        return keyMap != null ? keyMap.keySet() : java.util.Set.of();
+        return keyMap != null ? keyMap.keySet() : Set.of();
     }
 
     /**

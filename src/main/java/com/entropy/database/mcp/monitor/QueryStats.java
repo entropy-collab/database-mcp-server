@@ -24,6 +24,10 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class QueryStats {
 
+    private static final long MILLIS_PER_SECOND = 1000L;
+    private static final long MILLIS_PER_MINUTE = 60_000L;
+    private static final long MILLIS_PER_HOUR = 3_600_000L;
+
     private final AtomicLong totalQueries = new AtomicLong(0);
     private final AtomicLong totalDurationMs = new AtomicLong(0);
     private final AtomicLong totalRowsReturned = new AtomicLong(0);
@@ -87,9 +91,9 @@ public class QueryStats {
     }
 
     private String formatTimeAgo(long millis) {
-        if (millis < 1000) return millis + "ms";
-        if (millis < 60000) return (millis / 1000) + "s";
-        if (millis < 3600000) return (millis / 60000) + "m";
-        return (millis / 3600000) + "h";
+        if (millis < MILLIS_PER_SECOND) return millis + "ms";
+        if (millis < MILLIS_PER_MINUTE) return (millis / MILLIS_PER_SECOND) + "s";
+        if (millis < MILLIS_PER_HOUR) return (millis / MILLIS_PER_MINUTE) + "m";
+        return (millis / MILLIS_PER_HOUR) + "h";
     }
 }

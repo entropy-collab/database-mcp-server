@@ -26,7 +26,6 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 @Service
 public class OptimizerServiceImpl implements OptimizerService {
@@ -77,10 +76,10 @@ public class OptimizerServiceImpl implements OptimizerService {
                     tables.isEmpty() ? null : tables.get(0), planRows, durationMs,
                     warnings, indexRecs, rewrites, estimatedRows, sizeMb, actions);
         } catch (Exception e) {
-            log.warn("Query analysis failed: {}", e.getMessage());
+            log.warn("Query analysis failed: {}", e.getMessage(), e);
             long durationMs = System.currentTimeMillis() - startMs;
             return new PerformanceReport(connection, "unknown", sql, null, List.of(),
-                    durationMs, List.of("分析失败: " + e.getMessage()),
+                    durationMs, List.of("分析失败"),
                     List.of(), List.of(), 0, 0, List.of());
         } finally {
             ctx.close();
@@ -125,7 +124,7 @@ public class OptimizerServiceImpl implements OptimizerService {
 
             return recs;
         } catch (Exception e) {
-            log.warn("Index recommendation failed for {}: {}", tableName, e.getMessage());
+            log.warn("Index recommendation failed for {}: {}", tableName, e.getMessage(), e);
             return List.of();
         } finally {
             ctx.close();
@@ -253,9 +252,9 @@ public class OptimizerServiceImpl implements OptimizerService {
                     normalizedTable, List.of(), 0, warnings, indexRecs,
                     List.of(), rows, sizeMb, actions);
         } catch (Exception e) {
-            log.warn("Table analysis failed: {}", e.getMessage());
+            log.warn("Table analysis failed: {}", e.getMessage(), e);
             return new PerformanceReport(connection, "unknown", null, tableName,
-                    List.of(), 0, List.of("分析失败: " + e.getMessage()),
+                    List.of(), 0, List.of("分析失败"),
                     List.of(), List.of(), 0, 0, List.of());
         } finally {
             ctx.close();
@@ -308,11 +307,10 @@ public class OptimizerServiceImpl implements OptimizerService {
             if (explainSql == null) return List.of("EXPLAIN 不支持当前方言");
             List<Map<String, Object>> rows = jdbc.queryForList(explainSql);
             return rows.stream()
-                    .map(row -> row.values().stream()
-                            .map(Object::toString).collect(Collectors.joining(" | ")))
-                    .collect(Collectors.toList());
+                    .map(row -> String.join(" | ", row.values().stream().map(Object::toString).toList()))
+                    .toList();
         } catch (Exception e) {
-            return List.of("获取执行计划失败: " + e.getMessage());
+            return List.of("获取执行计划失败");
         }
     }
 

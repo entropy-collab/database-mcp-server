@@ -46,12 +46,19 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
 
     private ByokDataSourceContext resolveContext(String connection) {
         if (connection == null || connection.isBlank()) {
-            throw new IllegalArgumentException(buildConnectionRequiredMessage());
+            Collection<String> keys = dynamicDataSourceManager.listConnectionKeys();
+            if (keys.size() == 1) {
+                connection = keys.iterator().next();
+            } else if (keys.isEmpty()) {
+                throw new IllegalArgumentException(buildConnectionRequiredMessage());
+            } else {
+                throw new IllegalArgumentException(buildConnectionRequiredMessage());
+            }
         }
         try {
             return dynamicDataSourceManager.acquire(connection);
         } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException(buildConnectionNotFoundMessage(connection) + e.getMessage(), e);
+            throw new IllegalArgumentException("Connection not found: " + connection, e);
         }
     }
 

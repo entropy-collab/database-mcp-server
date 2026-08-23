@@ -25,22 +25,24 @@ import com.entropy.database.mcp.config.QueryConfig;
 import com.entropy.database.mcp.tools.McpToolUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
 /**
  * Federated query gateway - enables cross-database queries.
  * Supports dynamic client registration, remote JNDI lookup, and multi-database execution.
  */
 @Component
-public class FederatedQueryGateway {
+public class FederatedQueryGateway implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(FederatedQueryGateway.class);
+    private static final int MAX_CONCURRENT_QUERY_THREADS = 10;
+    private static final int SHUTDOWN_TIMEOUT_SECONDS = 30;
 
     private final DialectResolver dialectResolver;
     private final SqlValidator sqlValidator;
@@ -59,13 +61,19 @@ public class FederatedQueryGateway {
 
     /**
      * Register a database client manually.
+     * Both maps are updated atomically via a local lock to prevent
+     * a state where one map has the entry but the other does not.
      */
+    private final Object regLock = new Object();
+
     public void registerClient(String clientId, DataSource dataSource) {
         if (clientId == null || clientId.isBlank()) {
             throw new McpFederatedException(ErrorCode.CONNECTION_FAILED, "Client ID cannot be null or blank");
         }
-        databaseClients.put(clientId, new JdbcTemplate(dataSource));
-        dataSourceMap.put(clientId, dataSource);
+        synchronized (regLock) {
+            databaseClients.put(clientId, new JdbcTemplate(dataSource));
+            dataSourceMap.put(clientId, dataSource);
+        }
         log.info("Registered federated client: {}", clientId);
     }
 
@@ -73,8 +81,10 @@ public class FederatedQueryGateway {
      * Unregister a database client.
      */
     public void unregisterClient(String clientId) {
-        databaseClients.remove(clientId);
-        dataSourceMap.remove(clientId);
+        synchronized (regLock) {
+            databaseClients.remove(clientId);
+            dataSourceMap.remove(clientId);
+        }
         log.info("Unregistered federated client: {}", clientId);
     }
 
@@ -93,7 +103,7 @@ public class FederatedQueryGateway {
         try {
             sqlValidator.validateSelect(sql);
         } catch (Exception e) {
-            throw new McpValidationException(ErrorCode.SQL_VALIDATION_FAILED, e.getMessage(), e);
+            throw new McpValidationException(ErrorCode.SQL_VALIDATION_FAILED, "SQL validation failed", e);
         }
 
         // Apply dialect-specific SQL adaptation
@@ -133,11 +143,11 @@ public class FederatedQueryGateway {
                     log.warn("Failed to query database {}", dbId, e);
                     results.put(dbId, Map.of(
                         "status", "error",
-                        "error", e.getMessage()
+                        "error", "Query failed on database " + dbId
                     ));
                 }
             }))
-            .collect(Collectors.toList());
+            .toList();
 
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
@@ -157,7 +167,7 @@ public class FederatedQueryGateway {
     public List<Map<String, Object>> listDatabases() {
         return databaseClients.keySet().stream()
             .map(this::getDatabaseInfo)
-            .collect(Collectors.toList());
+            .toList();
     }
 
     /**
@@ -175,12 +185,12 @@ public class FederatedQueryGateway {
                 "id", databaseId,
                 "status", "connected",
                 "databaseProductName", meta.getDatabaseProductName(),
-                "databaseProductVersion", meta.getDatabaseProductName(),
+                "databaseProductVersion", meta.getDatabaseProductVersion(),
                 "driverName", meta.getDriverName(),
                 "url", meta.getURL()
             );
         } catch (Exception e) {
-            return Map.of("id", databaseId, "status", "error", "error", e.getMessage());
+            return Map.of("id", databaseId, "status", "error", "error", "Connection test failed");
         }
     }
 
@@ -191,7 +201,7 @@ public class FederatedQueryGateway {
         return Map.of(
             "registeredClients", databaseClients.size(),
             "availableDatabases", databaseClients.keySet().size(),
-            "executorPoolSize", executorService.toString()
+            "executorPoolSize", executorService instanceof ThreadPoolExecutor pool ? String.valueOf(pool.getCorePoolSize()) : "unknown"
         );
     }
 
@@ -248,11 +258,11 @@ public class FederatedQueryGateway {
                     log.warn("Failed to query database {}", dbId, e);
                     results.put(dbId, Map.of(
                         "status", "error",
-                        "error", e.getMessage()
+                        "error", "Query failed on database " + dbId
                     ));
                 }
             }))
-            .collect(Collectors.toList());
+            .toList();
 
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
@@ -277,9 +287,22 @@ public class FederatedQueryGateway {
      * Shutdown the gateway and release resources.
      */
     public void shutdown() {
-        executorService.shutdown();
+        executorService.shutdownNow();
+        try {
+            if (!executorService.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                log.warn("ExecutorService did not terminate gracefully within 30 seconds");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while waiting for executorService shutdown");
+        }
         databaseClients.clear();
         dataSourceMap.clear();
         log.info("FederatedQueryGateway shut down");
+    }
+
+    @Override
+    public void destroy() {
+        shutdown();
     }
 }

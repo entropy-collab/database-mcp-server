@@ -16,4 +16,12 @@ public class McpConnectionException extends McpToolException {
     public McpConnectionException(ErrorCode errorCode, String message, Throwable cause) {
         super(errorCode, message, cause);
     }
+
+    public McpConnectionException(ErrorCode errorCode, String message, String connection) {
+        super(errorCode, message, connection);
+    }
+
+    public McpConnectionException(ErrorCode errorCode, String message, Throwable cause, String connection) {
+        super(errorCode, message, cause, connection);
+    }
 }

@@ -60,7 +60,7 @@ public class PoolStatsMBean implements PoolStatsMBeanMxBean {
             mbs.registerMBean(this, jmxObjectName);
             log.info("PoolStatsMBean registered at {}", OBJECT_NAME);
         } catch (Exception e) {
-            log.warn("Failed to register PoolStatsMBean: {}", e.getMessage());
+            log.warn("Failed to register PoolStatsMBean: {}", e.getMessage(), e);
         }
     }
 

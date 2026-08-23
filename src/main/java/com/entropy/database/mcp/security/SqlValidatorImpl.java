@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 @Component
 public class SqlValidatorImpl implements SqlValidator {
@@ -34,12 +35,19 @@ public class SqlValidatorImpl implements SqlValidator {
 
     private final DatabaseProperties properties;
 
-    private Set<String> allowedTables = new HashSet<>();
-    private Set<String> allowedOperations = new HashSet<>(ALLOWED_OPS);
-    private List<String> maskColumns = new ArrayList<>();
+    // Thread-safe: CopyOnWriteArrayList provides snapshot-style iteration for concurrent reads
+    private volatile List<String> maskColumns = new CopyOnWriteArrayList<>();
+
+    // Effectively immutable after construction — read-only for all validate() calls
+    private final Set<String> allowedOperations;
+
+    private final Object tablesLock = new Object();
+    // volatile ensures visibility of the reference swap; all access goes through tablesLock
+    private volatile Set<String> allowedTables = new HashSet<>();
 
     public SqlValidatorImpl(DatabaseProperties properties) {
         this.properties = properties;
+        this.allowedOperations = Collections.unmodifiableSet(new HashSet<>(ALLOWED_OPS));
     }
 
     @Override
@@ -61,14 +69,17 @@ public class SqlValidatorImpl implements SqlValidator {
         if (sql == null || sql.isBlank()) throw new McpSqlValidationException(sql, "SQL is empty");
         Statement stmt;
         try { stmt = CCJSqlParserUtil.parse(sql.trim()); }
-        catch (Exception e) { throw new McpSqlValidationException(sql, "Invalid SQL: " + e.getMessage(), e); }
+        catch (Exception e) { throw new McpSqlValidationException(sql, "SQL validation error", e); }
         String op = extractOp(stmt);
         if (!allowedOperations.contains(op.toUpperCase()) && !isDdl)
             throw new McpSqlValidationException(sql, "Operation not allowed: " + op);
-        if (!allowedTables.isEmpty() && isSelect(stmt)) {
+        // Capture a consistent snapshot of allowedTables under lock
+        Set<String> currentTables;
+        synchronized (tablesLock) { currentTables = allowedTables; }
+        if (!currentTables.isEmpty() && isSelect(stmt)) {
             Set<String> tables = extractTables(stmt);
             Set<String> unauth = new HashSet<>(tables);
-            unauth.removeAll(allowedTables);
+            unauth.removeAll(currentTables);
             if (!unauth.isEmpty()) throw new McpSqlValidationException(sql, "Tables not allowed: " + unauth);
         }
         int joins = extractJoinCount(stmt);
@@ -137,18 +148,15 @@ public class SqlValidatorImpl implements SqlValidator {
 
     private int extractSubqueryDepth(Statement stmt, int currentDepth) {
         if (stmt instanceof PlainSelect ps) {
-            // FROM 子句中的子查询 (ParenthesedSelect)
             if (ps.getFromItem() instanceof ParenthesedSelect parenthesed) {
                 Statement subStmt = (Statement) parenthesed.getSelectBody();
                 int subDepth = extractSubqueryDepth(subStmt, currentDepth + 1);
                 if (subDepth > currentDepth) currentDepth = subDepth;
             }
-            // WHERE 子句中的子查询
             if (ps.getWhere() != null) {
                 int whereDepth = extractSubqueryDepth(ps.getWhere(), currentDepth);
                 if (whereDepth > currentDepth) currentDepth = whereDepth;
             }
-            // JOIN 子句中的子查询
             if (ps.getJoins() != null) {
                 for (var join : ps.getJoins()) {
                     if (join.getRightItem() instanceof ParenthesedSelect parenthesed) {
@@ -179,15 +187,21 @@ public class SqlValidatorImpl implements SqlValidator {
     }
 
     @Override
-    public List<String> getMaskColumns() { return maskColumns; }
+    public List<String> getMaskColumns() { return List.copyOf(maskColumns); }
     @Override
-    public void setMaskColumns(List<String> maskColumns) { this.maskColumns = maskColumns; }
+    public void setMaskColumns(List<String> maskColumns) {
+        synchronized (tablesLock) { this.maskColumns = new CopyOnWriteArrayList<>(maskColumns); }
+    }
     @Override
-    public Set<String> getAllowedTables() { return allowedTables; }
+    public Set<String> getAllowedTables() {
+        synchronized (tablesLock) { return Collections.unmodifiableSet(allowedTables); }
+    }
     @Override
-    public void setAllowedTables(Set<String> allowedTables) { this.allowedTables = allowedTables; }
+    public void setAllowedTables(Set<String> allowedTables) {
+        synchronized (tablesLock) { this.allowedTables = new HashSet<>(allowedTables); }
+    }
     @Override
     public Set<String> getAllowedOperations() { return allowedOperations; }
     @Override
-    public void setAllowedOperations(Set<String> allowedOperations) { this.allowedOperations = allowedOperations; }
+    public void setAllowedOperations(Set<String> allowedOperations) { /* no-op, immutable */ }
 }

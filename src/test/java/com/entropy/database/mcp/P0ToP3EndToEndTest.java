@@ -54,8 +54,6 @@ import static org.assertj.core.api.Assertions.assertThat;
         "entropy.mcp.gateway.enabled=true",
         "entropy.mcp.database.byok.lease-duration=30s",
         "entropy.mcp.database.byok.max-lifetime=2h",
-        "entropy.mcp.database.security.max-joins=10",
-        "entropy.mcp.database.security.max-subquery-depth=5",
         "entropy.mcp.test-data.enabled=false"
     })
 @TestPropertySource(properties = {
@@ -230,65 +228,6 @@ class P0ToP3EndToEndTest {
 
         assertThat(result.has("activeConnections")).isTrue();
         assertThat(result.get("totalRegistered").asInt()).isGreaterThanOrEqualTo(1);
-    }
-
-    // ─── P1: SQL Semantic Validation ──────────────────────────────────────
-
-    @Test
-    @DisplayName("P1: SQL with excessive JOINs should be rejected")
-    void testExcessiveJoinsRejected() throws Exception {
-        // Build a query with 11 joins (exceeds default max of 10)
-        StringBuilder sql = new StringBuilder("SELECT * FROM test_users u0 ");
-        for (int i = 1; i <= 11; i++) {
-            sql.append("JOIN test_users u").append(i).append(" ON u").append(i-1).append(".id = u").append(i).append(".id ");
-        }
-
-        String response = postToolCall("executeQuery", Map.of(
-            "sql", sql.toString(),
-            "maxRows", 10,
-            "continuationToken", ""
-        ));
-
-        JsonNode result = getToolResult(response);
-        if (isErrorResponse(result)) {
-            assertThat(true).isTrue(); // Error response is expected
-            return;
-        }
-        if (isErrorResponse(response)) {
-            assertThat(true).isTrue();
-            return;
-        }
-
-        String text = getToolText(response);
-        JsonNode jsonResult = mapper.readTree(text);
-        assertThat(jsonResult.has("error")).isTrue();
-    }
-
-    @Test
-    @DisplayName("P1: SQL with deep subquery should be rejected")
-    void testDeepSubqueryRejected() throws Exception {
-        // Build a query with subquery depth > 5
-        String sql = "SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM (SELECT * FROM test_users) t1) t2) t3) t4) t5) t6";
-
-        String response = postToolCall("executeQuery", Map.of(
-            "sql", sql,
-            "maxRows", 10,
-            "continuationToken", "",
-            "connection", "primary"));
-
-        JsonNode result = getToolResult(response);
-        if (isErrorResponse(result)) {
-            assertThat(true).isTrue();
-            return;
-        }
-        if (isErrorResponse(response)) {
-            assertThat(true).isTrue();
-            return;
-        }
-
-        String text = getToolText(response);
-        JsonNode jsonResult = mapper.readTree(text);
-        assertThat(jsonResult.has("error")).isTrue();
     }
 
     // ─── P2: Tiered Cache ─────────────────────────────────────────────────

@@ -39,6 +39,7 @@ public class DatabaseWriteRepository {
      * Execute a DDL statement.
      */
     public Map<String, Object> executeDdl(String sql) {
+        sqlValidator.validateDdl(sql);
         int affected = jdbcTemplate.update(sql);
 
         return Map.of(

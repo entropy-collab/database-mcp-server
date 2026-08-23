@@ -19,6 +19,8 @@ import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.service.DatabaseBackupService;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -169,19 +171,22 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                             restoredRows++;
                         } catch (Exception e) {
                             errors.add("Failed: " + trimmed.substring(0, Math.min(80, trimmed.length()))
-                                    + " — " + e.getMessage());
+                                    + " — 执行失败");
                         }
                     }
                     sqlConn.commit();
                 } catch (Exception e) {
                     if (sqlConn != null) {
-                        try { sqlConn.rollback(); } catch (Exception ignore) {}
+                        try { sqlConn.rollback(); } catch (Exception ignore) {
+                            log.warn("Rollback failed during restore for backup {}", backupId);
+                        }
                     }
-                    metadataRepository.update(meta.withError(e.getMessage()).withTiming(startedAt, Instant.now()));
-                    return Map.of("error", "Restore failed: " + e.getMessage(), "backupId", backupId);
+                    metadataRepository.update(meta.withError("Restore failed").withTiming(startedAt, Instant.now()));
+                    return Map.of("error", "Restore failed", "backupId", backupId);
                 } finally {
                     if (sqlConn != null) {
-                        try { sqlConn.setAutoCommit(true); sqlConn.close(); } catch (Exception ignore) {}
+                        try { sqlConn.setAutoCommit(true); sqlConn.close(); }
+                        catch (Exception e) { log.warn("Failed to close connection during restore", e); }
                     }
                 }
             }
@@ -215,42 +220,71 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         }
 
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+        Connection sqlConn = null;
         try {
             JdbcTemplate jdbc = ctx.getJdbcTemplate();
             DatabaseDialect dialect = ctx.getDialect();
             String tableName = meta.tableName();
             Instant startedAt = Instant.now();
 
+            Connection sqlConnInner = null;
             try {
-                jdbc.execute("TRUNCATE TABLE " + dialect.quote(tableName));
-            } catch (Exception e) {
-                jdbc.execute("DELETE FROM " + dialect.quote(tableName));
-            }
-
-            long restoredRows = 0;
-            if (meta.sqlScript() != null && !meta.sqlScript().isBlank()) {
-                for (String stmt : meta.sqlScript().split(";")) {
-                    String trimmed = stmt.strip();
-                    if (trimmed.isEmpty() || trimmed.startsWith("--")
-                            || !trimmed.toUpperCase().startsWith("INSERT")) continue;
+                try {
+                    sqlConnInner = jdbc.getDataSource().getConnection();
+                    sqlConnInner.setAutoCommit(false);
+                } catch (Exception e) {
+                    throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
+                            "Failed to acquire connection for quickRestore", e);
+                }
+                try {
                     try {
-                        jdbc.execute(trimmed + (trimmed.endsWith(";") ? "" : ";"));
-                        restoredRows++;
-                    } catch (Exception ignore) {}
+                        jdbc.execute("TRUNCATE TABLE " + dialect.quote(tableName));
+                    } catch (Exception e) {
+                        jdbc.execute("DELETE FROM " + dialect.quote(tableName));
+                    }
+
+                    long restoredRows = 0;
+                    if (meta.sqlScript() != null && !meta.sqlScript().isBlank()) {
+                        for (String stmt : meta.sqlScript().split(";")) {
+                            String trimmed = stmt.strip();
+                            if (trimmed.isEmpty() || trimmed.startsWith("--")
+                                    || !trimmed.toUpperCase().startsWith("INSERT")) continue;
+                            try {
+                                jdbc.execute(trimmed + (trimmed.endsWith(";") ? "" : ";"));
+                                restoredRows++;
+                            } catch (Exception ignore) {
+                                log.warn("Restore statement failed (skipped): {}", trimmed);
+                            }
+                        }
+                    }
+
+                    sqlConnInner.commit();
+                    BackupMetadata updated = BackupMetadata.updated(meta, BackupStatus.COMPLETED,
+                            startedAt, Instant.now(), restoredRows, null);
+                    metadataRepository.update(updated);
+
+                    return Map.of(
+                            "backupId", backupId,
+                            "tableName", tableName,
+                            "connection", connection,
+                            "restoredRows", restoredRows,
+                            "status", "QUICK_RESTORE_COMPLETED"
+                    );
+                } catch (Exception e) {
+                    if (sqlConnInner != null) {
+                        try { sqlConnInner.rollback(); } catch (Exception ignore) {
+                            log.warn("Rollback failed during quickRestore for backup {}", backupId);
+                        }
+                    }
+                    throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
+                            "Quick restore failed for backup " + backupId);
+                }
+            } finally {
+                if (sqlConnInner != null) {
+                    try { sqlConnInner.setAutoCommit(true); sqlConnInner.close(); }
+                    catch (Exception e) { log.warn("Failed to close connection during quickRestore", e); }
                 }
             }
-
-            BackupMetadata updated = BackupMetadata.updated(meta, BackupStatus.COMPLETED,
-                    startedAt, Instant.now(), restoredRows, null);
-            metadataRepository.update(updated);
-
-            return Map.of(
-                    "backupId", backupId,
-                    "tableName", tableName,
-                    "connection", connection,
-                    "restoredRows", restoredRows,
-                    "status", "QUICK_RESTORE_COMPLETED"
-            );
         } finally {
             ctx.close();
         }

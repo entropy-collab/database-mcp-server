@@ -95,8 +95,13 @@ public class BackupTools extends McpToolBase {
             int lim = limit != null && limit > 0 ? limit : 50;
             List<BackupMetadata> records = metadataRepository.list(connectionName, tableName, lim);
             if (typeFilter != null && !typeFilter.isBlank()) {
-                BackupType ft = BackupType.valueOf(typeFilter.toUpperCase());
-                records = records.stream().filter(m -> m.type() == ft).toList();
+                try {
+                    BackupType ft = BackupType.valueOf(typeFilter.toUpperCase());
+                    records = records.stream().filter(m -> m.type() == ft).toList();
+                } catch (IllegalArgumentException e) {
+                    throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                            "Invalid backup type: " + typeFilter);
+                }
             }
             List<Map<String, Object>> items = records.stream().map(this::toBackupItem).toList();
             return success(Map.of(

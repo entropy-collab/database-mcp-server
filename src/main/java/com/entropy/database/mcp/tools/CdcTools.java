@@ -25,7 +25,6 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * CDC (Change Data Capture) tools.
@@ -47,7 +46,7 @@ public class CdcTools extends McpToolBase {
 
     @McpTool(description = "检查指定连接是否支持 CDC（Flashback/binary log/pglogical 等）")
     public Map<String, Object> checkCdcSupport(
-            @McpToolParam(description = "连接名称") String connection) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
             boolean supported = cdcService.isCdcSupported(connection);
             Map<String, Object> r = context("connection", connection, "cdcSupported", supported);
@@ -60,7 +59,7 @@ public class CdcTools extends McpToolBase {
 
     @McpTool(description = "读取指定表的 CDC 变更事件：INSERT/UPDATE/DELETE 操作记录，支持从指定 LSN 开始拉取")
     public Map<String, Object> readChanges(
-            @McpToolParam(description = "连接名称") String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "Schema 名称") String schema,
             @McpToolParam(description = "表名") String table,
             @McpToolParam(description = "起始 LSN/SCN（可选，不传则从最新位置开始）") Long fromLsn) {
@@ -83,14 +82,14 @@ public class CdcTools extends McpToolBase {
                 m.put("transactionId", e.transactionId());
                 m.put("status", e.status().name());
                 return m;
-            }).collect(Collectors.toList()));
+            }).toList());
             return success(result);
         });
     }
 
     @McpTool(description = "获取数据库当前的 LSN/SCN/binlog position，用于 CDC 断点续读")
     public Map<String, Object> getCurrentLsn(
-            @McpToolParam(description = "连接名称") String connection) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
             long lsn = cdcService.getLastLsn(connection);
@@ -100,7 +99,7 @@ public class CdcTools extends McpToolBase {
 
     @McpTool(description = "创建镜像表：将源表结构和数据复制到目标表，用于 CDC 实时同步目标库")
     public Map<String, Object> createMirrorTable(
-            @McpToolParam(description = "连接名称") String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "源 Schema") String sourceSchema,
             @McpToolParam(description = "源表名") String sourceTable,
             @McpToolParam(description = "目标 Schema") String targetSchema,
@@ -118,7 +117,7 @@ public class CdcTools extends McpToolBase {
 
     @McpTool(description = "注册 CDC 订阅：指定监听哪些表/模式的变更事件（INSERT/UPDATE/DELETE）")
     public Map<String, Object> registerSubscription(
-            @McpToolParam(description = "连接名称") String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "订阅名称（唯一标识）") String name,
             @McpToolParam(description = "Schema 名称") String schema,
             @McpToolParam(description = "表名模式（支持通配符，如 orders_*）") String tablePattern,
@@ -135,7 +134,7 @@ public class CdcTools extends McpToolBase {
             cdcService.registerSubscription(sub);
 
             Map<String, Object> r = context("subscription", name, "connection", connection, "schema", schema, "tablePattern", tablePattern);
-            r.put("changeTypes", types.stream().map(CdcChangeType::getCode).collect(Collectors.toList()));
+            r.put("changeTypes", types.stream().map(CdcChangeType::getCode).toList());
             r.put("pollIntervalMs", interval);
             return success(r);
         });
@@ -154,11 +153,11 @@ public class CdcTools extends McpToolBase {
                 m.put("connection", s.connection());
                 m.put("schema", s.schema());
                 m.put("tablePattern", s.tablePattern());
-                m.put("changeTypes", s.changeTypes().stream().map(CdcChangeType::getCode).collect(Collectors.toList()));
+                m.put("changeTypes", s.changeTypes().stream().map(CdcChangeType::getCode).toList());
                 m.put("pollIntervalMs", s.pollIntervalMs());
                 m.put("active", s.active());
                 return m;
-            }).collect(Collectors.toList()));
+            }).toList());
             return success(result);
         });
     }
@@ -174,7 +173,7 @@ public class CdcTools extends McpToolBase {
 
     @McpTool(description = "查看 CDC 引擎运行状态：LSN、已捕获事件数、活跃订阅数等")
     public Map<String, Object> getCdcStatus(
-            @McpToolParam(description = "连接名称") String connection) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
             CdcStatus status = cdcService.getStatus(connection);
@@ -216,6 +215,6 @@ public class CdcTools extends McpToolBase {
                 .filter(s -> !s.isEmpty())
                 .map(CdcChangeType::fromCode)
                 .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+                .toList();
     }
 }

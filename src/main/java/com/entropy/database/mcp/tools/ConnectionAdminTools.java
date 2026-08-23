@@ -26,7 +26,6 @@ import org.springframework.stereotype.Component;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Connection administration tools.
@@ -63,7 +62,7 @@ public class ConnectionAdminTools extends McpToolBase {
                                 "poolSize", meta.poolSize());
                     })
                     .sorted(Comparator.comparing(m -> (String) m.get("key")))
-                    .collect(Collectors.toList()));
+                    .toList());
             return success(result);
         });
     }
@@ -74,7 +73,7 @@ public class ConnectionAdminTools extends McpToolBase {
         return safeExecute(() -> {
             ConnectionMetadata meta = dataSourceManager.getConnectionMetadata(connectionName);
             if (meta == null) {
-                throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found: " + connectionName + " (connectionName=" + connectionName + ")");
+                throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found: " + connectionName, connectionName);
             }
             Map<String, Object> detail = new java.util.LinkedHashMap<>();
             detail.put("key", meta.key());

@@ -34,9 +34,11 @@ public record ByokProperties(
 ) {
     public ByokProperties {
         if (leaseDuration == null || leaseDuration.isNegative() || leaseDuration.isZero()) {
-            leaseDuration = Duration.ofMinutes(30);
+            leaseDuration = Duration.ofHours(1);
         }
         if (maxLifetime == null || maxLifetime.isNegative() || maxLifetime.isZero()) {
+            // maxLifetime must be strictly greater than leaseDuration; default to 2h
+            // to satisfy the constraint while giving ample headroom.
             maxLifetime = Duration.ofHours(2);
         }
         if (cleanupInterval == null || cleanupInterval.isNegative() || cleanupInterval.isZero()) {

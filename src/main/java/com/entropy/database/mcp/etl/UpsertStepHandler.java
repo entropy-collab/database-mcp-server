@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.etl;
 
+import com.entropy.database.mcp.config.DatabaseConstants;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -51,7 +52,7 @@ public class UpsertStepHandler implements StepHandler {
                     "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName());
         }
 
-        int batchSize = engine.getIntParam(step, "batchSize", 1000);
+        int batchSize = engine.getIntParam(step, "batchSize", DatabaseConstants.DEFAULT_BATCH_SIZE);
         int[][] updateCounts = jdbc.batchUpdate(upsertSql, rows, batchSize, (ps, row) -> {
             for (int i = 0; i < allColumns.size(); i++) {
                 ps.setObject(i + 1, row.get(allColumns.get(i)));

@@ -79,9 +79,10 @@ public class SchemaTools extends McpToolBase {
             - 配合 listTables 使用：先列表，再描述具体表
             """)
     public Map<String, Object> describeTable(
-            @McpToolParam(description = "表名") String table,
-            @McpToolParam(description = "Schema 名", required = false) String schema,
+            @McpToolParam(description = "表名（必填，如 TBL_STL_TXN_DTL_202405）", required = true) String table,
+            @McpToolParam(description = "Schema 名（可选，不填则用 PUBLIC）", required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        validateRequired(table, "table");
         return routingFacade.describeTable(table, schema, connection);
     }
 

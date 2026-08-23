@@ -28,7 +28,6 @@ import org.springframework.stereotype.Component;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 /**
  * Custom tool registration extension point for the MCP server.
@@ -196,13 +195,13 @@ public class CustomToolRegistrar {
                             }
                             return Map.of("result", result, "success", true);
                         } catch (Exception e) {
-                            return Map.of("success", false, "error", e.getMessage(), "cause", e.getClass().getSimpleName());
+                            return Map.of("success", false, "error", "Tool execution failed", "cause", "[details suppressed]");
                         }
                     });
                     registered++;
                 }
             } catch (Exception e) {
-                log.warn("Failed to register tool from class {}: {}", bd.getBeanClassName(), e.getMessage());
+                log.warn("Failed to register tool from class {}: {}", bd.getBeanClassName(), e.getMessage(), e);
             }
         }
 
@@ -222,8 +221,8 @@ public class CustomToolRegistrar {
         try {
             return def.handler().handle(args);
         } catch (Exception e) {
-            log.warn("Custom tool '{}' execution failed: {}", toolName, e.getMessage(), e);
-            return Map.of("success", false, "error", e.getMessage(), "cause", e.getClass().getSimpleName());
+            log.warn("Custom tool '{}' execution failed: {}", toolName, e.getClass().getSimpleName(), e);
+            return Map.of("success", false, "error", "Tool execution failed", "cause", "[details suppressed]");
         }
     }
 

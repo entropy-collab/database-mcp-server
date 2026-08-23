@@ -58,6 +58,7 @@ import java.util.function.Supplier;
 public class ByokDataSourceFactory {
 
     private static final Logger log = LoggerFactory.getLogger(ByokDataSourceFactory.class);
+    private static final int DEFAULT_LEAK_DETECTION_THRESHOLD_SECONDS = 60;
 
     private final Supplier<SqlValidator> sqlValidator;
     private final Supplier<DataMaskingService> maskingService;
@@ -119,7 +120,7 @@ public class ByokDataSourceFactory {
         config.setUsername(connection.username());
         config.setPassword(connection.password());
         config.setDriverClassName(connection.driverClassName());
-        config.setPoolName("HikariPool-" + connection.username() + "@" + connection.jdbcUrl().substring(0, Math.min(30, connection.jdbcUrl().length())));
+        config.setPoolName("HikariPool-" + System.nanoTime());
         config.setMaximumPoolSize(byokProps.poolSize());
         config.setMinimumIdle(byokProps.minIdle());
         config.setConnectionTimeout(dbProps.connectionPool().connectionTimeoutMs());
@@ -127,6 +128,9 @@ public class ByokDataSourceFactory {
         config.setMaxLifetime(byokProps.maxLifetime().toMillis());
         config.setConnectionTestQuery(dialect.connectionTestQuery());
         dialect.configureDataSource(config, dbProps);
+        // Enable connection leak detection to catch unreturned connections early.
+        // Set to 60s — slightly less than default leaseDuration (30min) but catches bugs during dev.
+        config.setLeakDetectionThreshold(DEFAULT_LEAK_DETECTION_THRESHOLD_SECONDS);
 
         log.info("Configured HikariCP pool for dialect={}: poolSize={}, minIdle={}",
                 dialect.getClass().getSimpleName(),

@@ -89,10 +89,10 @@ public class ByokReadRepository {
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
             healthMonitor.recordQuery(duration, 0, false);
-            auditLogger.log("executeQuery", sql, 0, duration, false, e.getMessage(), (String) null);
+            auditLogger.log("executeQuery", sql, 0, duration, false, null, (String) null);
             throw new com.entropy.database.mcp.exception.McpQueryException(
                 com.entropy.database.mcp.exception.ErrorCode.QUERY_EXECUTION_FAILED,
-                "Query failed: " + e.getMessage(), e);
+                "Query failed", e);
         }
     }
 }

@@ -21,7 +21,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Handles QUERY_TO_TABLE steps: executes a source SQL and inserts results into a target table.
@@ -45,8 +44,8 @@ public class QueryToTableStepHandler implements StepHandler {
         if (rows.isEmpty()) return 0;
 
         List<String> columns = new java.util.ArrayList<>(rows.get(0).keySet());
-        String columnList = columns.stream().map(dialect::quote).collect(Collectors.joining(", "));
-        String placeholderList = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
+        String columnList = String.join(", ", columns.stream().map(dialect::quote).toList());
+        String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
         String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
 
         int batchSize = engine.getIntParam(step, "batchSize", 1000);

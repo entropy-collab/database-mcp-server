@@ -15,6 +15,9 @@
  */
 package com.entropy.database.mcp.config;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.aop.interceptor.AsyncUncaughtExceptionHandler;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.AsyncConfigurer;
@@ -22,6 +25,7 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.util.Arrays;
 import java.util.concurrent.Executor;
 
 /**
@@ -32,6 +36,8 @@ import java.util.concurrent.Executor;
 @EnableAsync
 @EnableScheduling
 public class AsyncConfig implements AsyncConfigurer {
+
+    private static final Logger log = LoggerFactory.getLogger(AsyncConfig.class);
 
     @Override
     @Bean(name = "taskExecutor")
@@ -45,5 +51,24 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setKeepAliveSeconds(60);
         executor.initialize();
         return executor;
+    }
+
+    /**
+     * Global async exception handler — logs uncaught exceptions from @Async methods
+     * so they are not silently swallowed by Spring's default handler.
+     */
+    @Override
+    public AsyncUncaughtExceptionHandler getAsyncUncaughtExceptionHandler() {
+        return new AsyncUncaughtExceptionHandler() {
+            @Override
+            public void handleUncaughtException(Throwable ex, java.lang.reflect.Method method, Object... params) {
+                log.error("Async method {} threw uncaught exception: {}: {} | args={}",
+                        method.getName(),
+                        ex.getClass().getSimpleName(),
+                        ex.getMessage(),
+                        Arrays.toString(params),
+                        ex);
+            }
+        };
     }
 }

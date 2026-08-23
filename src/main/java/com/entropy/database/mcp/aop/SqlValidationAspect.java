@@ -20,6 +20,8 @@ import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.annotation.Pointcut;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -32,6 +34,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class SqlValidationAspect {
 
+    private static final Logger log = LoggerFactory.getLogger(SqlValidationAspect.class);
     private final SqlValidator sqlValidator;
 
     public SqlValidationAspect(SqlValidator sqlValidator) {
@@ -46,6 +49,7 @@ public class SqlValidationAspect {
 
     @Around("sqlExecutionMethod()")
     public Object validateSqlBeforeExecution(ProceedingJoinPoint pjp, String sql) throws Throwable {
+        log.debug("SqlValidationAspect: intercepting {} with sql length={}", pjp.getSignature().getName(), sql != null ? sql.length() : 0);
         String methodName = pjp.getSignature().getName();
         if (isDdlMethod(methodName)) {
             sqlValidator.validateDdl(sql);

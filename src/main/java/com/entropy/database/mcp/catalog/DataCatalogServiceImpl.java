@@ -25,7 +25,6 @@ import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 @Service
 public class DataCatalogServiceImpl implements DataCatalogService {
@@ -99,8 +98,8 @@ public class DataCatalogServiceImpl implements DataCatalogService {
             return new DataCatalogEntry(connection, null, normalizedTable, tableComment,
                     rowCount, sizeMb, columns, overallCat, maxSens, keywords, description);
         } catch (Exception e) {
-            log.warn("Failed to generate catalog for {}: {}", tableName, e.getMessage());
-            return buildErrorEntry(tableName, connection, e.getMessage());
+            log.warn("Failed to generate catalog for {}: {}", tableName, e.getMessage(), e);
+            return buildErrorEntry(tableName, connection, null);
         } finally {
             ctx.close();
         }
@@ -127,7 +126,7 @@ public class DataCatalogServiceImpl implements DataCatalogService {
             }
             return entries;
         } catch (Exception e) {
-            log.warn("Schema scan failed for {}: {}", schema, e.getMessage());
+            log.warn("Schema scan failed for {}: {}", schema, e.getMessage(), e);
             return List.of();
         }
     }
@@ -155,7 +154,7 @@ public class DataCatalogServiceImpl implements DataCatalogService {
                     .map(row -> generateCatalog((String) row.get("table_name"), connection))
                     .toList();
         } catch (Exception e) {
-            log.warn("Asset search failed: {}", e.getMessage());
+            log.warn("Asset search failed: {}", e.getMessage(), e);
             return List.of();
         }
     }
@@ -353,7 +352,7 @@ public class DataCatalogServiceImpl implements DataCatalogService {
     private DataCatalogEntry buildErrorEntry(String tableName, String connection, String errorMsg) {
         return new DataCatalogEntry(connection, null, tableName, "", 0, 0, List.of(),
                 DataCategory.OTHER, SensitivityLevel.INTERNAL, List.of(),
-                "生成失败: " + errorMsg);
+                "生成失败");
     }
 
 }

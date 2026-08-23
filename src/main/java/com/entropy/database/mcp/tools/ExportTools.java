@@ -53,6 +53,9 @@ public class ExportTools extends McpToolBase {
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows") int maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        if (sql == null || sql.isBlank()) {
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "sql must not be blank");
+        }
         int limit = computeExportLimit(maxRows);
         var result = routingFacade.executeQuery(sql, limit, null, connection);
         return QueryUtils.toCsv(result.rows(), result.columns());
@@ -63,6 +66,9 @@ public class ExportTools extends McpToolBase {
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows") int maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        if (sql == null || sql.isBlank()) {
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "sql must not be blank");
+        }
         int limit = computeExportLimit(maxRows);
         var result = routingFacade.executeQuery(sql, limit, null, connection);
         try {
@@ -73,7 +79,7 @@ public class ExportTools extends McpToolBase {
             ));
         } catch (Exception e) {
             log.warn("exportJson failed: {}", e.getMessage(), e);
-            throw new McpToolException(ErrorCode.SYSTEM_ERROR, "JSON export failed: " + e.getMessage());
+            throw new McpToolException(ErrorCode.SYSTEM_ERROR, "JSON export failed");
         }
     }
 }

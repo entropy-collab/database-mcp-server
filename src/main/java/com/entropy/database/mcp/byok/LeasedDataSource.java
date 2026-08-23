@@ -51,6 +51,11 @@ public class LeasedDataSource {
                             java.time.Duration leaseDuration,
                             java.time.Duration maxLifetime,
                             boolean closeable) {
+        if (maxLifetime.compareTo(leaseDuration) <= 0) {
+            throw new IllegalArgumentException(
+                "maxLifetime must be greater than leaseDuration, got maxLifetime=" + maxLifetime +
+                ", leaseDuration=" + leaseDuration);
+        }
         this.key = key;
         this.context = context;
         this.createdAt = Instant.now();
@@ -75,20 +80,6 @@ public class LeasedDataSource {
         // Renew lease
         leaseExpiry.set(now.plus(leaseDuration));
         return context;
-    }
-
-    /**
-     * Check if lease has expired (no access for TTL duration).
-     */
-    public boolean isExpired() {
-        return Instant.now().isAfter(leaseExpiry.get());
-    }
-
-    /**
-     * Check if max lifetime exceeded.
-     */
-    public boolean isMaxLifetimeExceeded() {
-        return Instant.now().isAfter(maxLifetime);
     }
 
     public String getKey() {

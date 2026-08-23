@@ -133,8 +133,8 @@ public class SseStreamManager {
             onProgress.accept(ProgressEvent.end(result));
             return result;
         } catch (Exception e) {
-            onProgress.accept(ProgressEvent.error(e.getMessage()));
-            throw new RuntimeException("Query failed: " + e.getMessage(), e);
+            onProgress.accept(ProgressEvent.error("Stream execution failed"));
+            throw new IllegalStateException("Query failed", e);
         }
     }
 

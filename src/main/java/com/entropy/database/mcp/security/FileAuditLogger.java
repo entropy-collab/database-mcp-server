@@ -26,7 +26,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.stream.Collectors;
 
 /**
  * Audit logger that writes to a dedicated SLF4J file logger instead of database.
@@ -84,7 +83,7 @@ public class FileAuditLogger implements QueryAuditLogger {
     public List<Map<String, Object>> getRecentLogs(int limit) {
         List<Map<String, Object>> list = new ArrayList<>(buffer);
         list.sort((a, b) -> ((String) b.get("timestamp")).compareTo((String) a.get("timestamp")));
-        return list.stream().limit(limit).collect(Collectors.toList());
+        return list.stream().limit(limit).toList();
     }
 
     private void evictOld() {

@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.etl;
 
+import com.entropy.database.mcp.config.DatabaseConstants;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -22,7 +23,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * Handles TRANSFORM steps: applies column mappings and transforms, then inserts into target table.
@@ -72,7 +72,7 @@ public class TransformStepHandler implements StepHandler {
             selectExprs.add(expr + " AS " + dialect.quote(targetColumns.get(i)));
         }
         selectSql.append(String.join(", ", selectExprs));
-        selectSql.append(" FROM ").append(dialect.normalizeTableName(step.sourceSql()));
+        selectSql.append(" FROM (").append(step.sourceSql()).append(") AS _src");
         if (whereClause != null && !whereClause.isBlank()) {
             selectSql.append(" WHERE ").append(whereClause);
         }
@@ -81,11 +81,11 @@ public class TransformStepHandler implements StepHandler {
         if (rows.isEmpty()) return 0;
 
         String targetTable = dialect.normalizeTableName(step.targetTable());
-        String columnList = targetColumns.stream().map(dialect::quote).collect(Collectors.joining(", "));
-        String placeholderList = targetColumns.stream().map(c -> "?").collect(Collectors.joining(", "));
+        String columnList = String.join(", ", targetColumns.stream().map(dialect::quote).toList());
+        String placeholderList = String.join(", ", targetColumns.stream().map(c -> "?").toList());
         String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
 
-        int batchSize = engine.getIntParam(step, "batchSize", 1000);
+        int batchSize = engine.getIntParam(step, "batchSize", DatabaseConstants.DEFAULT_BATCH_SIZE);
         int[][] updateCounts = jdbcTemplate.batchUpdate(insertSql, rows, batchSize, (ps, row) -> {
             for (int i = 0; i < targetColumns.size(); i++) {
                 ps.setObject(i + 1, row.get(targetColumns.get(i)));

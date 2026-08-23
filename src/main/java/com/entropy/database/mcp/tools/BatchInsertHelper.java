@@ -15,6 +15,9 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
+import com.entropy.database.mcp.exception.McpValidationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.sql.PreparedStatement;
@@ -31,13 +34,27 @@ import java.util.function.BiFunction;
  */
 public final class BatchInsertHelper {
 
+    private static final java.util.regex.Pattern IDENTIFIER_PATTERN =
+            java.util.regex.Pattern.compile("^[A-Za-z_][A-Za-z0-9_$#]*$");
+
     private BatchInsertHelper() {
     }
 
     /**
      * Build an INSERT SQL string for the given table and columns.
+     * Table name and column names are validated as safe identifiers to prevent injection.
      */
     public static String buildInsertSql(String tableName, List<String> columns) {
+        if (tableName == null || !IDENTIFIER_PATTERN.matcher(tableName).matches()) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "Invalid table name: must match [A-Za-z_][A-Za-z0-9_$#]*");
+        }
+        for (String col : columns) {
+            if (col == null || !IDENTIFIER_PATTERN.matcher(col).matches()) {
+                throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                        "Invalid column name: " + col);
+            }
+        }
         String columnList = String.join(", ", columns);
         String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
         return String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columnList, placeholderList);

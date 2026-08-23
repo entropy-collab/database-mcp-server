@@ -109,6 +109,11 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
 
     private StandardizedPlan getOracleExecutionPlan(String sql) {
         try {
+            // Validate SQL before using it in EXPLAIN PLAN to prevent injection.
+            // EXPLAIN PLAN wraps the provided SQL text, so any malicious payload in 'sql'
+            // is executed directly — therefore we re-validate with a SELECT-only constraint.
+            sqlValidator.validateSelect(sql);
+
             // Execute EXPLAIN PLAN - validate statementId to prevent injection
             String statementId = "mcp_query_" + System.nanoTime();
             if (!statementId.matches("[a-zA-Z0-9_]+")) {

@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.config.DatabaseConstants;
 import com.entropy.database.mcp.config.EtlConfig;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
@@ -29,6 +30,7 @@ import com.entropy.database.mcp.etl.JobExecution;
 import com.entropy.database.mcp.etl.MigrationJob;
 import com.entropy.database.mcp.etl.Step;
 import com.entropy.database.mcp.etl.StepType;
+import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -47,16 +49,21 @@ import static com.entropy.database.mcp.util.ValidationUtils.*;
 @ConditionalOnProperty(name = "entropy.mcp.gateway.enabled", havingValue = "true")
 public class EtlTools extends McpToolBase {
 
+    private static final int DEFAULT_BATCH_INSERT_SIZE = 1000;
+
     private final DynamicDataSourceManager dataSourceManager;
     private final JobExecutionEngine executionEngine;
     private final EtlConfig etlConfig;
+    private final SqlValidator sqlValidator;
 
     public EtlTools(DynamicDataSourceManager dataSourceManager,
                     JobExecutionEngine executionEngine,
-                    EtlConfig etlConfig) {
+                    EtlConfig etlConfig,
+                    SqlValidator sqlValidator) {
         this.dataSourceManager = dataSourceManager;
         this.executionEngine = executionEngine;
         this.etlConfig = etlConfig;
+        this.sqlValidator = sqlValidator;
     }
 
     @McpTool(description = "Create a named BYOK connection to a remote database")
@@ -76,10 +83,10 @@ public class EtlTools extends McpToolBase {
             properties.validate();
             ByokDataSourceContext context = dataSourceManager.acquire(name, properties);
             context.getJdbcTemplate().queryForList(context.getDialect().connectionTestQuery());
+            // Verify connection is immediately available; retry with backoff if registration is delayed.
+            verifyConnectionReady(name, 5, 100);
             return success(Map.of(
                     "connectionName", name,
-                    "jdbcUrl", properties.jdbcUrl(),
-                    "username", properties.username(),
                     "dialect", properties.dialect(),
                     "message", "Connection created and tested successfully"
             ));
@@ -123,6 +130,7 @@ public class EtlTools extends McpToolBase {
             @McpToolParam(description = "Batch size for insertion") Integer batchSize) throws Exception {
         return safeExecute(() -> {
             validateIdentifier(targetTable, "targetTable");
+            if (sqlValidator != null) sqlValidator.validateSelect(sourceSql);
             ByokDataSourceContext sourceContext = dataSourceManager.acquire(sourceConnectionName);
             List<Map<String, Object>> rows = sourceContext.getJdbcTemplate().queryForList(sourceSql);
             if (rows.isEmpty()) return emptyResult();
@@ -130,7 +138,7 @@ public class EtlTools extends McpToolBase {
             JdbcTemplate targetJdbc = targetContext.getJdbcTemplate();
             List<String> columns = rows.get(0).keySet().stream().toList();
             String insertSql = BatchInsertHelper.buildInsertSql(targetTable, columns);
-            int size = batchSize != null ? batchSize : 1000;
+            int size = batchSize != null ? batchSize : DatabaseConstants.DEFAULT_BATCH_SIZE;
             if (size <= 0) throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
             int totalRows = BatchInsertHelper.batchInsert(targetJdbc, insertSql, rows, size, BatchInsertHelper.setRowColumns(columns));
@@ -174,7 +182,7 @@ public class EtlTools extends McpToolBase {
             if (rows.isEmpty()) return emptyResult();
 
             String insertSql = BatchInsertHelper.buildInsertSql(targetTable, targetColumns);
-            int size = batchSize != null ? batchSize : 1000;
+            int size = batchSize != null ? batchSize : DatabaseConstants.DEFAULT_BATCH_SIZE;
             if (size <= 0) throw new IllegalArgumentException("batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
             int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, insertSql, rows, size, (ps, row) -> {
@@ -216,7 +224,7 @@ public class EtlTools extends McpToolBase {
                 throw new McpToolException(ErrorCode.UPSERT_NOT_SUPPORTED, "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName() + " (connectionName=" + connectionName + ", tableName=" + tableName + ")");
             }
             long startTime = System.currentTimeMillis();
-            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, upsertSql, rows, 1000, BatchInsertHelper.setRowColumns(allColumns));
+            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, upsertSql, rows, DEFAULT_BATCH_INSERT_SIZE, BatchInsertHelper.setRowColumns(allColumns));
             return success(Map.of(
                     "connectionName", connectionName, "tableName", tableName,
                     "keyColumns", keyColumns, "rowCount", totalRows, "durationMs", System.currentTimeMillis() - startTime,
@@ -287,12 +295,12 @@ public class EtlTools extends McpToolBase {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid target table name: " + targetTable + " (connectionName=" + connectionName + ")");
             }
             String validatedTargetTable = dialect.normalizeTableName(targetTable);
-            int size = batchSize != null ? batchSize : 1000;
+            int size = batchSize != null ? batchSize : DatabaseConstants.DEFAULT_BATCH_SIZE;
             long startTime = System.currentTimeMillis();
             int totalRows = 0;
             var repo = context.getReadRepository();
             String continuationToken = null;
-            int maxPages = 500; // safety limit: max 500 pages × batchSize rows
+            int maxPages = DatabaseConstants.DEFAULT_BATCH_SIZE; // safety limit: max DEFAULT_BATCH_SIZE pages × batchSize rows
             int pageCount = 0;
             do {
                 PaginatedQueryResult result = repo.executeQuery(sourceSql, size, continuationToken);
@@ -341,7 +349,7 @@ public class EtlTools extends McpToolBase {
                         dependsOn = new ArrayList<>();
                         depList.forEach(dep -> dependsOn.add(dep.toString()));
                     } else if (deps instanceof String depStr) {
-                        dependsOn = Arrays.asList(depStr.split(","));
+                        dependsOn = List.of(depStr.split(","));
                     } else {
                         dependsOn = new ArrayList<>();
                     }
@@ -460,6 +468,24 @@ public class EtlTools extends McpToolBase {
                 throw new McpValidationException(
                         com.entropy.database.mcp.exception.ErrorCode.PARAMETER_VALIDATION_FAILED,
                         "Invalid column mapping: " + mapping + ". Expected format: source:target[:transform]");
+            }
+        }
+    }
+
+    /**
+     * Verify the named connection is ready for use by polling with backoff.
+     * Replaces the fixed Thread.sleep(500) with a resilient retry loop.
+     */
+    private void verifyConnectionReady(String name, int maxRetries, long retryDelayMs) throws InterruptedException {
+        for (int i = 0; i < maxRetries; i++) {
+            try {
+                dataSourceManager.acquire(name);
+                return; // success
+            } catch (Exception e) {
+                if (i == maxRetries - 1) {
+                    throw new RuntimeException("Connection '" + name + "' not ready after " + maxRetries + " attempts", e);
+                }
+                Thread.sleep(retryDelayMs);
             }
         }
     }

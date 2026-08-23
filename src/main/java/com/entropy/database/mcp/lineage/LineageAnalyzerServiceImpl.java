@@ -249,7 +249,7 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
             }
             return edges;
         } catch (Exception e) {
-            log.warn("Failed to fetch edges for {}: {}", tableName, e.getMessage());
+            log.warn("Failed to fetch edges for {}: {}", tableName, e.getMessage(), e);
             return List.of();
         } finally {
             ctx.close();
@@ -264,7 +264,7 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
             String sql = dialect.tablesQuery(null);
             return jdbc.queryForList(sql);
         } catch (Exception e) {
-            log.warn("Failed to list tables: {}", e.getMessage());
+            log.warn("Failed to list tables: {}", e.getMessage(), e);
             return List.of();
         } finally {
             ctx.close();
@@ -287,7 +287,9 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
             for (Map<String, Object> t : listBaseTables(connection)) {
                 knownTables.add(normalize((String) t.get("table_name")));
             }
-        } catch (Exception ignore) {}
+        } catch (Exception e) {
+            log.warn("Failed to fetch base tables for lineage analysis on connection {}: {}", connection, e.getClass().getSimpleName());
+        }
         Set<String> unknownUp = new HashSet<>();
         for (String u : allUpstream) {
             if (!knownTables.contains(normalize(u))) unknownUp.add(u);

@@ -69,7 +69,7 @@ public class PerformanceTimingAspect {
             return result;
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
-            recordResult(toolName, sql, connectionKey, duration, 0, false, e.getMessage());
+            recordResult(toolName, sql, connectionKey, duration, 0, false);
             throw e;
         }
     }

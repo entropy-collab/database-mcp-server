@@ -46,7 +46,7 @@ public class QualityReportService {
             return writer.toString();
         } catch (IOException e) {
             log.error("Failed to serialize quality report to JSON", e);
-            return "{\"error\":\"" + e.getMessage() + "\"}";
+            return "{\"error\":\"Quality report generation failed\"}";
         }
     }
 

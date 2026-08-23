@@ -1,5 +1,7 @@
 package com.entropy.database.mcp.init;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -9,6 +11,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 @Configuration
 @ConditionalOnProperty(name = "entropy.mcp.test-data.enabled", havingValue = "true")
 public class TestDataInitializer {
+
+    private static final Logger log = LoggerFactory.getLogger(TestDataInitializer.class);
 
     @Bean
     public CommandLineRunner initData(JdbcTemplate jdbcTemplate) {
@@ -33,7 +37,7 @@ public class TestDataInitializer {
                     i % 3 == 0 ? "Engineering" : i % 3 == 1 ? "Sales" : "Marketing"
                 );
             }
-            System.out.println("Test data initialized: 15 users in test_users table");
+            log.info("Test data initialized: 15 users in test_users table");
         };
     }
 }

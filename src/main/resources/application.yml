@@ -81,6 +81,13 @@ entropy:
         query-ttl: 30s
         metadata-ttl: 5m
         max-warm-size: 10
+      byok:
+        lease-duration: 2h
+        max-lifetime: 4h
+        cleanup-interval: 5m
+        max-cached-connections: 100
+        pool-size: 10
+        min-idle: 2
       connection-pool:
         connection-timeout: 30s
         idle-timeout: 10m

@@ -88,10 +88,12 @@ public class CrossDatabaseTools extends McpToolBase {
             throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "SQL must be a single statement (no semicolons allowed)");
         }
         return safeExecute(() -> {
+            sqlValidator.validateSelect(sql);
             int limit = maxRows != null ? maxRows : DEFAULT_CROSS_DB_MAX_ROWS;
-            String limitedSql = String.format("SELECT * FROM (%s) WHERE ROWNUM <= %d", sql, limit);
-            List<Map<String, Object>> rows = dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(limitedSql);
-            return success(Map.of("sql", sql, "rowCount", rows.size(), "data", rows));
+            String limitedSql = "SELECT * FROM (" + sql.trim() + ") WHERE ROWNUM <= " + limit;
+            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+            List<Map<String, Object>> rows = ctx.getJdbcTemplate().queryForList(limitedSql);
+            return success(Map.of("sql", sql.trim(), "rowCount", rows.size(), "data", rows));
         });
     }
 
@@ -121,7 +123,8 @@ public class CrossDatabaseTools extends McpToolBase {
                     : jdbc.queryForList(String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName), owner.toUpperCase());
             return rows;
         } catch (Exception e) {
-            throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED, e.getMessage() + " (dbLinkName=" + dbLinkName + ", owner=" + owner + ")");
+            throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED,
+                    "Federated query failed for dbLink: " + dbLinkName);
         }
     }
 
@@ -139,7 +142,8 @@ public class CrossDatabaseTools extends McpToolBase {
                     dbLinkName);
             return dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(sql, remoteTable.toUpperCase());
         } catch (Exception e) {
-            throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED, e.getMessage() + " (dbLinkName=" + dbLinkName + ", remoteTable=" + remoteTable + ")");
+            throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED,
+                    "Federated query failed for dbLink: " + dbLinkName);
         }
     }
 
@@ -227,6 +231,10 @@ public class CrossDatabaseTools extends McpToolBase {
         ValidationUtils.validateHost(host);
         ValidationUtils.validatePort(port);
         ValidationUtils.validateServiceName(serviceName);
+        if (password == null) {
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "password is required");
+        }
+        // Oracle password: escape double quotes only, validate no unescaped single quotes (SQL injection)
         String escapedPassword = password.replace("\"", "\"\"");
         String dblinkSql = String.format(
                 "CREATE DATABASE LINK %s CONNECT TO %s IDENTIFIED BY \"%s\" USING '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVICE_NAME=%s)))'",
