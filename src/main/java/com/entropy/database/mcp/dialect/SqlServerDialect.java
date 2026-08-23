@@ -137,7 +137,8 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
         }
     }
 
-    public String healthCheckSql() {
+    @Override
+    public String getHealthCheckSql() {
         return "SELECT 'OK' AS status";
     }
 }

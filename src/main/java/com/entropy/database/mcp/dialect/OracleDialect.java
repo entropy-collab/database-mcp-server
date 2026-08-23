@@ -31,6 +31,40 @@ public class OracleDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String tableCommentsQuery() {
+        return """
+            SELECT table_name, comments AS table_comment
+            FROM user_tab_comments
+            WHERE table_type = 'TABLE'
+            ORDER BY table_name
+            """;
+    }
+
+    @Override
+    public String columnCommentsQuery(String tableName) {
+        return """
+            SELECT column_name, data_type,
+                   CASE WHEN nullable = 'N' THEN 0 ELSE 1 END AS nullable,
+                   comments AS column_comment
+            FROM user_col_comments
+            WHERE table_name = ?
+            ORDER BY column_id
+            """;
+    }
+
+    @Override
+    public String searchTableCommentsQuery(String keyword) {
+        String kw = "%" + keyword.toUpperCase() + "%";
+        return """
+            SELECT table_name, comments AS table_comment, num_rows AS row_count
+            FROM user_tables
+            WHERE UPPER(table_name) LIKE ?
+               OR UPPER(comments) LIKE ?
+            ORDER BY num_rows DESC NULLS LAST
+            """;
+    }
+
+    @Override
     public String tablesQuery(String schema) {
         var owner = schema != null ? schema.toUpperCase() : "USER";
         return """
@@ -140,7 +174,8 @@ public class OracleDialect extends AbstractDatabaseDialect {
     /**
      * Generate EXPLAIN PLAN SQL for the given query.
      */
-    public String explainPlanSql(String sql) {
+    @Override
+    public String getExplainPlanSql(String sql) {
         return "EXPLAIN PLAN FOR " + sql;
     }
 
@@ -182,7 +217,8 @@ public class OracleDialect extends AbstractDatabaseDialect {
         return "SELECT 1 FROM DUAL";
     }
 
-    public String healthCheckSql() {
+    @Override
+    public String getHealthCheckSql() {
         return "SELECT 'OK' AS status FROM DUAL";
     }
 
@@ -402,5 +438,127 @@ public class OracleDialect extends AbstractDatabaseDialect {
         return String.format(
                 "MERGE INTO %s target USING (SELECT %s FROM DUAL) source ON (%s) WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
                 tableName, selectFromDual, keyCondition, updateSet, columnList, placeholderList);
+    }
+
+    @Override
+    public String foreignKeyDownstreamQuery(String tableName) {
+        return """
+            SELECT uc_pk.table_name AS source_table,
+                   uc_fk.table_name AS target_table,
+                   c_pk.column_name AS source_column,
+                   c_fk.column_name AS target_column
+            FROM all_constraints uc_pk
+            JOIN all_constraints uc_fk
+              ON uc_fk.r_constraint_name = uc_pk.constraint_name
+             AND uc_fk.constraint_type = 'R'
+            JOIN all_cons_columns c_pk
+              ON c_pk.constraint_name = uc_pk.constraint_name
+             AND c_pk.position = 1
+            JOIN all_cons_columns c_fk
+              ON c_fk.constraint_name = uc_fk.constraint_name
+             AND c_fk.position = 1
+            WHERE uc_pk.constraint_type = 'P'
+              AND uc_pk.owner = USER
+              AND uc_pk.table_name = ?
+            ORDER BY uc_fk.table_name, c_fk.column_name
+            """;
+    }
+
+    @Override
+    public String foreignKeyUpstreamQuery(String tableName) {
+        return """
+            SELECT uc_fk.table_name AS source_table,
+                   uc_pk.table_name AS target_table,
+                   c_fk.column_name AS source_column,
+                   c_pk.column_name AS target_column
+            FROM all_constraints uc_fk
+            JOIN all_constraints uc_pk
+              ON uc_fk.r_constraint_name = uc_pk.constraint_name
+             AND uc_pk.constraint_type = 'P'
+            JOIN all_cons_columns c_fk
+              ON c_fk.constraint_name = uc_fk.constraint_name
+             AND c_fk.position = 1
+            JOIN all_cons_columns c_pk
+              ON c_pk.constraint_name = uc_pk.constraint_name
+             AND c_pk.position = 1
+            WHERE uc_fk.constraint_type = 'R'
+              AND uc_fk.owner = USER
+              AND uc_fk.table_name = ?
+            ORDER BY uc_pk.table_name, c_pk.column_name
+            """;
+    }
+
+    @Override
+    public String listTableIndexesSql(String tableName) {
+        return """
+            SELECT i.index_name, ic.column_name,
+                   CASE WHEN i.uniqueness = 'UNIQUE' THEN 1 ELSE 0 END AS uniqueness
+            FROM user_indexes i
+            JOIN user_ind_columns ic ON ic.index_name = i.index_name AND ic.table_name = i.table_name
+            WHERE i.table_name = ?
+            ORDER BY i.index_name, ic.column_position
+            """;
+    }
+
+    @Override
+    public String candidateColumnsForIndexSql(String tableName) {
+        return """
+            SELECT column_name, nullable, num_distinct
+            FROM user_tab_columns
+            WHERE table_name = ?
+              AND column_name NOT IN (
+                  SELECT column_name
+                  FROM user_ind_columns
+                  WHERE table_name = ?
+              )
+              AND num_distinct IS NOT NULL
+            ORDER BY num_distinct ASC
+            """;
+    }
+
+    // ─── CDC ─────────────────────────────────────────────────────────────
+
+    @Override
+    public String cdcReadChangesSql(String schema, String table, long fromLsn) {
+        // Oracle: use flashback query to compare current vs prior state via undo retention
+        // Note: production CDC would use LogMiner (DBMS_LOGMNR); this is a simplified approach
+        // using ROWID-based temporal comparison with flashback
+        return """
+            SELECT 'FLASHBACK' AS change_type,
+                   SYSTIMESTAMP AS change_time,
+                   '' AS primary_keys,
+                   NULL AS before_json,
+                   (SELECT JSON_OBJECTAGG(t.column_name VALUE t.column_value IGNORE NULLS)
+                    FROM (
+                        SELECT COLUMN_NAME, CAST(COLUMN_VALUE AS VARCHAR2(4000)) AS column_value
+                        FROM XMLTABLE('/*' PASSING DBMS_XMLGEN.GETXML('SELECT * FROM %s AS OF TIMESTAMP SYSTIMESTAMP - INTERVAL \'5\' MINUTE') )
+                    ) t
+                   ) AS after_json,
+                   NULL AS transaction_id
+            FROM DUAL
+            """.formatted(normalizeTableName(table));
+    }
+
+    @Override
+    public String cdcGetLastLsnSql() {
+        // Oracle uses SCN (System Change Number) as its LSN equivalent
+        return "SELECT CURRENT_SCN FROM v$database";
+    }
+
+    @Override
+    public String cdcCheckSupportSql() {
+        // Check if FLASHBACK QUERY is available
+        return """
+            SELECT 1 FROM v$parameter
+            WHERE name = 'recyclebin' AND value != 'OFF'
+            UNION ALL
+            SELECT 1 FROM v$flashback_database_log
+            WHERE ROWNUM = 1
+            """;
+    }
+
+    @Override
+    public String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
+        return "CREATE TABLE %s.%s AS %s".formatted(targetSchema, targetTable, sourceQuery);
     }
 }

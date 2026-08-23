@@ -23,6 +23,12 @@ import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.etl.JobExecutionEngine;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.properties.ByokProperties;
+import com.entropy.database.mcp.properties.BackupProperties;
+import com.entropy.database.mcp.properties.CatalogProperties;
+import com.entropy.database.mcp.properties.CdcProperties;
+import com.entropy.database.mcp.properties.LineageProperties;
+import com.entropy.database.mcp.properties.OptimizerProperties;
+import com.entropy.database.mcp.properties.QualityProperties;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
@@ -32,6 +38,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.lang.Nullable;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -44,7 +51,7 @@ import java.util.function.Supplier;
  * following Spring's DataSourceBuilder pattern.
  */
 @Configuration
-@EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class})
+@EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class, BackupProperties.class, CatalogProperties.class, CdcProperties.class, LineageProperties.class, OptimizerProperties.class, QualityProperties.class})
 public class DatabaseConfig {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseConfig.class);
@@ -53,7 +60,7 @@ public class DatabaseConfig {
     @ConditionalOnMissingBean
     public QueryConfig queryConfig(DatabaseProperties properties) {
         var q = properties.query();
-        return new QueryConfig(q.maxRows(), q.maxResultRows(), q.fetchSize(), q.maxExportRows());
+        return new QueryConfig(q.maxRows(), q.maxResultRows(), q.fetchSize(), q.maxExportRows(), q.timeoutSeconds());
     }
 
     @Bean
@@ -136,6 +143,7 @@ public class DatabaseConfig {
 
     @Bean
     @ConditionalOnMissingBean
+    @ConditionalOnProperty(name = "entropy.mcp.database.enabled", matchIfMissing = true)
     public DynamicDataSourceManager dynamicDataSourceManager(
             DialectResolver dialectResolver,
             ByokDataSourceFactory dataSourceFactory,
@@ -151,6 +159,7 @@ public class DatabaseConfig {
 
     @Bean
     @ConditionalOnMissingBean
+    @ConditionalOnProperty(name = "entropy.mcp.database.enabled", matchIfMissing = true)
     public JobExecutionEngine jobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                                                   DatabaseProperties properties,
                                                   EtlConfig etlConfig,

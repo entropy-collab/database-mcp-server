@@ -15,12 +15,12 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.domain.PlanAnalysis;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
-import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
@@ -28,47 +28,71 @@ import java.util.Map;
 /**
  * Schema and metadata tools.
  */
-@Configuration
-public class SchemaTools {
+@Component
+public class SchemaTools extends McpToolBase {
 
     private final RoutingDatabaseFacade routingFacade;
-    private final SqlValidator sqlValidator;
 
-    public SchemaTools(RoutingDatabaseFacade routingFacade,
-                       SqlValidator sqlValidator) {
+    public SchemaTools(RoutingDatabaseFacade routingFacade) {
         this.routingFacade = routingFacade;
-        this.sqlValidator = sqlValidator;
     }
 
-    @McpTool(description = "List all tables in the current schema with row counts")
+    @McpTool(description = """
+            【列出表】列出指定 Schema 下所有数据表及其行数估算。
+            
+            使用场景：
+            - 探索新数据库的表结构
+            - 构建复杂查询前了解可用数据源
+            - 结合 describeTable 查看具体字段信息
+            """)
     public List<Map<String, Object>> listTables(
             @McpToolParam(description = "Schema name") String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.listTables(schema, connection);
     }
 
-    @McpTool(description = "Search tables across all schemas by keyword (returns schema + table + row count)")
+    @McpTool(description = """
+            【搜索表】按关键词跨所有 Schema 搜索数据表。
+            
+            使用场景：
+            - 不确定表名精确拼写时，用关键词模糊搜索
+            - 快速定位目标业务表的所属 Schema
+            """)
     public List<Map<String, Object>> searchTables(
-            @McpToolParam(description = "Keyword to search in table name (optional)") String keyword,
+            @McpToolParam(description = "搜索关键词（可选，空则返回全部）") String keyword,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.searchTables(keyword, connection);
     }
 
-    @McpTool(description = "List all available schemas in the database")
+    @McpTool(description = "列出数据库中所有可用的 Schema（用户）")
     public List<String> listSchemas(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.listSchemas(connection);
     }
 
-    @McpTool(description = "Describe columns, types, and nullability of a table")
+    @McpTool(description = """
+            【表结构描述】查看指定表的列名、数据类型、是否可空等元数据。
+            
+            使用场景：
+            - 构建查询前了解表结构（字段名、类型、约束）
+            - 数据迁移时确认字段映射关系
+            - 配合 listTables 使用：先列表，再描述具体表
+            """)
     public Map<String, Object> describeTable(
-            @McpToolParam(description = "Table name") String table,
-            @McpToolParam(description = "Schema name", required = false) String schema,
+            @McpToolParam(description = "表名") String table,
+            @McpToolParam(description = "Schema 名", required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.describeTable(table, schema, connection);
     }
 
-    @McpTool(description = "List all indexes for a table including column names and uniqueness")
+    @McpTool(description = """
+            【列出索引】查看指定表的所有索引及其列组合信息。
+            
+            使用场景：
+            - 分析查询性能时检查是否存在命中索引
+            - 识别缺失索引（对比 explainPlan 警告）
+            - 数据建模时评估索引设计合理性
+            """)
     public List<Map<String, Object>> listIndexes(
             @McpToolParam(description = "Table name") String table,
             @McpToolParam(description = "Schema name", required = false) String schema,
@@ -76,7 +100,14 @@ public class SchemaTools {
         return routingFacade.listIndexes(table, schema, connection);
     }
 
-    @McpTool(description = "List all views in the current schema with their definitions")
+    @McpTool(description = """
+            【列出视图】查看指定 Schema 下所有视图及其 SQL 定义。
+            
+            使用场景：
+            - 探索 Schema 时了解哪些视图可用
+            - 阅读视图定义辅助理解业务逻辑
+            - 结合查询工具通过视图简化复杂 JOIN
+            """)
     public List<Map<String, Object>> listViews(
             @McpToolParam(description = "Schema name") String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
@@ -96,22 +127,13 @@ public class SchemaTools {
             @McpToolParam(description = "Object name (required for TABLE, INDEX)") String name,
             @McpToolParam(description = "Schema name", required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (type == null || type.isBlank()) {
-            throw new IllegalArgumentException("type is required");
-        }
-        switch (type.toUpperCase()) {
-            case "TABLE": return routingFacade.describeTable(name, schema, connection);
-            case "SCHEMA": return Map.of("tables", routingFacade.listTables(schema, connection));
-            case "INDEX": return Map.of("indexes", routingFacade.listIndexes(name, schema, connection));
-            case "VIEW": return Map.of("views", routingFacade.listViews(schema, connection));
-            default: throw new IllegalArgumentException("Unknown type: " + type);
-        }
-    }
-
-    @McpTool(description = "Analyze the execution plan for a SELECT query. Returns standardized plan with performance warnings (full table scan, missing indexes, etc.)")
-    public PlanAnalysis explainPlan(
-            @McpToolParam(description = "SQL SELECT query to analyze") String sql,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        return routingFacade.explainPlan(sql, connection);
+        validateRequired(type, "type");
+        return switch (type.toUpperCase()) {
+            case "TABLE" -> routingFacade.describeTable(name, schema, connection);
+            case "SCHEMA" -> Map.of("tables", routingFacade.listTables(schema, connection));
+            case "INDEX" -> Map.of("indexes", routingFacade.listIndexes(name, schema, connection));
+            case "VIEW" -> Map.of("views", routingFacade.listViews(schema, connection));
+            default -> throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Unknown type: " + type);
+        };
     }
 }

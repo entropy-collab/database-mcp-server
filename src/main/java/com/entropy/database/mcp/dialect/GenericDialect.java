@@ -76,9 +76,9 @@ public class GenericDialect extends AbstractDatabaseDialect {
     @Override
     public String listActiveSessionsSql() {
         return """
-                SELECT 1 AS sid, 1 AS serial#, CURRENT_USER AS username,
+                SELECT 1 AS sid, 1 AS serial_no, CURRENT_USER AS username,
                        'ACTIVE' AS status, 'localhost' AS machine, 'unknown' AS program,
-                       NOW() AS logon_time, 0 AS last_call_et,
+                       CURRENT_TIMESTAMP AS logon_time, 0 AS last_call_et,
                        'NONE' AS event, 'NONE' AS wait_class, '' AS sql_id
                 """;
     }
@@ -86,7 +86,7 @@ public class GenericDialect extends AbstractDatabaseDialect {
     @Override
     public String showLocksSql() {
         return """
-                SELECT 1 AS sid, 1 AS serial#, 'NONE' AS type,
+                SELECT 1 AS sid, 1 AS serial_no, 'NONE' AS type,
                        0 AS id1, 0 AS id2, 'NONE' AS lmode, 0 AS request,
                        0 AS ctime, CURRENT_USER AS username, 'ACTIVE' AS status, '' AS event
                 """;
@@ -122,12 +122,13 @@ public class GenericDialect extends AbstractDatabaseDialect {
 
     @Override
     public String estimateTableSizeSql(String tableName, String schema) {
-        return "SELECT ? AS segment_name, 'TABLE' AS segment_type, 0 AS size_mb, 0 AS extents";
+        return "SELECT '" + tableName + "' AS segment_name, 'TABLE' AS segment_type, 0 AS size_mb, 0 AS extents";
     }
 
     @Override
     public String listInvalidObjectsSql(String schema) {
-        return "SELECT CURRENT_USER AS owner, 'NONE' AS object_name, 'NONE' AS object_type, 'VALID' AS status";
+        String owner = schema != null ? schema : "SA";
+        return "SELECT '" + owner + "' AS owner, 'NONE' AS object_name, 'NONE' AS object_type, 'VALID' AS status";
     }
 
     @Override
@@ -138,7 +139,7 @@ public class GenericDialect extends AbstractDatabaseDialect {
     @Override
     public String showIndexStatusSql(String tableName, String schema) {
         return """
-                SELECT CURRENT_USER AS owner, 'NONE' AS table_name,
+                SELECT 'NONE' AS owner, 'NONE' AS table_name,
                        'NONE' AS index_name, 'VALID' AS status,
                        'NONUNIQUE' AS uniqueness, null AS last_analyzed, 0 AS num_rows, 0 AS distinct_keys
                 """;
@@ -162,10 +163,11 @@ public class GenericDialect extends AbstractDatabaseDialect {
 
     @Override
     public String listGrantsSql(String userName) {
-        return "SELECT ? AS grantee, 'SELECT' AS privilege, 'NO' AS grantable, CURRENT_USER AS grantor";
+        return "SELECT '" + userName + "' AS grantee, 'SELECT' AS privilege, 'NO' AS grantable, CURRENT_USER AS grantor";
     }
 
-    public String healthCheckSql() {
+    @Override
+    public String getHealthCheckSql() {
         return "SELECT 'OK' AS status";
     }
 }

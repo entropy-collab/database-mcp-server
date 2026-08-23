@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.aop;
 
+import com.entropy.database.mcp.aop.ConnectionArgExtractor;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.security.QueryAuditLogger;
@@ -24,6 +25,8 @@ import org.aspectj.lang.annotation.Aspect;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+
+import java.util.Optional;
 
 /**
  * AOP aspect for unified performance timing and metrics collection.
@@ -56,39 +59,34 @@ public class PerformanceTimingAspect {
         long start = System.currentTimeMillis();
         String toolName = pjp.getSignature().getName();
         String sql = extractSql(pjp);
-        String connectionKey = extractConnectionKey(pjp);
+        Optional<String> connectionOpt = ConnectionArgExtractor.extractConnectionName(pjp.getArgs());
+        String connectionKey = connectionOpt.orElse(null);
 
         try {
             Object result = pjp.proceed();
             long duration = System.currentTimeMillis() - start;
-            int rows = extractRowCount(result);
-            recordSuccess(toolName, sql, rows, duration, connectionKey);
+            recordResult(toolName, sql, connectionKey, duration, extractRowCount(result), true);
             return result;
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
-            recordFailure(toolName, sql, duration, e, connectionKey);
+            recordResult(toolName, sql, connectionKey, duration, 0, false, e.getMessage());
             throw e;
         }
     }
 
-    private void recordSuccess(String toolName, String sql, int rows, long duration, String connectionKey) {
-        healthMonitor.recordQuery(duration, rows, true);
+    private void recordResult(String toolName, String sql, String connectionKey,
+                              long duration, int rows, boolean success) {
+        recordResult(toolName, sql, connectionKey, duration, rows, success, null);
+    }
+
+    private void recordResult(String toolName, String sql, String connectionKey,
+                              long duration, int rows, boolean success, String errorMessage) {
+        healthMonitor.recordQuery(duration, rows, success);
         try {
-            auditLogger.log(toolName, sql, rows, duration, true, (String) null,
+            auditLogger.log(toolName, sql, rows, duration, success, errorMessage,
                     connectionKey != null ? connectionKey : "primary");
         } catch (Exception e) {
             log.warn("Failed to record audit log for {}", toolName, e);
-        }
-        metricsCollector.recordToolExecution(toolName, duration);
-    }
-
-    private void recordFailure(String toolName, String sql, long duration, Exception e, String connectionKey) {
-        healthMonitor.recordQuery(duration, 0, false);
-        try {
-            auditLogger.log(toolName, sql, 0, duration, false, e.getMessage(),
-                    connectionKey != null ? connectionKey : "primary");
-        } catch (Exception ex) {
-            log.warn("Failed to record audit log for {}", toolName, ex);
         }
         metricsCollector.recordToolExecution(toolName, duration);
     }
@@ -99,21 +97,6 @@ public class PerformanceTimingAspect {
             return s;
         }
         return "";
-    }
-
-    private String extractConnectionKey(ProceedingJoinPoint pjp) {
-        Object[] args = pjp.getArgs();
-        if (args != null) {
-            for (Object arg : args) {
-                if (arg instanceof String s && !s.isBlank() && !s.equals("primary")) {
-                    // Heuristic: connection keys are typically short identifiers, not URLs
-                    if (!s.startsWith("jdbc:") && s.length() < 100) {
-                        return s;
-                    }
-                }
-            }
-        }
-        return null;
     }
 
     private int extractRowCount(Object result) {

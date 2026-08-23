@@ -22,6 +22,10 @@ public record QueryConfig(
         int maxRows,
         int maxResultRows,
         int fetchSize,
-        int maxExportRows
+        int maxExportRows,
+        int queryTimeoutSeconds
 ) {
+    public QueryConfig(int maxRows, int maxResultRows, int fetchSize, int maxExportRows) {
+        this(maxRows, maxResultRows, fetchSize, maxExportRows, 30);
+    }
 }

@@ -20,64 +20,51 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Unified exception handling utilities for MCP tools.
+ * Utility class providing factory methods for MCP tool responses.
+ *
+ * <p>All response maps are {@link LinkedHashMap} to preserve key ordering in JSON serialization.
  */
 public final class McpToolUtils {
 
-    private McpToolUtils() {
+    private McpToolUtils() {}
+
+    // ─── Success Responses ────────────────────────────────────────────────
+
+    public static Map<String, Object> success(Map<String, Object> data) {
+        return new LinkedHashMap<>(data);
     }
 
-    /**
-     * Create a standardized error response map.
-     */
-    public static Map<String, Object> errorResponse(String error, String cause) {
-        return ApiResponse.error(
-                Map.of("error", error, "cause", cause),
-                error,
-                cause
-        ).toMap();
-    }
-
-    /**
-     * Create a standardized error response map with additional context fields.
-     */
-    public static Map<String, Object> errorResponse(Map<String, Object> context, String error, String cause) {
-        return ApiResponse.error(context, error, cause).toMap();
-    }
-
-    /**
-     * Create a standardized success response map.
-     */
-    public static Map<String, Object> successResponse(Map<String, Object> data) {
+    public static Map<String, Object> success(Map<String, Object> data, String connection) {
         Map<String, Object> result = new LinkedHashMap<>(data);
-        result.put("success", true);
-        return result;
-    }
-
-    /**
-     * Create a standardized success response map, injecting the connection name
-     * into the data payload so callers can always see which connection was used.
-     */
-    public static Map<String, Object> successResponse(Map<String, Object> data, String connection) {
-        Map<String, Object> result = new LinkedHashMap<>(data);
-        result.put("success", true);
         if (connection != null && !connection.isBlank()) {
             result.put("connection", connection);
         }
         return result;
     }
 
-    /**
-     * Create a standardized success response map with a single key-value pair.
-     */
-    public static Map<String, Object> successResponse(String key, Object value) {
-        return Map.of("success", true, key, value);
+    public static Map<String, Object> success(String key, Object value) {
+        return Map.of(key, value);
     }
 
-    /**
-     * Create a standardized success response map with message.
-     */
-    public static Map<String, Object> successResponse(String message, int rowCount) {
-        return Map.of("success", true, "message", message, "rowCount", rowCount);
+    public static Map<String, Object> success(String message, int rowCount) {
+        return Map.of("message", message, "rowCount", rowCount);
+    }
+
+    public static Map<String, Object> emptyResult() {
+        return Map.of("message", "No rows returned", "rowCount", 0);
+    }
+
+    // ─── Context Helpers ──────────────────────────────────────────────────
+
+    public static Map<String, Object> context() {
+        return new LinkedHashMap<>();
+    }
+
+    public static Map<String, Object> context(Object... pairs) {
+        Map<String, Object> ctx = new LinkedHashMap<>();
+        for (int i = 0; i < pairs.length; i += 2) {
+            ctx.put((String) pairs[i], pairs[i + 1]);
+        }
+        return Collections.unmodifiableMap(ctx);
     }
 }

@@ -16,34 +16,30 @@
 package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.config.QueryConfig;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.util.QueryUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
 import java.util.Map;
-
-import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
 
 /**
  * Export tools for CSV and JSON output.
  */
-@Configuration
-public class ExportTools {
+@Component
+public class ExportTools extends McpToolBase {
 
-    private static final Logger log = LoggerFactory.getLogger(ExportTools.class);
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final int MAX_EXPORT_LIMIT = 10000;
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final RoutingDatabaseFacade routingFacade;
     private final int maxExportRows;
 
-    public ExportTools(RoutingDatabaseFacade routingFacade,
-                       QueryConfig queryConfig) {
+    public ExportTools(RoutingDatabaseFacade routingFacade, QueryConfig queryConfig) {
         this.routingFacade = routingFacade;
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
@@ -77,13 +73,7 @@ public class ExportTools {
             ));
         } catch (Exception e) {
             log.warn("exportJson failed: {}", e.getMessage(), e);
-            Map<String, Object> errorCtx = Map.of("sql", sql, "maxRows", maxRows, "connection", connection,
-                    "success", false, "error", e.getMessage(), "cause", e.getClass().getSimpleName());
-            try {
-                return OBJECT_MAPPER.writeValueAsString(errorCtx);
-            } catch (Exception ignored) {
-                return "{\"success\":false,\"error\":\"" + e.getMessage() + "\"}";
-            }
+            throw new McpToolException(ErrorCode.SYSTEM_ERROR, "JSON export failed: " + e.getMessage());
         }
     }
 }

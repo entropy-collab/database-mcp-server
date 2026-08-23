@@ -15,16 +15,16 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.security.SqlValidator;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.sql.Connection;
@@ -32,17 +32,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 import static com.entropy.database.mcp.util.ValidationUtils.requireNotEmpty;
 
 /**
  * DDL execution tools.
  */
-@Configuration
-public class DdlExecutionTools {
-
-    private static final Logger log = LoggerFactory.getLogger(DdlExecutionTools.class);
+@Component
+public class DdlExecutionTools extends McpToolBase {
 
     private final RoutingDatabaseFacade routingFacade;
     private final DynamicDataSourceManager dataSourceManager;
@@ -65,23 +61,16 @@ public class DdlExecutionTools {
         return gatewayEnabled;
     }
 
-    // ─── DDL (from WriteTools) ───────────────────────────────────────────────
+    // ─── DDL ────────────────────────────────────────────────────────────────
 
     @McpTool(description = "Execute a DDL statement (CREATE/ALTER/DROP)")
     public Map<String, Object> executeDdl(
             @McpToolParam(description = "DDL SQL statement") String sql,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!ddlAllowed) {
-            return errorResponse(Map.of(), "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable.", "DisabledException");
+            throw new McpToolException(ErrorCode.SQL_OPERATION_NOT_ALLOWED, ToolParams.DDL_DISABLED_MSG);
         }
         return routingFacade.executeDdl(sql, connection);
-    }
-
-    @McpTool(description = "Backup table schema definition as DDL statements")
-    public Map<String, Object> backupSchema(
-            @McpToolParam(description = "Table name") String tableName,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        return routingFacade.backupSchema(tableName, connection);
     }
 
     @McpTool(description = "Backup table data as INSERT statements")
@@ -90,8 +79,7 @@ public class DdlExecutionTools {
             @McpToolParam(description = "Maximum rows to backup") int maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (maxRows < 0) {
-            return errorResponse(Map.of("tableName", tableName, "maxRows", maxRows, "connection", connection),
-                    "maxRows must be non-negative", "ValidationException");
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "maxRows must be non-negative (tableName=" + tableName + ", maxRows=" + maxRows + ", connection=" + connection + ")");
         }
         return routingFacade.backupData(tableName, maxRows, connection);
     }
@@ -104,132 +92,120 @@ public class DdlExecutionTools {
         return routingFacade.diffSchema(sourceTable, targetTable, connection);
     }
 
-    // ─── Remote DDL (from RemoteDdlTools) ───────────────────────────────────
+    // ─── Remote DDL ─────────────────────────────────────────────────────────
 
     @McpTool(description = "Execute a single DDL statement on a remote database")
     public Map<String, Object> executeDdlRemote(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
-            @McpToolParam(description = "DDL statement (CREATE TABLE, ALTER TABLE, DROP INDEX, etc.)") String ddl) {
+            @McpToolParam(description = "DDL statement (CREATE TABLE, ALTER TABLE, DROP INDEX, etc.)") String ddl) throws Exception {
         if (!isGatewayEnabled()) {
-            return errorResponse(Map.of(), "Gateway is not enabled", "DisabledException");
+            throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Gateway is not enabled");
         }
-        try {
+        return safeExecute(() -> {
             sqlValidator.validateDdl(ddl);
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             long startTime = System.currentTimeMillis();
             int affected = jdbcTemplate.update(ddl);
             long duration = System.currentTimeMillis() - startTime;
-            return successResponse(Map.of(
+            return success(Map.of(
                     "connectionName", connectionName,
                     "ddl", ddl,
                     "affectedRows", affected,
                     "durationMs", duration,
                     "message", "DDL executed successfully"
             ));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName, "ddl", ddl),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+        });
     }
 
     @McpTool(description = "Execute multiple DDL statements in a transaction on a remote database")
     public Map<String, Object> executeDdlBatch(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
-            @McpToolParam(description = "List of DDL statements to execute") List<String> statements) {
+            @McpToolParam(description = "List of DDL statements to execute") List<String> statements) throws Exception {
         if (!isGatewayEnabled()) {
-            return errorResponse(Map.of(), "Gateway is not enabled", "DisabledException");
+            throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, ToolParams.GATEWAY_NOT_ENABLED_MSG);
         }
         requireNotEmpty(statements, "statements");
+        return safeExecute(() -> {
+            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
+            Connection connection = null;
+            try {
+                connection = context.getDataSource().getConnection();
+                connection.setAutoCommit(false);
 
-        ByokDataSourceContext context = null;
-        Connection connection = null;
-        try {
-            context = dataSourceManager.acquire(connectionName);
-            connection = context.getDataSource().getConnection();
-            connection.setAutoCommit(false);
+                long startTime = System.currentTimeMillis();
+                List<Map<String, Object>> results = new ArrayList<>();
+                boolean allSuccess = true;
 
-            long startTime = System.currentTimeMillis();
-            List<Map<String, Object>> results = new ArrayList<>();
-            boolean allSuccess = true;
-
-            for (String ddl : statements) {
-                try {
-                    sqlValidator.validateDdl(ddl);
-                    long stmtStart = System.currentTimeMillis();
-                    connection.createStatement().execute(ddl);
-                    long stmtDuration = System.currentTimeMillis() - stmtStart;
-                    results.add(Map.of("ddl", ddl, "success", true, "durationMs", stmtDuration));
-                } catch (Exception e) {
-                    allSuccess = false;
-                    results.add(Map.of("ddl", ddl, "success", false, "error", e.getMessage()));
-                    break;
+                for (String ddl : statements) {
+                    try {
+                        sqlValidator.validateDdl(ddl);
+                        long stmtStart = System.currentTimeMillis();
+                        connection.createStatement().execute(ddl);
+                        long stmtDuration = System.currentTimeMillis() - stmtStart;
+                        results.add(Map.of("ddl", ddl, "success", true, "durationMs", stmtDuration));
+                    } catch (Exception e) {
+                        allSuccess = false;
+                        results.add(Map.of("ddl", ddl, "success", false, "error", e.getMessage()));
+                        // Stop on first failure — transaction will be rolled back at method end
+                        break;
+                    }
                 }
-            }
 
-            if (allSuccess) {
-                connection.commit();
-            } else {
-                connection.rollback();
-            }
+                if (allSuccess) {
+                    connection.commit();
+                } else {
+                    connection.rollback();
+                }
 
-            long totalDuration = System.currentTimeMillis() - startTime;
-            return successResponse(Map.of(
-                    "connectionName", connectionName,
-                    "totalStatements", statements.size(),
-                    "succeeded", results.stream().filter(r -> Boolean.TRUE.equals(r.get("success"))).count(),
-                    "failed", results.stream().filter(r -> !Boolean.TRUE.equals(r.get("success"))).count(),
-                    "results", results,
-                    "durationMs", totalDuration,
-                    "message", allSuccess ? "All DDL statements executed successfully" : "Transaction rolled back due to failure"
-            ));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName), e.getMessage(), e.getClass().getSimpleName());
-        } finally {
-            if (connection != null) {
-                try {
-                    connection.close();
-                } catch (Exception e) {
-                    log.warn("Failed to close connection", e);
+                long totalDuration = System.currentTimeMillis() - startTime;
+                return success(Map.of(
+                        "connectionName", connectionName,
+                        "totalStatements", statements.size(),
+                        "succeeded", results.stream().filter(r -> Boolean.TRUE.equals(r.get("success"))).count(),
+                        "failed", results.stream().filter(r -> !Boolean.TRUE.equals(r.get("success"))).count(),
+                        "results", results,
+                        "durationMs", totalDuration,
+                        "message", allSuccess ? "All DDL statements executed successfully" : "Transaction rolled back due to failure"
+                ));
+            } finally {
+                // Close connection first; then close context (which returns connection to pool)
+                if (connection != null) {
+                    try { connection.close(); } catch (Exception e) { log.warn("Failed to close connection", e); }
                 }
+                try { context.close(); } catch (Exception e) { log.warn("Failed to close context", e); }
             }
-            if (context != null) {
-                try {
-                    context.close();
-                } catch (Exception e) {
-                    log.warn("Failed to close context", e);
-                }
-            }
-        }
+        });
     }
 
     @McpTool(description = "Validate DDL statements without executing (dry run)")
     public Map<String, Object> validateDdl(
-            @McpToolParam(description = "List of DDL statements to validate") List<String> statements) {
+            @McpToolParam(description = "List of DDL statements to validate") List<String> statements) throws Exception {
         if (!isGatewayEnabled()) {
-            return errorResponse(Map.of(), "Gateway is not enabled", "DisabledException");
+            throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, ToolParams.GATEWAY_NOT_ENABLED_MSG);
         }
         requireNotEmpty(statements, "statements");
+        return safeExecute(() -> {
+            List<Map<String, Object>> results = new ArrayList<>();
+            boolean allValid = true;
 
-        List<Map<String, Object>> results = new ArrayList<>();
-        boolean allValid = true;
-
-        for (String ddl : statements) {
-            try {
-                sqlValidator.validateDdl(ddl);
-                results.add(Map.of("ddl", ddl, "valid", true));
-            } catch (Exception e) {
-                allValid = false;
-                results.add(Map.of("ddl", ddl, "valid", false, "error", e.getMessage()));
+            for (String ddl : statements) {
+                try {
+                    sqlValidator.validateDdl(ddl);
+                    results.add(Map.of("ddl", ddl, "valid", true));
+                } catch (Exception e) {
+                    allValid = false;
+                    results.add(Map.of("ddl", ddl, "valid", false, "error", e.getMessage()));
+                }
             }
-        }
 
-        return successResponse(Map.of(
-                "totalStatements", statements.size(),
-                "validCount", results.stream().filter(r -> (boolean) r.get("valid")).count(),
-                "invalidCount", results.stream().filter(r -> !(boolean) r.get("valid")).count(),
-                "results", results,
-                "message", allValid ? "All DDL statements are valid" : "Some DDL statements have validation errors"
-        ));
+            return success(Map.of(
+                    "totalStatements", statements.size(),
+                    "validCount", results.stream().filter(r -> (boolean) r.get("valid")).count(),
+                    "invalidCount", results.stream().filter(r -> !(boolean) r.get("valid")).count(),
+                    "results", results,
+                    "message", allValid ? "All DDL statements are valid" : "Some DDL statements have validation errors"
+            ));
+        });
     }
 }

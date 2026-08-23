@@ -35,6 +35,21 @@ public interface DatabaseBackupService {
     Map<String, Object> backupData(String tableName, int maxRows, String connection);
 
     /**
+     * Incremental backup: backup only rows changed since last completed backup.
+     */
+    Map<String, Object> backupDataIncremental(String tableName, int maxRows, String connection);
+
+    /**
+     * Restore a table from a backup by replaying the saved SQL script in a transaction.
+     */
+    Map<String, Object> restoreBackup(String backupId, String connection);
+
+    /**
+     * Quick restore: truncate target table then replay backup INSERT statements.
+     */
+    Map<String, Object> quickRestore(String backupId, String connection);
+
+    /**
      * Compare schema differences between two tables.
      */
     Map<String, Object> diffSchema(String sourceTable, String targetTable, String connection);

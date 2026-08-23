@@ -28,6 +28,53 @@ public class PostgresDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String tableCommentsQuery() {
+        return """
+            SELECT c.relname AS table_name, obj_description(c.oid) AS table_comment
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'r'
+              AND n.nspname = current_schema()
+            ORDER BY c.relname
+            """;
+    }
+
+    @Override
+    public String columnCommentsQuery(String tableName) {
+        return """
+            SELECT a.attname AS column_name,
+                   pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                   CASE WHEN a.attnotnull THEN 0 ELSE 1 END AS nullable,
+                   d.description AS column_comment
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN pg_description d ON d.objoid = a.attrelid AND d.objsubid = a.attnum
+            WHERE c.relname = ?
+              AND n.nspname = current_schema()
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """;
+    }
+
+    @Override
+    public String searchTableCommentsQuery(String keyword) {
+        String kw = "%" + keyword + "%";
+        return """
+            SELECT c.relname AS table_name,
+                   obj_description(c.oid) AS table_comment,
+                   c.reltuples::bigint AS row_count
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'r'
+              AND n.nspname = current_schema()
+              AND (c.relname ILIKE ? OR obj_description(c.oid) ILIKE ?)
+            ORDER BY c.reltuples DESC
+            """;
+    }
+
+    @Override
     public String tablesQuery(String schema) {
         var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
@@ -93,7 +140,8 @@ public class PostgresDialect extends AbstractDatabaseDialect {
             """;
     }
 
-    public String healthCheckSql() {
+    @Override
+    public String getHealthCheckSql() {
         return "SELECT 'OK' AS status";
     }
 
@@ -287,5 +335,138 @@ public class PostgresDialect extends AbstractDatabaseDialect {
                 .reduce((a, b) -> a + ", " + b).orElse("");
         return String.format("INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
                 tableName, columnList, placeholderList, keyList, updateSet);
+    }
+
+    @Override
+    public String foreignKeyDownstreamQuery(String tableName) {
+        return """
+            SELECT ccu2.table_name AS source_table,
+                   ccu1.table_name AS target_table,
+                   ccu1.column_name AS source_column,
+                   ccu2.column_name AS target_column
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu1
+              ON kcu1.constraint_name = tc.constraint_name
+             AND kcu1.table_name = tc.table_name
+            JOIN information_schema.constraint_column_usage ccu1
+              ON ccu1.constraint_name = tc.constraint_name
+             AND ccu1.table_name = tc.table_name
+            JOIN information_schema.referential_constraints rc
+              ON rc.constraint_name = tc.constraint_name
+            JOIN information_schema.key_column_usage kcu2
+              ON kcu2.constraint_name = rc.unique_constraint_name
+             AND kcu2.table_name = ccu1.table_name
+            JOIN information_schema.constraint_column_usage ccu2
+              ON ccu2.constraint_name = rc.unique_constraint_name
+             AND ccu2.table_name = ccu1.table_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_name = ?
+              AND tc.table_schema = current_schema()
+            ORDER BY ccu2.table_name, kcu1.column_name
+            """;
+    }
+
+    @Override
+    public String foreignKeyUpstreamQuery(String tableName) {
+        return """
+            SELECT ccu1.table_name AS source_table,
+                   ccu2.table_name AS target_table,
+                   ccu1.column_name AS source_column,
+                   ccu2.column_name AS target_column
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu1
+              ON kcu1.constraint_name = tc.constraint_name
+             AND kcu1.table_name = tc.table_name
+            JOIN information_schema.constraint_column_usage ccu1
+              ON ccu1.constraint_name = tc.constraint_name
+             AND ccu1.table_name = tc.table_name
+            JOIN information_schema.referential_constraints rc
+              ON rc.constraint_name = tc.constraint_name
+            JOIN information_schema.key_column_usage kcu2
+              ON kcu2.constraint_name = rc.unique_constraint_name
+             AND kcu2.table_name = ccu1.table_name
+            JOIN information_schema.constraint_column_usage ccu2
+              ON ccu2.constraint_name = rc.unique_constraint_name
+             AND ccu2.table_name = ccu1.table_name
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND ccu1.table_name = ?
+              AND tc.table_schema = current_schema()
+            ORDER BY ccu2.table_name, ccu1.column_name
+            """;
+    }
+
+    @Override
+    public String listTableIndexesSql(String tableName) {
+        return """
+            SELECT i.relname AS index_name, a.attname AS column_name,
+                   CASE WHEN ix.indisunique THEN 1 ELSE 0 END AS uniqueness
+            FROM pg_index ix
+            JOIN pg_class t ON t.oid = ix.indrelid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+            WHERE t.relname = ?
+              AND n.nspname = current_schema()
+            ORDER BY i.relname, a.attnum
+            """;
+    }
+
+    @Override
+    public String candidateColumnsForIndexSql(String tableName) {
+        return """
+            SELECT c.column_name, c.is_nullable,
+                   (SELECT COUNT(DISTINCT c2.column_name) FROM information_schema.columns c2
+                    WHERE c2.table_schema = current_schema() AND c2.table_name = ?) AS distinct_count
+            FROM information_schema.columns c
+            WHERE c.table_schema = current_schema()
+              AND c.table_name = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM pg_indexes px
+                  WHERE px.schemaname = current_schema()
+                    AND px.tablename = ?
+                    AND px.indexdef ILIKE '%' || c.column_name || '%'
+              )
+            ORDER BY c.ordinal_position
+            """;
+    }
+
+    // ─── CDC ─────────────────────────────────────────────────────────────
+
+    @Override
+    public String cdcReadChangesSql(String schema, String table, long fromLsn) {
+        // PostgreSQL: use pg_logical_slot_get_changes (requires pgoutput) or
+        // query a trigger-based audit table with LSN tracking
+        return """
+            SELECT 'TRIGGER_AUDIT' AS change_type,
+                   MAX(event_time) AS change_time,
+                   primary_key_col AS primary_keys,
+                   NULL AS before_json,
+                   NULL AS after_json,
+                   NULL::bigint AS transaction_id
+            FROM %s.%s_audit
+            WHERE event_lsn > pg_lsn(?)
+            GROUP BY primary_key_col
+            """.formatted(schema != null ? schema : "current_schema()", table);
+    }
+
+    @Override
+    public String cdcGetLastLsnSql() {
+        return "SELECT pg_current_wal_lsn()::text AS current_lsn";
+    }
+
+    @Override
+    public String cdcCheckSupportSql() {
+        return """
+            SELECT 1 FROM pg_extension WHERE extname = 'pglogical'
+            UNION ALL
+            SELECT 1 FROM pg_subscription WHERE subenabled
+            UNION ALL
+            SELECT 1 FROM pg_publication LIMIT 1
+            """;
+    }
+
+    @Override
+    public String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
+        return "CREATE TABLE \"%s\".\"%s\" AS %s".formatted(targetSchema, targetTable, sourceQuery);
     }
 }

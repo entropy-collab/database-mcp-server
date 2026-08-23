@@ -13,17 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.byok;
+package com.entropy.database.mcp.optimizer;
 
-/**
- * Thrown when a requested BYOK connection is not found.
- */
-public class NoSuchConnectionException extends RuntimeException {
-    public NoSuchConnectionException(String connectionName) {
-        super("Connection not found: " + connectionName);
-    }
-
-    public NoSuchConnectionException(String message, Throwable cause) {
-        super(message, cause);
+public record IndexRecommendation(
+    String table,
+    String column,
+    String indexType,
+    String recommendedSql,
+    String reason,
+    int priority
+) {
+    public IndexRecommendation {
+        if (indexType == null) indexType = "BTREE";
+        if (reason == null) reason = "";
+        if (recommendedSql == null) recommendedSql = "";
     }
 }

@@ -62,19 +62,7 @@ public interface DatabaseDialect {
      * Generate EXPLAIN PLAN SQL for the given query.
      * Returns null if not supported.
      */
-    default String getExplainPlanSql(String sql) {
-        return explainPlanSql(sql);
-    }
-
-    /**
-     * Generate EXPLAIN PLAN SQL for the given query.
-     * Deprecated: use getExplainPlanSql instead.
-     * @deprecated Use {@link #getExplainPlanSql(String)} instead.
-     */
-    @Deprecated
-    default String explainPlanSql(String sql) {
-        return null;
-    }
+    String getExplainPlanSql(String sql);
 
     /**
      * Get table row count SQL for the given table name.
@@ -292,10 +280,109 @@ public interface DatabaseDialect {
     }
 
     /**
+     * SQL to get foreign key constraints where the given table is the referenced (parent) table.
+     * Returns rows with columns: source_table, target_table, source_column, target_column.
+     * Returns null if not supported.
+     */
+    default String foreignKeyDownstreamQuery(String tableName) {
+        return null;
+    }
+
+    /**
+     * SQL to get foreign key constraints where the given table is the referencing (child) table.
+     * Returns rows with columns: source_table, target_table, source_column, target_column.
+     * Returns null if not supported.
+     */
+    default String foreignKeyUpstreamQuery(String tableName) {
+        return null;
+    }
+
+    /**
+     * SQL to list existing indexes for a table.
+     * Returns rows with columns: index_name, column_name, uniqueness.
+     * Returns null if not supported.
+     */
+    default String listTableIndexesSql(String tableName) {
+        return null;
+    }
+
+    /**
+     * SQL to identify candidate columns for missing indexes based on table statistics and constraints.
+     * Returns rows with columns: column_name, is_nullable, distinct_count.
+     * Returns null if not supported.
+     */
+    default String candidateColumnsForIndexSql(String tableName) {
+        return null;
+    }
+
+    /**
+     * SQL to get table-level comments/descriptions.
+     * Returns rows with columns: table_name, table_comment.
+     * Returns null if not supported.
+     */
+    default String tableCommentsQuery() {
+        return null;
+    }
+
+    /**
+     * SQL to get column-level comments/descriptions for a table.
+     * Returns rows with columns: column_name, data_type, nullable, column_comment.
+     * Returns null if not supported.
+     */
+    default String columnCommentsQuery(String tableName) {
+        return null;
+    }
+
+    /**
+     * SQL to search tables and their comments by keyword (full-text asset search).
+     * Returns rows with columns: table_schema, table_name, table_comment, row_count.
+     * Returns null if not supported.
+     */
+    default String searchTableCommentsQuery(String keyword) {
+        return null;
+    }
+
+    /**
      * Configure dialect-specific HikariCP datasource properties.
      * Called after common pool settings are applied.
      */
     default void configureDataSource(HikariConfig config, DatabaseProperties properties) {
         // No-op by default
+    }
+
+    // ─── CDC (Change Data Capture) ───────────────────────────────────────
+
+    /**
+     * SQL to read change events from the database's CDC infrastructure.
+     * Oracle: uses LOGMNRC or AUDIT_TRAIL; MySQL: uses binlog position; PostgreSQL: uses WAL/LSN.
+     * Returns rows with columns: change_type, change_time, primary_keys, before_json, after_json, transaction_id.
+     * Returns null if CDC is not supported for this dialect.
+     */
+    default String cdcReadChangesSql(String schema, String table, long fromLsn) {
+        return null;
+    }
+
+    /**
+     * SQL to get the current LSN / SCN / binlog position for a table.
+     * Returns null if not supported.
+     */
+    default String cdcGetLastLsnSql() {
+        return null;
+    }
+
+    /**
+     * SQL to detect whether the database supports native CDC (e.g., Oracle Flashback, MySQL binlog, PG pgoutput).
+     * Returns a query that yields a row if CDC-capable, empty otherwise.
+     */
+    default String cdcCheckSupportSql() {
+        return null;
+    }
+
+    /**
+     * SQL to create a mirror/snapshot table from source table (CREATE TABLE ... AS SELECT).
+     * Returns null if not supported.
+     */
+    default String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
+        return null;
     }
 }

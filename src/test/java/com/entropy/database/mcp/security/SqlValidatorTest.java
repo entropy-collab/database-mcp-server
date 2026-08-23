@@ -1,6 +1,6 @@
 package com.entropy.database.mcp.security;
 
-import com.entropy.database.mcp.exception.SqlValidationException;
+import com.entropy.database.mcp.exception.McpSqlValidationException;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,13 +31,13 @@ class SqlValidatorTest {
 
     @Test
     void testInvalidOperation() {
-        assertThrows(SqlValidationException.class, () -> 
+        assertThrows(McpSqlValidationException.class, () ->
             validator.validateSelect("DROP TABLE users"));
     }
 
     @Test
     void testEmptySql() {
-        assertThrows(SqlValidationException.class, () -> 
+        assertThrows(McpSqlValidationException.class, () ->
             validator.validateSelect(""));
     }
 
@@ -45,7 +45,7 @@ class SqlValidatorTest {
     void testTableWhitelist() {
         validator.setAllowedTables(Set.of("USERS"));
         assertDoesNotThrow(() -> validator.validateSelect("SELECT * FROM USERS"));
-        assertThrows(SqlValidationException.class, () -> 
+        assertThrows(McpSqlValidationException.class, () ->
             validator.validateSelect("SELECT * FROM admin"));
     }
 }

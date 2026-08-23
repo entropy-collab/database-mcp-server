@@ -16,23 +16,17 @@
 package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
 import java.util.Map;
-
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 
 /**
  * Cache administration tools.
  */
-@Configuration
-public class CacheAdminTools {
-
-    private static final Logger log = LoggerFactory.getLogger(CacheAdminTools.class);
+@Component
+public class CacheAdminTools extends McpToolBase {
 
     private final RoutingDatabaseFacade routingFacade;
 
@@ -44,7 +38,7 @@ public class CacheAdminTools {
     public Map<String, Object> clearCache(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         routingFacade.clearCache(connection);
-        return successResponse(Map.of("status", "Cache cleared successfully"));
+        return success(Map.of("status", "Cache cleared successfully"));
     }
 
     @McpTool(description = "Get database query statistics and cache metrics")

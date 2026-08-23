@@ -15,6 +15,8 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.config.QueryConfig;
@@ -23,37 +25,25 @@ import com.entropy.database.mcp.gateway.FederatedQueryGateway;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.stream.SseStreamManager;
 import com.entropy.database.mcp.util.ValidationUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 import org.springframework.core.env.Environment;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
-import org.springframework.jdbc.core.JdbcTemplate;
-
-import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 
 /**
  * Cross-database tools for federated queries, DB Link administration, and analytics.
  */
-@Configuration
-@ConditionalOnProperty(name = "entropy.mcp.gateway.enabled", havingValue = "true")
-public class CrossDatabaseTools {
+@Component
+public class CrossDatabaseTools extends McpToolBase {
 
-    private static final Logger log = LoggerFactory.getLogger(CrossDatabaseTools.class);
-
-    private static final String GATEWAY_NOT_ENABLED_MSG = "Cross-database gateway is not enabled";
-    private static final String FEDERATED_GATEWAY_NOT_ENABLED_MSG = "Federated gateway is not enabled";
     private static final int DEFAULT_CROSS_DB_MAX_ROWS = 100;
     private static final int DEFAULT_COMPLEX_ANALYTICS_MAX_ROWS = 50;
     private static final int MAX_CTE_ROWS = 50000;
-
     private static final Pattern IDENTIFIER_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]{0,127}$");
 
     private final RoutingDatabaseFacade routingFacade;
@@ -80,52 +70,58 @@ public class CrossDatabaseTools {
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
 
-    private boolean isGatewayEnabled() {
-        return gatewayEnabled;
-    }
-
-    @McpTool(description = "Execute a cross-database JOIN query using Oracle DB Link syntax (@db_link)")
+    @McpTool(description = """
+            【跨库 JOIN 查询】通过 Oracle DB Link 执行跨数据库关联查询。
+            
+            使用场景：
+            - 需要关联本地表与远程表数据时
+            - 数据已分布在多个数据库，无法直接连接远程库时
+            
+            语法：SQL 中使用 @db_link 语法引用远程表（如 t@my_db_link）
+            """)
     public Map<String, Object> queryCrossDatabaseJoin(
             @McpToolParam(description = "SQL query with @db_link syntax") String sql,
             @McpToolParam(description = "Maximum rows to return") Integer maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!isGatewayEnabled()) {
-            return errorResponse(Map.of("sql", sql), GATEWAY_NOT_ENABLED_MSG, "DisabledException");
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (sql=" + sql + ")");
+        if (sql.trim().contains(";")) {
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "SQL must be a single statement (no semicolons allowed)");
         }
-        try {
+        return safeExecute(() -> {
             int limit = maxRows != null ? maxRows : DEFAULT_CROSS_DB_MAX_ROWS;
             String limitedSql = String.format("SELECT * FROM (%s) WHERE ROWNUM <= %d", sql, limit);
             List<Map<String, Object>> rows = dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(limitedSql);
-            return successResponse(Map.of("sql", sql, "rowCount", rows.size(), "data", rows));
-        } catch (Exception e) {
-            return errorResponse(Map.of("sql", sql), e.getMessage(), e.getClass().getSimpleName());
-        }
+            return success(Map.of("sql", sql, "rowCount", rows.size(), "data", rows));
+        });
     }
 
-    @McpTool(description = "List tables from a remote database via DB Link")
+    @McpTool(description = """
+            【列出远程表】通过 DB Link 列出远程数据库的表名。
+            
+            使用场景：
+            - 探索远程库有哪些表可用
+            - 配合 queryCrossDatabaseJoin 构建跨库查询
+            
+            owner 参数：传 'USER' 查当前登录用户，或传入具体 Schema 名（大写）
+            """)
     public List<Map<String, Object>> listRemoteTables(
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Remote schema owner (use 'USER' for current user)") String owner,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!isGatewayEnabled()) {
-            return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "owner", owner),
-                    GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
-        }
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ", owner=" + owner + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
+        if (!"USER".equalsIgnoreCase(owner)) {
+            ValidationUtils.validateIdentifier(owner, "owner");
+        }
         try {
             ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
             JdbcTemplate jdbc = ctx.getJdbcTemplate();
-            String sql;
-            if ("USER".equalsIgnoreCase(owner)) {
-                sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = USER", dbLinkName);
-                return jdbc.queryForList(sql);
-            } else {
-                sql = String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName);
-                return jdbc.queryForList(sql, owner.toUpperCase());
-            }
+            List<Map<String, Object>> rows = "USER".equalsIgnoreCase(owner)
+                    ? jdbc.queryForList(String.format("SELECT table_name FROM all_tables@%s WHERE owner = USER", dbLinkName))
+                    : jdbc.queryForList(String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName), owner.toUpperCase());
+            return rows;
         } catch (Exception e) {
-            return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "owner", owner),
-                    e.getMessage(), e.getClass().getSimpleName()));
+            throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED, e.getMessage() + " (dbLinkName=" + dbLinkName + ", owner=" + owner + ")");
         }
     }
 
@@ -134,21 +130,16 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Remote table name") String remoteTable,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!isGatewayEnabled()) {
-            return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
-                    GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
-        }
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ", remoteTable=" + remoteTable + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         ValidationUtils.validateIdentifier(remoteTable, "remoteTable");
         try {
             String sql = String.format(
-                    "SELECT column_name, data_type, data_length, nullable " +
-                    "FROM all_tab_columns@%s WHERE table_name = UPPER(?) ORDER BY column_id",
+                    "SELECT column_name, data_type, data_length, nullable FROM all_tab_columns@%s WHERE table_name = UPPER(?) ORDER BY column_id",
                     dbLinkName);
             return dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(sql, remoteTable.toUpperCase());
         } catch (Exception e) {
-            return List.of(errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
-                    e.getMessage(), e.getClass().getSimpleName()));
+            throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED, e.getMessage() + " (dbLinkName=" + dbLinkName + ", remoteTable=" + remoteTable + ")");
         }
     }
 
@@ -161,84 +152,26 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "End date for remote quality table (e.g., 2026-02-28)") String endDate,
             @McpToolParam(description = "Maximum rows to return") Integer maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!isGatewayEnabled()) {
-            return errorResponse(Map.of("dbLinkName", dbLinkName, "localTablePrefix", localTablePrefix, "partitionDate", partitionDate),
-                    GATEWAY_NOT_ENABLED_MSG, "DisabledException");
-        }
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ", localTablePrefix=" + localTablePrefix + ", partitionDate=" + partitionDate + ")");
         ValidationUtils.validateIdentifier(localTablePrefix, "localTablePrefix");
-        if (!partitionDate.matches("\\d{8}")) {
-            throw new IllegalArgumentException("partitionDate must be in YYYYMMDD format");
-        }
+        if (!partitionDate.matches("\\d{8}")) throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "partitionDate must be in YYYYMMDD format");
         String localTable = localTablePrefix + partitionDate;
-        int limit = maxRows != null ? maxRows : 50;
-
-        String sql = String.format("""
-            WITH fcs_transactions AS (
-                SELECT 
-                    TXN_DATE, TXN_TIME, TICKET_ID, TICKET_TYPE, TXN_STATION_ID, LAST_STATION_ID,
-                    TXN_AMT, REWARD_AMT, PAY_TYPE
-                FROM %s
-                WHERE ROWNUM <= MAX_CTE_ROWS
-            ),
-            remote_quality AS (
-                SELECT 
-                    TO_CHAR(TXN_DATE, 'YYYYMMDD') as TXN_DATE, TICKET_ID, STATION_CODE, TRANS_CODE,
-                    DEV_CODE, DELAY_FLAG, MISSING_DATE_FLAG
-                FROM REMOTE_QUALITY_TABLE@%s
-                WHERE TXN_DATE BETWEEN DATE '%s' AND DATE '%s'
-            ),
-            station_dim AS (
-                SELECT STATION_CODE, STATION_NAME, OWNER_LINE_CODE, STATION_TYPE, PARA_VERSION_NO
-                FROM DIM_STATION@%s
-            )
-            SELECT 
-                f.TXN_DATE, s.STATION_NAME, s.OWNER_LINE_CODE, s.STATION_TYPE, f.TICKET_TYPE,
-                COUNT(*) as txn_count, SUM(f.TXN_AMT) as total_amount, SUM(f.REWARD_AMT) as total_reward,
-                AVG(f.TXN_AMT) as avg_amount, MAX(f.TXN_AMT) as max_amount,
-                SUM(CASE WHEN q.DELAY_FLAG = 'Y' THEN 1 ELSE 0 END) as delayed_txns,
-                SUM(CASE WHEN q.MISSING_DATE_FLAG = 'Y' THEN 1 ELSE 0 END) as missing_date_txns,
-                COUNT(DISTINCT f.TICKET_ID) as unique_tickets,
-                RANK() OVER (PARTITION BY s.OWNER_LINE_CODE ORDER BY SUM(f.TXN_AMT) DESC) as line_revenue_rank,
-                DENSE_RANK() OVER (PARTITION BY s.STATION_TYPE ORDER BY COUNT(*) DESC) as station_type_dense_rank,
-                PERCENT_RANK() OVER (ORDER BY SUM(f.TXN_AMT)) as revenue_percentile
-            FROM fcs_transactions f
-            INNER JOIN station_dim s ON f.TXN_STATION_ID = s.STATION_CODE
-            LEFT JOIN remote_quality q 
-                ON f.TXN_DATE = q.TXN_DATE AND f.TICKET_ID = q.TICKET_ID AND f.TXN_STATION_ID = q.STATION_CODE
-            WHERE f.TXN_AMT > 0
-            GROUP BY f.TXN_DATE, s.STATION_NAME, s.OWNER_LINE_CODE, s.STATION_TYPE, f.TICKET_TYPE
-            HAVING COUNT(*) > 5
-            ORDER BY total_amount DESC
-            FETCH FIRST %d ROWS ONLY
-            """,
-                localTable, dbLinkName, startDate, endDate, dbLinkName, limit
-        );
-
-        try {
+        int limit = maxRows != null ? maxRows : DEFAULT_COMPLEX_ANALYTICS_MAX_ROWS;
+        String sql = buildComplexAnalyticsSql(localTable, dbLinkName, startDate, endDate, limit);
+        return safeExecute(() -> {
             long startTime = System.currentTimeMillis();
             List<Map<String, Object>> rows = dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(sql);
-            long duration = System.currentTimeMillis() - startTime;
-
-            return successResponse(Map.of(
-                    "template", "complex_cross_database_analytics",
-                    "localTable", localTable,
+            return success(Map.of(
+                    "template", "complex_cross_database_analytics", "localTable", localTable,
                     "remoteTables", "REMOTE_QUALITY_TABLE@" + dbLinkName + ", DIM_STATION@" + dbLinkName,
-                    "rowCount", rows.size(),
-                    "durationMs", duration,
-                    "data", rows
-            ));
-        } catch (Exception e) {
-            return errorResponse(Map.of("template", "complex_cross_database_analytics", "sql", sql),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+                    "rowCount", rows.size(), "durationMs", System.currentTimeMillis() - startTime, "data", rows));
+        });
     }
 
     @McpTool(description = "Get pre-built cross-database JOIN query templates")
     public Map<String, Object> getCrossDatabaseTemplates() {
-        if (!isGatewayEnabled()) {
-            return errorResponse(Map.of(), GATEWAY_NOT_ENABLED_MSG, "DisabledException");
-        }
-        return successResponse(Map.of(
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled");
+        return success(Map.of(
                 "inner_join", String.format("SELECT ... FROM local_table t INNER JOIN remote_table@%%s s ON t.col = s.col WHERE ...", "_DB_LINK_"),
                 "left_join", String.format("SELECT ... FROM local_table t LEFT JOIN remote_table@%%s s ON t.col = s.col WHERE ...", "_DB_LINK_"),
                 "subquery", String.format("SELECT ... FROM local_table t WHERE t.col IN (SELECT col FROM remote_table@%%s)", "_DB_LINK_"),
@@ -248,18 +181,13 @@ public class CrossDatabaseTools {
 
     @McpTool(description = "List all registered databases with connection info")
     public List<Map<String, Object>> listDatabases() {
-        if (!isGatewayEnabled() || gateway == null) {
-            return List.of(errorResponse(Map.of(), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException"));
-        }
+        if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled");
         return gateway.listDatabases();
     }
 
     @McpTool(description = "Get detailed information about a specific database in the federated gateway")
-    public Map<String, Object> getFederatedDatabaseInfo(
-            @McpToolParam(description = "Database identifier") String databaseId) {
-        if (!isGatewayEnabled() || gateway == null) {
-            return errorResponse(Map.of("databaseId", databaseId), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException");
-        }
+    public Map<String, Object> getFederatedDatabaseInfo(@McpToolParam(description = "Database identifier") String databaseId) {
+        if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled (databaseId=" + databaseId + ")");
         return gateway.getDatabaseInfo(databaseId);
     }
 
@@ -268,31 +196,20 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "SQL query to execute") String query,
             @McpToolParam(description = "List of database IDs to query") List<String> databases,
             @McpToolParam(description = "Maximum rows per database") Integer maxRows) {
-        if (!isGatewayEnabled() || gateway == null) {
-            return errorResponse(Map.of("query", query, "databases", databases),
-                    "Federated gateway is not enabled", "DisabledException");
-        }
+        if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled (query=" + query + ", databases=" + databases + ")");
         return gateway.executeFederatedQuery(query, databases, maxRows);
     }
 
     @McpTool(description = "Execute different queries on different databases in parallel")
-    public Map<String, Object> executeSelectiveQuery(
-            @McpToolParam(description = "Map of databaseId to SQL query") Map<String, String> databaseQueries) {
-        if (!isGatewayEnabled() || gateway == null) {
-            return errorResponse(Map.of("databaseQueries", databaseQueries), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException");
-        }
+    public Map<String, Object> executeSelectiveQuery(@McpToolParam(description = "Map of databaseId to SQL query") Map<String, String> databaseQueries) {
+        if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled (databaseQueries=" + databaseQueries + ")");
         return gateway.executeSelectiveQuery(databaseQueries);
     }
 
     @McpTool(description = "Get the number of registered database clients in the federated gateway")
     public Map<String, Object> getGatewayStatistics() {
-        if (!isGatewayEnabled() || gateway == null) {
-            return errorResponse(Map.of(), FEDERATED_GATEWAY_NOT_ENABLED_MSG, "DisabledException");
-        }
-        return successResponse(Map.of(
-                "clientCount", gateway.getClientCount(),
-                "databases", gateway.listDatabases().size()
-        ));
+        if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled");
+        return success(Map.of("clientCount", gateway.getClientCount(), "databases", gateway.listDatabases().size()));
     }
 
     @McpTool(description = "Create an Oracle Database Link for cross-database queries")
@@ -304,51 +221,33 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Remote username") String username,
             @McpToolParam(description = "Remote password") String password,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!isGatewayEnabled()) {
-            return errorResponse(Map.of("dbLinkName", dbLinkName, "host", host, "port", port, "serviceName", serviceName, "username", username),
-                    "Cross-database gateway is not enabled", "DisabledException");
-        }
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ", host=" + host + ", port=" + port + ", serviceName=" + serviceName + ", username=" + username + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         ValidationUtils.validateIdentifier(username, "username");
         ValidationUtils.validateHost(host);
         ValidationUtils.validatePort(port);
         ValidationUtils.validateServiceName(serviceName);
-
         String escapedPassword = password.replace("\"", "\"\"");
         String dblinkSql = String.format(
-                "CREATE DATABASE LINK %s CONNECT TO %s IDENTIFIED BY \"%s\" " +
-                "USING '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVICE_NAME=%s)))'",
+                "CREATE DATABASE LINK %s CONNECT TO %s IDENTIFIED BY \"%s\" USING '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVICE_NAME=%s)))'",
                 dbLinkName, username, escapedPassword, host, port, serviceName);
-
-        try {
+        return safeExecute(() -> {
             dataSourceManager.acquire(connection).getJdbcTemplate().execute(dblinkSql);
-            return successResponse(Map.of(
-                    "dbLinkName", dbLinkName,
-                    "message", String.format("Database link '%s' created successfully", dbLinkName)));
-        } catch (Exception e) {
-            log.warn("Failed to create DB link '{}': {}", dbLinkName, e.getMessage(), e);
-            return errorResponse(Map.of("dbLinkName", dbLinkName), e.getMessage(), e.getClass().getSimpleName());
-        }
+            return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' created successfully", dbLinkName)));
+        });
     }
 
     @McpTool(description = "Drop an Oracle Database Link")
     public Map<String, Object> dropDbLink(
             @McpToolParam(description = "Name of the database link to drop") String dbLinkName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!isGatewayEnabled()) {
-            return errorResponse(Map.of("dbLinkName", dbLinkName),
-                    GATEWAY_NOT_ENABLED_MSG, "DisabledException");
-        }
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
-        try {
+        return safeExecute(() -> {
             dataSourceManager.acquire(connection).getJdbcTemplate().execute(dropSql);
-            return successResponse(Map.of(
-                    "dbLinkName", dbLinkName,
-                    "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
-        } catch (Exception e) {
-            return errorResponse(Map.of("dbLinkName", dbLinkName), e.getMessage(), e.getClass().getSimpleName());
-        }
+            return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
+        });
     }
 
     @McpTool(description = "Test database link connectivity by querying a remote table")
@@ -356,23 +255,55 @@ public class CrossDatabaseTools {
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Remote table name to query") String remoteTable,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!isGatewayEnabled()) {
-            return errorResponse(Map.of("dbLinkName", dbLinkName, "remoteTable", remoteTable),
-                    GATEWAY_NOT_ENABLED_MSG, "DisabledException");
-        }
+        if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ", remoteTable=" + remoteTable + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         ValidationUtils.validateIdentifier(remoteTable, "remoteTable");
         String sql = String.format("SELECT COUNT(*) as cnt FROM %s@%s", remoteTable, dbLinkName);
-        try {
+        return safeExecute(() -> {
             Integer count = dataSourceManager.acquire(connection).getJdbcTemplate().queryForObject(sql, Integer.class);
-            return successResponse(Map.of(
-                    "dbLink", dbLinkName,
-                    "remoteTable", remoteTable,
-                    "rowCount", count,
+            return success(Map.of(
+                    "dbLink", dbLinkName, "remoteTable", remoteTable, "rowCount", count,
                     "message", String.format("Successfully queried %s@%s, found %d rows", remoteTable, dbLinkName, count)));
-        } catch (Exception e) {
-            return errorResponse(Map.of("dbLink", dbLinkName, "remoteTable", remoteTable),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+        });
+    }
+
+    private boolean isGatewayEnabled() {
+        return gatewayEnabled;
+    }
+
+    private String buildComplexAnalyticsSql(String localTable, String dbLinkName, String startDate, String endDate, int limit) {
+        return String.format("""
+            WITH fcs_transactions AS (
+                SELECT TXN_DATE, TXN_TIME, TICKET_ID, TICKET_TYPE, TXN_STATION_ID, LAST_STATION_ID,
+                    TXN_AMT, REWARD_AMT, PAY_TYPE FROM %s WHERE ROWNUM <= MAX_CTE_ROWS
+            ),
+            remote_quality AS (
+                SELECT TO_CHAR(TXN_DATE, 'YYYYMMDD') as TXN_DATE, TICKET_ID, STATION_CODE, TRANS_CODE,
+                    DEV_CODE, DELAY_FLAG, MISSING_DATE_FLAG
+                FROM REMOTE_QUALITY_TABLE@%s
+                WHERE TXN_DATE BETWEEN DATE '%s' AND DATE '%s'
+            ),
+            station_dim AS (
+                SELECT STATION_CODE, STATION_NAME, OWNER_LINE_CODE, STATION_TYPE, PARA_VERSION_NO
+                FROM DIM_STATION@%s
+            )
+            SELECT f.TXN_DATE, s.STATION_NAME, s.OWNER_LINE_CODE, s.STATION_TYPE, f.TICKET_TYPE,
+                COUNT(*) as txn_count, SUM(f.TXN_AMT) as total_amount, SUM(f.REWARD_AMT) as total_reward,
+                AVG(f.TXN_AMT) as avg_amount, MAX(f.TXN_AMT) as max_amount,
+                SUM(CASE WHEN q.DELAY_FLAG = 'Y' THEN 1 ELSE 0 END) as delayed_txns,
+                SUM(CASE WHEN q.MISSING_DATE_FLAG = 'Y' THEN 1 ELSE 0 END) as missing_date_txns,
+                COUNT(DISTINCT f.TICKET_ID) as unique_tickets,
+                RANK() OVER (PARTITION BY s.OWNER_LINE_CODE ORDER BY SUM(f.TXN_AMT) DESC) as line_revenue_rank,
+                DENSE_RANK() OVER (PARTITION BY s.STATION_TYPE ORDER BY COUNT(*) DESC) as station_type_dense_rank,
+                PERCENT_RANK() OVER (ORDER BY SUM(f.TXN_AMT)) as revenue_percentile
+            FROM fcs_transactions f
+            INNER JOIN station_dim s ON f.TXN_STATION_ID = s.STATION_CODE
+            LEFT JOIN remote_quality q ON f.TXN_DATE = q.TXN_DATE AND f.TICKET_ID = q.TICKET_ID AND f.TXN_STATION_ID = q.STATION_CODE
+            WHERE f.TXN_AMT > 0
+            GROUP BY f.TXN_DATE, s.STATION_NAME, s.OWNER_LINE_CODE, s.STATION_TYPE, f.TICKET_TYPE
+            HAVING COUNT(*) > 5
+            ORDER BY total_amount DESC
+            FETCH FIRST %d ROWS ONLY
+            """, localTable, dbLinkName, startDate, endDate, dbLinkName, limit);
     }
 }

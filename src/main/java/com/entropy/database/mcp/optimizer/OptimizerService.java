@@ -13,13 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.byok;
+package com.entropy.database.mcp.optimizer;
 
-/**
- * Thrown when a leased datasource exceeds its maximum lifetime.
- */
-public class LeaseExpiredException extends RuntimeException {
-    public LeaseExpiredException(String message) {
-        super(message);
-    }
+import java.util.List;
+
+public interface OptimizerService {
+
+    PerformanceReport analyzeQuery(String sql, String connection);
+
+    List<IndexRecommendation> recommendIndexes(String tableName, String connection);
+
+    List<RewriteSuggestion> suggestRewrites(String sql, String connection);
+
+    PerformanceReport analyzeTable(String tableName, String connection);
+
+    String interpretPlan(String planText, String dialect);
 }

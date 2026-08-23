@@ -17,32 +17,25 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.config.QueryConfig;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.util.QueryUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.LinkedHashMap;
-
-import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 
 /**
  * Core read-only query tools.
- * Uses {@link BaseQueryTool} template method for common query execution patterns.
  */
-@Configuration
-public class QueryTools {
-
-    private static final Logger log = LoggerFactory.getLogger(QueryTools.class);
+@Component
+public class QueryTools extends McpToolBase {
 
     private final RoutingDatabaseFacade routingFacade;
     private final SqlValidator sqlValidator;
@@ -62,25 +55,18 @@ public class QueryTools {
             @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
             @McpToolParam(description = "Continuation token for pagination. Omit or pass empty string for first page.", required = false) String continuationToken,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        try {
+        return safeExecute(() -> {
             log.debug("executeQuery called: sql={}, maxRows={}, token={}, connection={}", sql, maxRows, continuationToken, connection);
             var result = routingFacade.executeQuery(sql, maxRows, continuationToken, connection);
             List<Map<String, Object>> safeRows = QueryUtils.makeSerializable(result.rows());
-            Map<String, Object> resultMap = new LinkedHashMap<>();
+            Map<String, Object> resultMap = new HashMap<>();
             resultMap.put("columns", result.columns());
             resultMap.put("rows", safeRows);
             resultMap.put("rowCount", safeRows.size());
             resultMap.put("hasMore", result.hasMore());
             resultMap.put("continuationToken", result.continuationToken());
-            return successResponse(resultMap);
-        } catch (Exception e) {
-            log.warn("executeQuery failed: {}", e.getMessage(), e);
-            Map<String, Object> ctx = new LinkedHashMap<>();
-            ctx.put("sql", sql);
-            ctx.put("maxRows", maxRows);
-            ctx.put("connection", connection);
-            return errorResponse(ctx, e.getMessage(), e.getClass().getSimpleName());
-        }
+            return success(resultMap);
+        });
     }
 
     @McpTool(description = "Get database connection information including product name and version")
@@ -95,58 +81,70 @@ public class QueryTools {
             @McpToolParam(description = "Maximum rows per query", required = false) Integer maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) throws Exception {
         if (sqls == null || sqls.size() > 5) {
-            return List.of(errorResponse(Map.of("sqls", sqls, "maxRows", maxRows, "connection", connection),
-                    "batchQuery accepts at most 5 queries", "ValidationException"));
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "batchQuery accepts at most 5 queries");
         }
         List<Map<String, Object>> results = new ArrayList<>();
         for (String sql : sqls) {
-            try {
+            results.add(safeExecute(() -> {
                 var result = routingFacade.executeQuery(sql, maxRows, null, connection);
                 List<Map<String, Object>> safeRows = QueryUtils.makeSerializable(result.rows());
-                Map<String, Object> resultObj = new LinkedHashMap<>();
+                Map<String, Object> resultObj = new HashMap<>();
                 resultObj.put("columns", result.columns());
                 resultObj.put("rows", safeRows);
                 resultObj.put("rowCount", safeRows.size());
                 resultObj.put("hasMore", result.hasMore());
                 resultObj.put("continuationToken", result.continuationToken());
-                Map<String, Object> item = new LinkedHashMap<>();
+                Map<String, Object> item = new HashMap<>();
                 item.put("sql", sql);
                 item.put("result", resultObj);
-                results.add(item);
-            } catch (Exception e) {
-                results.add(errorResponse(Map.of("sql", sql), e.getMessage(), e.getClass().getSimpleName()));
-            }
+                return item;
+            }));
         }
         return results;
     }
 
-    @McpTool(name = "executeSqlTemplate", description = "Execute a parameterized SQL template safely")
+    @McpTool(name = "executeSqlTemplate", description = """
+            【SQL 模板执行】安全执行预定义参数化 SQL 模板，防止 SQL 注入。
+            
+            支持模板：
+            - query_by_id: 按主键查询单条记录
+            - list_by_page: 分页列表查询
+            - count_by_condition: 条件计数
+            
+            使用场景：
+            - 需要安全地构造参数化查询，避免手写 SQL 注入风险
+            - 快速查询单条记录或计数统计
+            
+            返回字段：rows、rowCount
+            """)
     public Map<String, Object> executeSqlTemplate(
             @McpToolParam(description = "Template name: query_by_id, list_by_page, or count_by_condition") String templateName,
             @McpToolParam(description = "Table name") String table,
             @McpToolParam(description = "Optional schema name for qualifying table references", required = false) String schema,
             @McpToolParam(description = "Parameters as key-value pairs", required = false) Map<String, Object> params,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) throws Exception {
-        String template = ToolParams.TEMPLATES.get(templateName);
-        if (template == null) {
-            throw new IllegalArgumentException("Unknown template: " + templateName
-                    + ". Available templates: " + ToolParams.TEMPLATES.keySet());
-        }
+        return safeExecute(() -> {
+            String template = ToolParams.TEMPLATES.get(templateName);
+            if (template == null) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Unknown template: " + templateName
+                        + ". Available templates: " + ToolParams.TEMPLATES.keySet());
+            }
 
-        String qualifiedTable = (schema != null && !schema.isBlank()) ? schema + "." + table : table;
-        String sql = template.replace("{table}", qualifiedTable);
-        Map<String, Object> boundParams = new HashMap<>(params != null ? params : Map.of());
+            String qualifiedTable = (schema != null && !schema.isBlank()) ? schema + "." + table : table;
+            String sql = template.replace("{table}", qualifiedTable);
+            Map<String, Object> boundParams = new HashMap<>(params != null ? params : Map.of());
 
-        if (templateName.equals("query_by_id")) {
-            sql = sql.replace("{idColumn}", (String) boundParams.getOrDefault("idColumn", "id"));
-        } else if (templateName.equals("count_by_condition")) {
-            sql = sql.replace("{condition}", (String) boundParams.getOrDefault("condition", "1=1"));
-        }
+            if (templateName.equals("query_by_id")) {
+                sql = sql.replace("{idColumn}", (String) boundParams.getOrDefault("idColumn", "id"));
+            } else if (templateName.equals("count_by_condition")) {
+                sql = sql.replace("{condition}", (String) boundParams.getOrDefault("condition", "1=1"));
+            }
 
-        log.debug("executeSqlTemplate: template={}, table={}, schema={}, params={}", templateName, qualifiedTable, schema, boundParams);
-        sqlValidator.validateSelect(sql);
+            log.debug("executeSqlTemplate: template={}, table={}, schema={}, params={}", templateName, qualifiedTable, schema, boundParams);
+            sqlValidator.validateSelect(sql);
 
-        List<Map<String, Object>> rows = routingFacade.executeNamedQuery(sql, boundParams, connection);
-        return successResponse(Map.of("rows", rows, "rowCount", rows.size()));
+            List<Map<String, Object>> rows = routingFacade.executeNamedQuery(sql, boundParams, connection);
+            return success(Map.of("rows", rows, "rowCount", rows.size()));
+        });
     }
 }

@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.byok;
 
+import com.entropy.database.mcp.exception.McpLeaseExpiredException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -59,7 +60,7 @@ class LeasedDataSourceTest {
         }
 
         assertThatThrownBy(leased::renewLease)
-                .isInstanceOf(LeaseExpiredException.class)
+                .isInstanceOf(McpLeaseExpiredException.class)
                 .hasMessageContaining("Datasource exceeded max lifetime: key1");
     }
 

@@ -15,27 +15,24 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.byok.ConnectionMetadata;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
-import java.util.*;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.Map;
 import java.util.stream.Collectors;
-
-import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 
 /**
  * Connection administration tools.
  */
-@Configuration
-public class ConnectionAdminTools {
-
-    private static final Logger log = LoggerFactory.getLogger(ConnectionAdminTools.class);
+@Component
+public class ConnectionAdminTools extends McpToolBase {
 
     private final DynamicDataSourceManager dataSourceManager;
 
@@ -45,49 +42,41 @@ public class ConnectionAdminTools {
 
     @McpTool(description = "List all registered datasource connections")
     public Map<String, Object> listConnections() {
-        try {
+        return safeExecute(() -> {
             Collection<String> keys = dataSourceManager.listConnectionKeys();
-            List<Map<String, Object>> connections = keys.stream()
+            Map<String, Object> result = new java.util.LinkedHashMap<>();
+            result.put("totalConnections", keys.size());
+            result.put("activeConnections", dataSourceManager.getActiveConnectionCount());
+            result.put("connections", keys.stream()
                     .map(key -> {
                         ConnectionMetadata meta = dataSourceManager.getConnectionMetadata(key);
                         if (meta == null) {
                             return Map.<String, Object>of("key", key, "status", "UNKNOWN");
                         }
                         return Map.<String, Object>of(
-                                "key", meta.key(),
-                                "dialect", meta.dialect(),
-                                "jdbcUrlMasked", meta.jdbcUrlMasked(),
-                                "owner", meta.owner(),
+                                "key", meta.key(), "dialect", meta.dialect(),
+                                "jdbcUrlMasked", meta.jdbcUrlMasked(), "owner", meta.owner(),
                                 "status", meta.getStatus(),
                                 "createdAt", meta.createdAt().toString(),
                                 "leaseExpiry", meta.getLeaseExpiry().toString(),
                                 "maxLifetimeExpiry", meta.getMaxLifetimeExpiry().toString(),
-                                "poolSize", meta.poolSize()
-                        );
+                                "poolSize", meta.poolSize());
                     })
                     .sorted(Comparator.comparing(m -> (String) m.get("key")))
-                    .collect(Collectors.toList());
-
-            return successResponse(Map.of(
-                    "totalConnections", connections.size(),
-                    "activeConnections", dataSourceManager.getActiveConnectionCount(),
-                    "connections", connections
-            ));
-        } catch (Exception e) {
-            return McpToolUtils.errorResponse(Map.of(), e.getMessage(), e.getClass().getSimpleName());
-        }
+                    .collect(Collectors.toList()));
+            return success(result);
+        });
     }
 
     @McpTool(description = "Get detailed metadata for a specific connection")
     public Map<String, Object> describeConnection(
-            @McpToolParam(description = "Connection key (e.g. 'primary' or BYOK key)") String connectionName) {
-        try {
+            @McpToolParam(description = "Connection key") String connectionName) {
+        return safeExecute(() -> {
             ConnectionMetadata meta = dataSourceManager.getConnectionMetadata(connectionName);
             if (meta == null) {
-                return errorResponse(Map.of("connectionName", connectionName), "Connection not found: " + connectionName, "NotFoundException");
+                throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found: " + connectionName + " (connectionName=" + connectionName + ")");
             }
-
-            Map<String, Object> detail = new LinkedHashMap<>();
+            Map<String, Object> detail = new java.util.LinkedHashMap<>();
             detail.put("key", meta.key());
             detail.put("dialect", meta.dialect());
             detail.put("jdbcUrlMasked", meta.jdbcUrlMasked());
@@ -100,31 +89,14 @@ public class ConnectionAdminTools {
             detail.put("maxLifetimeExpiry", meta.getMaxLifetimeExpiry().toString());
             detail.put("poolSize", meta.poolSize());
             detail.put("activeConnections", meta.activeConnections());
-
-            return successResponse(Map.of("connection", detail));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName), e.getMessage(), e.getClass().getSimpleName());
-        }
+            return success(Map.of("connection", detail));
+        });
     }
 
-    @McpTool(description = "Get the current number of active BYOK connections")
+    @McpTool(description = "Get connection count summary (active and total registered)")
     public Map<String, Object> getConnectionCount() {
-        try {
-            int activeCount = dataSourceManager.getActiveConnectionCount();
-            int totalRegistered = dataSourceManager.getConnectionCount();
-            return successResponse(Map.of(
-                    "activeConnections", activeCount,
-                    "totalRegistered", totalRegistered
-            ));
-        } catch (Exception e) {
-            return McpToolUtils.errorResponse(Map.of(), e.getMessage(), e.getClass().getSimpleName());
-        }
+        return safeExecute(() -> success(Map.of(
+                "activeConnections", dataSourceManager.getActiveConnectionCount(),
+                "totalRegistered", dataSourceManager.getConnectionCount())));
     }
-
-    @McpTool(name = "getActiveConnectionCount", description = "Get the current number of active BYOK connections (alias)")
-    public Map<String, Object> getActiveConnectionCount() {
-        return getConnectionCount();
-    }
-
-
 }

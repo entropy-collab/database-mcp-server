@@ -17,6 +17,10 @@ package com.entropy.database.mcp.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
+import com.entropy.database.mcp.properties.CatalogProperties;
+import com.entropy.database.mcp.properties.CdcProperties;
+import com.entropy.database.mcp.properties.OptimizerProperties;
+
 @ConfigurationProperties(prefix = "entropy.mcp.database")
 public record DatabaseProperties(
     boolean enabled,
@@ -25,6 +29,8 @@ public record DatabaseProperties(
     QueryProperties query,
 
     AuditProperties audit,
+
+    QualityProperties quality,
 
     DdlProperties ddl,
 
@@ -38,7 +44,17 @@ public record DatabaseProperties(
 
     PreparedStatementProperties preparedStatement,
 
-    MetricsProperties metrics
+    MetricsProperties metrics,
+
+    BackupProperties backup,
+
+    LineageProperties lineage,
+
+    OptimizerProperties optimizer,
+
+    CatalogProperties catalog,
+
+    CdcProperties cdc
 ) {
     public DatabaseProperties {
         if (dialect == null || dialect.isBlank()) {
@@ -49,6 +65,9 @@ public record DatabaseProperties(
         }
         if (audit == null) {
             audit = new AuditProperties(true, 7);
+        }
+        if (quality == null) {
+            quality = new QualityProperties();
         }
         if (ddl == null) {
             ddl = new DdlProperties(false);
@@ -70,6 +89,21 @@ public record DatabaseProperties(
         }
         if (metrics == null) {
             metrics = new MetricsProperties(5000);
+        }
+        if (backup == null) {
+            backup = new BackupProperties();
+        }
+        if (lineage == null) {
+            lineage = new LineageProperties();
+        }
+        if (optimizer == null) {
+            optimizer = new OptimizerProperties();
+        }
+        if (catalog == null) {
+            catalog = new CatalogProperties();
+        }
+        if (cdc == null) {
+            cdc = new CdcProperties();
         }
     }
 

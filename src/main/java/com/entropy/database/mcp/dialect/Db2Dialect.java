@@ -115,7 +115,8 @@ public class Db2Dialect extends AbstractDatabaseDialect {
             """.formatted(schemaFilter);
     }
 
-    public String healthCheckSql() {
+    @Override
+    public String getHealthCheckSql() {
         return "SELECT 'OK' AS status FROM SYSIBM.SYSDUMMY1";
     }
 }

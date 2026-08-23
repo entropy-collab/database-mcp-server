@@ -28,6 +28,43 @@ public class MySqlDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String tableCommentsQuery() {
+        return """
+            SELECT table_name, table_comment
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE()
+              AND table_type = 'BASE TABLE'
+            ORDER BY table_name
+            """;
+    }
+
+    @Override
+    public String columnCommentsQuery(String tableName) {
+        return """
+            SELECT column_name, column_type AS data_type,
+                   CASE WHEN is_nullable = 'YES' THEN 1 ELSE 0 END AS nullable,
+                   column_comment
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = ?
+            ORDER BY ordinal_position
+            """;
+    }
+
+    @Override
+    public String searchTableCommentsQuery(String keyword) {
+        String kw = "%" + keyword + "%";
+        return """
+            SELECT table_name, table_comment, table_rows AS row_count
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE()
+              AND table_type = 'BASE TABLE'
+              AND (table_name LIKE ? OR table_comment LIKE ?)
+            ORDER BY table_rows DESC
+            """;
+    }
+
+    @Override
     public String tablesQuery(String schema) {
         var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
@@ -96,7 +133,8 @@ public class MySqlDialect extends AbstractDatabaseDialect {
         return "SELECT 1";
     }
 
-    public String healthCheckSql() {
+    @Override
+    public String getHealthCheckSql() {
         return "SELECT 'OK' AS status";
     }
 
@@ -261,5 +299,117 @@ public class MySqlDialect extends AbstractDatabaseDialect {
                 .reduce((a, b) -> a + ", " + b).orElse("");
         return String.format("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
                 tableName, columnList, placeholderList, updateSet);
+    }
+
+    @Override
+    public String foreignKeyDownstreamQuery(String tableName) {
+        return """
+            SELECT kcu2.table_name AS source_table,
+                   kcu1.table_name AS target_table,
+                   kcu1.column_name AS source_column,
+                   kcu2.column_name AS target_column
+            FROM information_schema.key_column_usage kcu1
+            JOIN information_schema.referential_constraints rc
+              ON rc.constraint_schema = kcu1.table_schema
+             AND rc.constraint_name = kcu1.constraint_name
+            JOIN information_schema.key_column_usage kcu2
+              ON kcu2.constraint_schema = kcu1.table_schema
+             AND kcu2.ordinal_position = kcu1.ordinal_position
+             AND kcu2.constraint_name = rc.unique_constraint_name
+            WHERE kcu1.table_name = ?
+              AND kcu1.table_schema = DATABASE()
+            ORDER BY kcu2.table_name, kcu1.column_name
+            """;
+    }
+
+    @Override
+    public String foreignKeyUpstreamQuery(String tableName) {
+        return """
+            SELECT kcu1.table_name AS source_table,
+                   kcu2.table_name AS target_table,
+                   kcu1.column_name AS source_column,
+                   kcu2.column_name AS target_column
+            FROM information_schema.key_column_usage kcu1
+            JOIN information_schema.referential_constraints rc
+              ON rc.constraint_schema = kcu1.table_schema
+             AND rc.constraint_name = kcu1.constraint_name
+            JOIN information_schema.key_column_usage kcu2
+              ON kcu2.constraint_schema = kcu1.table_schema
+             AND kcu2.ordinal_position = kcu1.ordinal_position
+             AND kcu2.constraint_name = rc.unique_constraint_name
+            WHERE kcu2.table_name = ?
+              AND kcu2.table_schema = DATABASE()
+            ORDER BY kcu1.table_name, kcu2.column_name
+            """;
+    }
+
+    @Override
+    public String listTableIndexesSql(String tableName) {
+        return """
+            SELECT s.INDEX_NAME, s.COLUMN_NAME,
+                   CASE WHEN s.NON_UNIQUE = 0 THEN 1 ELSE 0 END AS UNIQUENESS
+            FROM information_schema.STATISTICS s
+            WHERE s.TABLE_SCHEMA = DATABASE()
+              AND s.TABLE_NAME = ?
+            ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX
+            """;
+    }
+
+    @Override
+    public String candidateColumnsForIndexSql(String tableName) {
+        return """
+            SELECT c.COLUMN_NAME, c.IS_NULLABLE, c.COLUMN_KEY
+            FROM information_schema.COLUMNS c
+            LEFT JOIN information_schema.STATISTICS s
+              ON s.TABLE_SCHEMA = DATABASE()
+             AND s.TABLE_NAME = c.TABLE_NAME
+             AND s.COLUMN_NAME = c.COLUMN_NAME
+             AND s.INDEX_NAME = 'PRIMARY'
+            WHERE c.TABLE_SCHEMA = DATABASE()
+              AND c.TABLE_NAME = ?
+              AND s.COLUMN_NAME IS NULL
+              AND c.DATA_TYPE IN ('int','bigint','varchar','char','date','datetime','timestamp')
+            ORDER BY c.ORDINAL_POSITION
+            """;
+    }
+
+    // ─── CDC ─────────────────────────────────────────────────────────────
+
+    @Override
+    public String cdcReadChangesSql(String schema, String table, long fromLsn) {
+        // MySQL: read from performance_schema or use binlog coordinates via SHOW MASTER STATUS
+        // Simplified: use INFORMATION_SCHEMA to detect last change time via trigger-based audit table
+        return """
+            SELECT 'TRIGGER_AUDIT' AS change_type,
+                   MAX(event_time) AS change_time,
+                   CONCAT(primary_key_col) AS primary_keys,
+                   NULL AS before_json,
+                   NULL AS after_json,
+                   NULL AS transaction_id
+            FROM %s.%s_audit
+            WHERE event_time > FROM_UNIXTIME(?)
+            GROUP BY primary_key_col
+            """.formatted(schema != null ? schema : "CURRENT_SCHEMA()", table);
+    }
+
+    @Override
+    public String cdcGetLastLsnSql() {
+        return "SHOW MASTER STATUS";
+    }
+
+    @Override
+    public String cdcCheckSupportSql() {
+        return """
+            SELECT 1 FROM information_schema.GLOBAL_VARIABLES
+            WHERE VARIABLE_NAME IN ('log_bin', 'binlog_format')
+              AND VARIABLE_VALUE != ''
+            LIMIT 1
+            """;
+    }
+
+    @Override
+    public String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
+        return "CREATE TABLE `%s`.`%s` AS %s".formatted(
+                targetSchema != null ? targetSchema : "CURRENT_SCHEMA()", targetTable, sourceQuery);
     }
 }

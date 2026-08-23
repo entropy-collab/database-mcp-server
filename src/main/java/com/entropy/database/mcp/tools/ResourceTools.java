@@ -22,7 +22,7 @@ import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpResource;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
@@ -30,7 +30,7 @@ import java.util.Map;
 /**
  * MCP Resources for template queries and schema metadata.
  */
-@Configuration
+@Component
 public class ResourceTools {
 
     private static final Logger log = LoggerFactory.getLogger(ResourceTools.class);

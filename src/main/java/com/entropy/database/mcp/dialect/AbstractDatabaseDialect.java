@@ -73,11 +73,6 @@ public abstract class AbstractDatabaseDialect implements DatabaseDialect {
     }
 
     @Override
-    public String getExplainPlanSql(String sql) {
-        return explainPlanSql(sql);
-    }
-
-    @Override
     public String getTableStatisticsSql(String tableName) {
         return null;
     }

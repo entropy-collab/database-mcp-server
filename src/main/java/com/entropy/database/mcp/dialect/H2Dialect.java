@@ -142,7 +142,8 @@ public class H2Dialect extends AbstractDatabaseDialect {
         // H2 specific configuration if needed
     }
 
-    public String healthCheckSql() {
+    @Override
+    public String getHealthCheckSql() {
         return "SELECT 'OK' AS status";
     }
 }

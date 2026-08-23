@@ -18,13 +18,15 @@ package com.entropy.database.mcp.tools;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
 
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
+import com.entropy.database.mcp.tools.McpToolUtils;
 
 /**
  * Shared utilities for executing dialect-specific queries.
@@ -40,9 +42,7 @@ public final class DialectQueryUtils {
 
     public static String getDialectName(DynamicDataSourceManager dataSourceManager, String connection) {
         try {
-            if (connection == null || connection.isBlank()) {
-                throw new IllegalArgumentException("Connection is required.");
-            }
+            requireConnection(connection);
             ByokDataSourceContext context = dataSourceManager.acquire(connection);
             return context.getDialect().getClass().getSimpleName();
         } catch (Exception e) {
@@ -57,9 +57,7 @@ public final class DialectQueryUtils {
      */
     public static Map<String, Object> checkHealth(DynamicDataSourceManager dataSourceManager, String connection) {
         try {
-            if (connection == null || connection.isBlank()) {
-                throw new IllegalArgumentException("Connection is required.");
-            }
+            requireConnection(connection);
             ByokDataSourceContext context = dataSourceManager.acquire(connection);
             DatabaseDialect dialect = context.getDialect();
             var jdbcTemplate = context.getJdbcTemplate();
@@ -70,7 +68,7 @@ public final class DialectQueryUtils {
             }
 
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
-            return successResponse(Map.of(
+            return McpToolUtils.success(Map.of(
                     "connection", connection,
                     "dialect", dialect.getClass().getSimpleName(),
                     "status", "healthy",
@@ -78,7 +76,7 @@ public final class DialectQueryUtils {
             ));
         } catch (Exception e) {
             log.warn("Health check failed for connection '{}': {}", connection, e.getMessage(), e);
-            return McpToolUtils.errorResponse(Map.of("connection", connection), e.getMessage(), e.getClass().getSimpleName());
+            throw new IllegalStateException("Health check failed for connection '" + connection + "': " + e.getMessage(), e);
         }
     }
 
@@ -93,9 +91,7 @@ public final class DialectQueryUtils {
                                                            java.util.function.Function<DatabaseDialect, String> sqlProvider,
                                                            List<Object> argsList) {
         try {
-            if (connection == null || connection.isBlank()) {
-                throw new IllegalArgumentException("Connection is required.");
-            }
+            requireConnection(connection);
             ByokDataSourceContext context = dataSourceManager.acquire(connection);
             DatabaseDialect dialect = context.getDialect();
             var jdbcTemplate = context.getJdbcTemplate();
@@ -107,16 +103,16 @@ public final class DialectQueryUtils {
             sql = sql.trim();
             if (sql.startsWith("BEGIN") || sql.startsWith("ANALYZE") || sql.toLowerCase().startsWith("analyze")) {
                 jdbcTemplate.execute(sql);
-                return successResponse(Map.of("rows", List.of()));
+                return McpToolUtils.success(Map.of("rows", List.of()));
             }
 
             List<Map<String, Object>> rows;
-            if (argsList.isEmpty()) {
+            if (argsList.isEmpty() || !sql.contains("?")) {
                 rows = jdbcTemplate.queryForList(sql);
             } else {
                 rows = jdbcTemplate.queryForList(sql, argsList.toArray());
             }
-            return successResponse(Map.of("rows", rows));
+            return McpToolUtils.success(Map.of("rows", rows));
         } catch (Exception e) {
             log.warn("executeDialectQuery failed for connection '{}': {}", connection, e.getMessage(), e);
             throw new RuntimeException("Dialect query execution failed: " + e.getMessage(), e);
@@ -130,6 +126,12 @@ public final class DialectQueryUtils {
         if (args == null || args.length == 0) {
             return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of());
         }
-        return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of(args));
+        return executeDialectQuery(dataSourceManager, connection, sqlProvider, java.util.Arrays.asList(args));
+    }
+
+    private static void requireConnection(String connection) {
+        if (connection == null || connection.isBlank()) {
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Connection is required.");
+        }
     }
 }

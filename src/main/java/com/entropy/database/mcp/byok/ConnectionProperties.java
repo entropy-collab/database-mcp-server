@@ -73,7 +73,21 @@ public record ConnectionProperties(
     }
 
     public String getCacheKey() {
-        return jdbcUrl + "|" + username + "|" + dialect;
+        return normalizeJdbcUrl(jdbcUrl) + "|" + username + "|" + dialect;
+    }
+
+    /**
+     * Normalize JDBC URL to a canonical form for deduplication.
+     * Strips query parameters and fragments, keeping only the protocol + host + database path.
+     * e.g. "jdbc:postgresql://host:5432/db?useSSL=false&stringtype=unspecified"
+     *     → "jdbc:postgresql://host:5432/db"
+     */
+    static String normalizeJdbcUrl(String jdbcUrl) {
+        if (jdbcUrl == null || jdbcUrl.isBlank()) return jdbcUrl;
+        int questionMark = jdbcUrl.indexOf('?');
+        int hash = jdbcUrl.indexOf('#');
+        int end = questionMark > 0 ? questionMark : (hash > 0 ? hash : jdbcUrl.length());
+        return jdbcUrl.substring(0, end);
     }
 
     public static ConnectionProperties fromEnv() {

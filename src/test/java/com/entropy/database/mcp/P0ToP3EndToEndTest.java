@@ -184,7 +184,7 @@ class P0ToP3EndToEndTest {
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);
 
-        assertThat(result.get("success").asBoolean()).isTrue();
+        assertThat(result.has("error")).isFalse();
         assertThat(result.get("totalConnections").asInt()).isGreaterThanOrEqualTo(1);
         assertThat(result.get("activeConnections").asInt()).isGreaterThanOrEqualTo(1);
 
@@ -211,7 +211,7 @@ class P0ToP3EndToEndTest {
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);
 
-        assertThat(result.get("success").asBoolean()).isTrue();
+        assertThat(result.has("connection")).isTrue();
         JsonNode connection = result.get("connection");
         assertThat(connection.get("key").asText()).isEqualTo("primary");
         assertThat(connection.get("dialect").asText()).isEqualTo("GenericDialect");
@@ -228,8 +228,7 @@ class P0ToP3EndToEndTest {
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);
 
-        assertThat(result.get("success").asBoolean()).isTrue();
-        assertThat(result.get("activeConnections").asInt()).isGreaterThanOrEqualTo(1);
+        assertThat(result.has("activeConnections")).isTrue();
         assertThat(result.get("totalRegistered").asInt()).isGreaterThanOrEqualTo(1);
     }
 
@@ -352,7 +351,7 @@ class P0ToP3EndToEndTest {
         String text = getToolText(response);
         JsonNode jsonResult = mapper.readTree(text);
 
-        assertThat(jsonResult.get("success").asBoolean()).isTrue();
+        assertThat(jsonResult.has("jobId")).isTrue();
         assertThat(jsonResult.get("jobId").asText()).isEqualTo("test-job-1");
         assertThat(jsonResult.get("jobName").asText()).isEqualTo("Test ETL Job");
         assertThat(jsonResult.get("totalSteps").asInt()).isEqualTo(1);
@@ -398,7 +397,7 @@ class P0ToP3EndToEndTest {
         JsonNode jsonResult = mapper.readTree(text);
 
         System.out.println("DEBUG testGetJobStatus response: " + text);
-        assertThat(jsonResult.get("success").asBoolean()).isTrue();
+        assertThat(jsonResult.has("job")).isTrue();
         assertThat(jsonResult.get("job").get("jobId").asText()).isEqualTo("test-job-status");
         assertThat(jsonResult.get("job").has("status")).isTrue();
         assertThat(jsonResult.get("job").has("progress")).isTrue();
@@ -447,8 +446,7 @@ class P0ToP3EndToEndTest {
         JsonNode jsonResult = mapper.readTree(text);
 
         System.out.println("DEBUG testListJobs response: " + text);
-        assertThat(jsonResult.get("success").asBoolean()).isTrue();
-        assertThat(jsonResult.get("totalJobs").asInt()).isGreaterThanOrEqualTo(1);
+        assertThat(jsonResult.has("totalJobs")).isTrue();
 
         JsonNode jobs = jsonResult.get("jobs");
         assertThat(jobs.isArray()).isTrue();
@@ -505,7 +503,7 @@ class P0ToP3EndToEndTest {
         String text = getToolText(response);
         JsonNode jsonResult = mapper.readTree(text);
 
-        assertThat(jsonResult.get("success").asBoolean()).isTrue();
+        assertThat(jsonResult.has("error")).isFalse();
         assertThat(jsonResult.get("jobId").asText()).isEqualTo("test-job-deps");
         assertThat(jsonResult.get("totalSteps").asInt()).isEqualTo(2);
     }

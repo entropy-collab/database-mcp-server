@@ -34,7 +34,7 @@ class ByokWriteRepositoryTest {
         ByokWriteRepository repository = new ByokWriteRepository(jdbcTemplate);
         var result = repository.executeDdl("CREATE TABLE test (id INT)");
 
-        assertThat(result).containsEntry("affectedRows", 1).containsEntry("success", true);
+        assertThat(result).containsEntry("affectedRows", 1);
         verify(jdbcTemplate).update("CREATE TABLE test (id INT)");
     }
 }

@@ -46,6 +46,7 @@ public class DatabaseReadRepository {
     public static final int DEFAULT_MAX_ROWS = 100;
     public static final int DEFAULT_MAX_RESULT_ROWS = 10000;
     public static final int DEFAULT_FETCH_SIZE = 100;
+    public static final int DEFAULT_QUERY_TIMEOUT_SECONDS = 30;
 
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseDialect dialect;
@@ -55,6 +56,7 @@ public class DatabaseReadRepository {
     private final int maxRows;
     private final int maxResultRows;
     private final int fetchSize;
+    private final int queryTimeoutSeconds;
     private final SseStreamManager sseStreamManager;
 
     public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
@@ -64,7 +66,8 @@ public class DatabaseReadRepository {
                                   DataMaskingService maskingService,
                                   SseStreamManager sseStreamManager) {
         this(jdbcTemplate, dialect, sqlValidator, cache, maskingService,
-             DEFAULT_MAX_ROWS, DEFAULT_MAX_RESULT_ROWS, DEFAULT_FETCH_SIZE, sseStreamManager);
+             DEFAULT_MAX_ROWS, DEFAULT_MAX_RESULT_ROWS, DEFAULT_FETCH_SIZE,
+             DEFAULT_QUERY_TIMEOUT_SECONDS, sseStreamManager);
     }
 
     public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
@@ -75,7 +78,8 @@ public class DatabaseReadRepository {
                                   QueryLimits limits,
                                   SseStreamManager sseStreamManager) {
         this(jdbcTemplate, dialect, sqlValidator, cache, maskingService,
-             limits.maxRows(), limits.maxResultRows(), DEFAULT_FETCH_SIZE, sseStreamManager);
+             limits.maxRows(), limits.maxResultRows(), DEFAULT_FETCH_SIZE,
+             DEFAULT_QUERY_TIMEOUT_SECONDS, sseStreamManager);
     }
 
     public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
@@ -86,6 +90,7 @@ public class DatabaseReadRepository {
                                   int maxRows,
                                   int maxResultRows,
                                   int fetchSize,
+                                  int queryTimeoutSeconds,
                                   SseStreamManager sseStreamManager) {
         this.jdbcTemplate = jdbcTemplate;
         this.dialect = dialect;
@@ -95,6 +100,7 @@ public class DatabaseReadRepository {
         this.maxRows = maxRows;
         this.maxResultRows = maxResultRows;
         this.fetchSize = fetchSize;
+        this.queryTimeoutSeconds = queryTimeoutSeconds;
         this.sseStreamManager = sseStreamManager;
     }
 
@@ -255,9 +261,14 @@ public class DatabaseReadRepository {
         String limitedSql = dialect.supportsLimit()
                 ? dialect.applyLimit(sql, limit, offset)
                 : sql;
+
+        // Apply query timeout to PreparedStatement
         List<Map<String, Object>> rows = jdbcTemplate.query(con -> {
             PreparedStatement ps = con.prepareStatement(limitedSql);
             ps.setFetchSize(fetchSize);
+            if (queryTimeoutSeconds > 0) {
+                ps.setQueryTimeout(queryTimeoutSeconds);
+            }
             return ps;
         }, (ResultSet rs) -> {
             List<Map<String, Object>> results = new ArrayList<>();
@@ -275,7 +286,7 @@ public class DatabaseReadRepository {
 
         // Circuit breaker: reject if result exceeds maxResultRows
         if (rows.size() > maxResultRows) {
-            throw new com.entropy.database.mcp.exception.DatabaseMcpException(
+            throw new com.entropy.database.mcp.exception.McpQueryException(
                 com.entropy.database.mcp.exception.ErrorCode.QUERY_RESULT_TOO_LARGE,
                 "Query result exceeds max-result-rows limit: " + rows.size() + " > " + maxResultRows);
         }

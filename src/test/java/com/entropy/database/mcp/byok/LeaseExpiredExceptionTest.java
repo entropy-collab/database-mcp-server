@@ -15,19 +15,19 @@
  */
 package com.entropy.database.mcp.byok;
 
-import com.entropy.database.mcp.exception.DatabaseMcpException;
 import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpLeaseExpiredException;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class LeaseExpiredExceptionTest {
 
     @Test
     void exceptionStoresMessage() {
-        LeaseExpiredException ex = new LeaseExpiredException("Datasource exceeded max lifetime: key1");
+        McpLeaseExpiredException ex = new McpLeaseExpiredException("Datasource exceeded max lifetime: key1");
 
         assertThat(ex.getMessage()).isEqualTo("Datasource exceeded max lifetime: key1");
+        assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.LEASE_EXPIRED);
     }
 }

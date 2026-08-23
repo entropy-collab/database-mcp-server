@@ -15,7 +15,7 @@
  */
 package com.entropy.database.mcp.security;
 
-import com.entropy.database.mcp.exception.SqlValidationException;
+import com.entropy.database.mcp.exception.McpSqlValidationException;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.Statement;
@@ -58,25 +58,25 @@ public class SqlValidatorImpl implements SqlValidator {
     public void validateDdl(String sql) { validate(sql, true); }
 
     private void validate(String sql, boolean isDdl) {
-        if (sql == null || sql.isBlank()) throw new SqlValidationException(sql, "SQL is empty");
+        if (sql == null || sql.isBlank()) throw new McpSqlValidationException(sql, "SQL is empty");
         Statement stmt;
         try { stmt = CCJSqlParserUtil.parse(sql.trim()); }
-        catch (Exception e) { throw new SqlValidationException(sql, "Invalid SQL: " + e.getMessage(), e); }
+        catch (Exception e) { throw new McpSqlValidationException(sql, "Invalid SQL: " + e.getMessage(), e); }
         String op = extractOp(stmt);
         if (!allowedOperations.contains(op.toUpperCase()) && !isDdl)
-            throw new SqlValidationException(sql, "Operation not allowed: " + op);
+            throw new McpSqlValidationException(sql, "Operation not allowed: " + op);
         if (!allowedTables.isEmpty() && isSelect(stmt)) {
             Set<String> tables = extractTables(stmt);
             Set<String> unauth = new HashSet<>(tables);
             unauth.removeAll(allowedTables);
-            if (!unauth.isEmpty()) throw new SqlValidationException(sql, "Tables not allowed: " + unauth);
+            if (!unauth.isEmpty()) throw new McpSqlValidationException(sql, "Tables not allowed: " + unauth);
         }
         int joins = extractJoinCount(stmt);
-        if (joins > getMaxJoins()) throw new SqlValidationException(sql, "Exceeds max joins: " + joins + " > " + getMaxJoins());
+        if (joins > getMaxJoins()) throw new McpSqlValidationException(sql, "Exceeds max joins: " + joins + " > " + getMaxJoins());
         int depth = extractSubqueryDepth(stmt);
-        if (depth > getMaxSubqueryDepth()) throw new SqlValidationException(sql, "Exceeds max subquery depth: " + depth + " > " + getMaxSubqueryDepth());
+        if (depth > getMaxSubqueryDepth()) throw new McpSqlValidationException(sql, "Exceeds max subquery depth: " + depth + " > " + getMaxSubqueryDepth());
         int max = extractMaxRows(stmt);
-        if (max > getMaxRows()) throw new SqlValidationException(sql, "Exceeds max rows: " + max);
+        if (max > getMaxRows()) throw new McpSqlValidationException(sql, "Exceeds max rows: " + max);
     }
 
     private String extractOp(Statement stmt) {

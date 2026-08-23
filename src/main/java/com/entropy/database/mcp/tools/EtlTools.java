@@ -16,6 +16,9 @@
 package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.config.EtlConfig;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
+import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.ConnectionProperties;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
@@ -26,31 +29,23 @@ import com.entropy.database.mcp.etl.JobExecution;
 import com.entropy.database.mcp.etl.MigrationJob;
 import com.entropy.database.mcp.etl.Step;
 import com.entropy.database.mcp.etl.StepType;
-import com.entropy.database.mcp.repository.DatabaseReadRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 import static com.entropy.database.mcp.util.ValidationUtils.*;
-import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 
 /**
  * Unified ETL tools.
  * Replaces: DataMigrationTools (data operations), EtlJobTools
  */
-@Configuration
+@Component
 @ConditionalOnProperty(name = "entropy.mcp.gateway.enabled", havingValue = "true")
-public class EtlTools {
-
-    private static final Logger log = LoggerFactory.getLogger(EtlTools.class);
+public class EtlTools extends McpToolBase {
 
     private final DynamicDataSourceManager dataSourceManager;
     private final JobExecutionEngine executionEngine;
@@ -64,33 +59,6 @@ public class EtlTools {
         this.etlConfig = etlConfig;
     }
 
-    // ─── Connection Management (from DataMigrationTools) ────────────────────
-
-    private void validateTableName(String tableName) {
-        validateIdentifier(tableName, "tableName");
-    }
-
-    /**
-     * Common parameter validation for insert operations.
-     */
-    private void validateInsertParams(String connectionName, String tableName, List<?> rows) {
-        requireNotBlank(connectionName, "connectionName");
-        requireNotBlank(tableName, "tableName");
-        validateTableName(tableName);
-        requireNotEmpty(rows, "rows");
-    }
-
-    /**
-     * Common parameter validation for transform operations.
-     */
-    private void validateTransformParams(String connectionName, String sourceTable, String targetTable, List<String> columnMapping) {
-        requireNotBlank(connectionName, "connectionName");
-        requireNotBlank(sourceTable, "sourceTable");
-        requireNotBlank(targetTable, "targetTable");
-        validateTableName(targetTable);
-        requireNotEmpty(columnMapping, "columnMapping");
-    }
-
     @McpTool(description = "Create a named BYOK connection to a remote database")
     public Map<String, Object> createNamedConnection(
             @McpToolParam(description = "Connection name for reuse") String name,
@@ -98,7 +66,7 @@ public class EtlTools {
             @McpToolParam(description = "Database username") String username,
             @McpToolParam(description = "Database password") String password,
             @McpToolParam(description = "Database dialect (oracle, mysql, postgres, sqlserver)") String dialect) {
-        try {
+        return safeExecute(() -> {
             ConnectionProperties properties = ConnectionProperties.builder()
                     .jdbcUrl(jdbcUrl)
                     .username(username)
@@ -107,67 +75,43 @@ public class EtlTools {
                     .build();
             properties.validate();
             ByokDataSourceContext context = dataSourceManager.acquire(name, properties);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
-            String testSql = context.getDialect().connectionTestQuery();
-            jdbcTemplate.queryForList(testSql);
-            return successResponse(Map.of(
+            context.getJdbcTemplate().queryForList(context.getDialect().connectionTestQuery());
+            return success(Map.of(
                     "connectionName", name,
                     "jdbcUrl", properties.jdbcUrl(),
                     "username", properties.username(),
                     "dialect", properties.dialect(),
-                    "message", "Connection created and tested successfully"));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", name), e.getMessage(), e.getClass().getSimpleName());
-        }
+                    "message", "Connection created and tested successfully"
+            ));
+        });
     }
-
-    // ─── Data Insertion (from DataMigrationTools) ────────────────────────────
 
     @McpTool(description = "Batch insert rows into a remote table via BYOK connection")
     public Map<String, Object> insertData(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Target table name") String tableName,
             @McpToolParam(description = "List of rows to insert (each map is a row)") List<Map<String, Object>> rows,
-            @McpToolParam(description = "Batch size for JDBC batch update") Integer batchSize) {
-        try {
+            @McpToolParam(description = "Batch size for JDBC batch update") Integer batchSize) throws Exception {
+        return safeExecute(() -> {
             requireNotBlank(connectionName, "connectionName");
             requireNotBlank(tableName, "tableName");
-            validateTableName(tableName);
+            validateIdentifier(tableName, "tableName");
             requireNotEmpty(rows, "rows");
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             List<String> columns = rows.get(0).keySet().stream().toList();
-            String columnList = String.join(", ", columns);
-            String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
-            String sql = String.format("INSERT INTO %s (%s) VALUES (%s)", tableName, columnList, placeholderList);
+            String sql = BatchInsertHelper.buildInsertSql(tableName, columns);
             int size = batchSize != null ? batchSize : etlConfig.batchSize();
-            if (size <= 0) {
-                throw new IllegalArgumentException("batchSize must be positive, got: " + size);
-            }
+            if (size <= 0) throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
-            int[][] updateCounts = jdbcTemplate.batchUpdate(sql, rows, size, (ps, row) -> {
-                for (int i = 0; i < columns.size(); i++) {
-                    ps.setObject(i + 1, row.get(columns.get(i)));
-                }
-            });
-            long duration = System.currentTimeMillis() - startTime;
-            int totalRows = 0;
-            for (int[] batch : updateCounts) {
-                for (int count : batch) {
-                    totalRows += count;
-                }
-            }
-            return successResponse(Map.of(
-                    "connectionName", connectionName,
-                    "tableName", tableName,
-                    "rowCount", totalRows,
-                    "batchSize", size,
-                    "durationMs", duration,
-                    "message", String.format("Inserted %d rows into %s", totalRows, tableName)));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName, "tableName", tableName),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, sql, rows, size, BatchInsertHelper.setRowColumns(columns));
+            return success(Map.of(
+                    "connectionName", connectionName, "tableName", tableName,
+                    "rowCount", totalRows, "batchSize", size,
+                    "durationMs", System.currentTimeMillis() - startTime,
+                    "message", String.format("Inserted %d rows into %s", totalRows, tableName)
+            ));
+        });
     }
 
     @McpTool(description = "Insert query results into a target table (ETL helper)")
@@ -176,50 +120,27 @@ public class EtlTools {
             @McpToolParam(description = "Source SELECT query") String sourceSql,
             @McpToolParam(description = "Target BYOK connection name") String targetConnectionName,
             @McpToolParam(description = "Target table name") String targetTable,
-            @McpToolParam(description = "Batch size for insertion") Integer batchSize) {
-        try {
-            validateTableName(targetTable);
+            @McpToolParam(description = "Batch size for insertion") Integer batchSize) throws Exception {
+        return safeExecute(() -> {
+            validateIdentifier(targetTable, "targetTable");
             ByokDataSourceContext sourceContext = dataSourceManager.acquire(sourceConnectionName);
-            JdbcTemplate sourceJdbc = sourceContext.getJdbcTemplate();
-            List<Map<String, Object>> rows = sourceJdbc.queryForList(sourceSql);
-            if (rows.isEmpty()) {
-                return successResponse(Map.of("message", "No rows to insert", "rowCount", 0));
-            }
+            List<Map<String, Object>> rows = sourceContext.getJdbcTemplate().queryForList(sourceSql);
+            if (rows.isEmpty()) return emptyResult();
             ByokDataSourceContext targetContext = dataSourceManager.acquire(targetConnectionName);
             JdbcTemplate targetJdbc = targetContext.getJdbcTemplate();
             List<String> columns = rows.get(0).keySet().stream().toList();
-            String columnList = String.join(", ", columns);
-            String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
-            String insertSql = String.format("INSERT INTO %s (%s) VALUES (%s)", targetTable, columnList, placeholderList);
+            String insertSql = BatchInsertHelper.buildInsertSql(targetTable, columns);
             int size = batchSize != null ? batchSize : 1000;
-            if (size <= 0) {
-                throw new IllegalArgumentException("batchSize must be positive, got: " + size);
-            }
+            if (size <= 0) throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
-            int[][] updateCounts = targetJdbc.batchUpdate(insertSql, rows, size, (ps, row) -> {
-                for (int i = 0; i < columns.size(); i++) {
-                    ps.setObject(i + 1, row.get(columns.get(i)));
-                }
-            });
-            long duration = System.currentTimeMillis() - startTime;
-            int totalRows = 0;
-            for (int[] batch : updateCounts) {
-                for (int count : batch) {
-                    totalRows += count;
-                }
-            }
-            return successResponse(Map.of(
-                    "sourceConnection", sourceConnectionName,
-                    "targetConnection", targetConnectionName,
-                    "targetTable", targetTable,
-                    "rowCount", totalRows,
-                    "batchSize", size,
-                    "durationMs", duration,
-                    "message", String.format("Inserted %d rows from query into %s", totalRows, targetTable)));
-        } catch (Exception e) {
-            return errorResponse(Map.of("sourceConnection", sourceConnectionName, "targetConnection", targetConnectionName, "targetTable", targetTable),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+            int totalRows = BatchInsertHelper.batchInsert(targetJdbc, insertSql, rows, size, BatchInsertHelper.setRowColumns(columns));
+            return success(Map.of(
+                    "sourceConnection", sourceConnectionName, "targetConnection", targetConnectionName,
+                    "targetTable", targetTable, "rowCount", totalRows, "batchSize", size,
+                    "durationMs", System.currentTimeMillis() - startTime,
+                    "message", String.format("Inserted %d rows from query into %s", totalRows, targetTable)
+            ));
+        });
     }
 
     @McpTool(description = "Transform and insert data with column mapping (ETL helper)")
@@ -228,8 +149,9 @@ public class EtlTools {
             @McpToolParam(description = "Source table name") String sourceTable,
             @McpToolParam(description = "Target table name") String targetTable,
             @McpToolParam(description = "Column mappings (e.g., ['id:ID', 'name:FULL_NAME:upper'])") List<String> columnMapping,
-            @McpToolParam(description = "Optional WHERE clause for filtering", required = false) String whereClause) {
-        try {
+            @McpToolParam(description = "Optional WHERE clause for filtering", required = false) String whereClause,
+            @McpToolParam(description = "Batch size for insertion", required = false) Integer batchSize) throws Exception {
+        return safeExecute(() -> {
             validateTransformParams(connectionName, sourceTable, targetTable, columnMapping);
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
@@ -240,69 +162,37 @@ public class EtlTools {
             for (String mapping : columnMapping) {
                 String[] parts = mapping.split(":");
                 if (parts.length < 2) {
-                    return errorResponse(Map.of("connectionName", connectionName, "sourceTable", sourceTable, "targetTable", targetTable),
-                            "Invalid column mapping: " + mapping + ". Expected format: source:target[:transform]", "ValidationException");
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid column mapping: " + mapping + ". Expected format: source:target[:transform] (connectionName=" + connectionName + ", sourceTable=" + sourceTable + ", targetTable=" + targetTable + ")");
                 }
                 sourceColumns.add(parts[0]);
                 targetColumns.add(parts[1]);
                 transforms.add(parts.length >= 3 ? parts[2] : "none");
             }
 
-            StringBuilder selectSql = new StringBuilder("SELECT ");
-            List<String> selectExprs = new ArrayList<>();
-            for (int i = 0; i < sourceColumns.size(); i++) {
-                String src = sourceColumns.get(i);
-                String transform = transforms.get(i);
-                String expr = switch (transform) {
-                    case "upper" -> "UPPER(" + src + ")";
-                    case "lower" -> "LOWER(" + src + ")";
-                    case "trim" -> "TRIM(" + src + ")";
-                    case "int" -> "CAST(" + src + " AS INTEGER)";
-                    case "long" -> "CAST(" + src + " AS BIGINT)";
-                    case "double" -> "CAST(" + src + " AS DOUBLE)";
-                    default -> src;
-                };
-                selectExprs.add(expr + " AS " + targetColumns.get(i));
-            }
-            selectSql.append(String.join(", ", selectExprs));
-            selectSql.append(" FROM ").append(sourceTable);
-            if (whereClause != null && !whereClause.isBlank()) {
-                validateWhereClause(whereClause, "whereClause");
-                selectSql.append(" WHERE ").append(whereClause);
-            }
+            String selectSql = buildTransformSelect(sourceColumns, transforms, targetColumns, sourceTable, whereClause);
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql);
+            if (rows.isEmpty()) return emptyResult();
 
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql.toString());
-            if (rows.isEmpty()) {
-                return successResponse(Map.of("message", "No rows to transform", "rowCount", 0));
-            }
-
-            String columnList = String.join(", ", targetColumns);
-            String placeholderList = String.join(", ", targetColumns.stream().map(c -> "?").toList());
-            String insertSql = String.format("INSERT INTO %s (%s) VALUES (%s)", targetTable, columnList, placeholderList);
+            String insertSql = BatchInsertHelper.buildInsertSql(targetTable, targetColumns);
+            int size = batchSize != null ? batchSize : 1000;
+            if (size <= 0) throw new IllegalArgumentException("batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
-            int[][] updateCounts = jdbcTemplate.batchUpdate(insertSql, rows, 1000, (ps, row) -> {
-                for (int i = 0; i < targetColumns.size(); i++) {
-                    ps.setObject(i + 1, row.get(targetColumns.get(i)));
+            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, insertSql, rows, size, (ps, row) -> {
+                try {
+                    for (int i = 0; i < targetColumns.size(); i++) {
+                        ps.setObject(i + 1, row.get(targetColumns.get(i)));
+                    }
+                } catch (java.sql.SQLException e) {
+                    throw new RuntimeException(e);
                 }
+                return null;
             });
-            long duration = System.currentTimeMillis() - startTime;
-            int totalRows = 0;
-            for (int[] batch : updateCounts) {
-                for (int count : batch) {
-                    totalRows += count;
-                }
-            }
-            return successResponse(Map.of(
-                    "connectionName", connectionName,
-                    "sourceTable", sourceTable,
-                    "targetTable", targetTable,
-                    "rowCount", totalRows,
-                    "durationMs", duration,
-                    "message", String.format("Transformed and inserted %d rows", totalRows)));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName, "sourceTable", sourceTable, "targetTable", targetTable),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+            return success(Map.of(
+                    "connectionName", connectionName, "sourceTable", sourceTable, "targetTable", targetTable,
+                    "rowCount", totalRows, "durationMs", System.currentTimeMillis() - startTime,
+                    "message", String.format("Transformed and inserted %d rows", totalRows)
+            ));
+        });
     }
 
     @McpTool(description = "Upsert data into a table (insert or update based on key columns)")
@@ -310,11 +200,11 @@ public class EtlTools {
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Target table name") String tableName,
             @McpToolParam(description = "Key columns for matching (e.g., ['id'])") List<String> keyColumns,
-            @McpToolParam(description = "List of rows to upsert") List<Map<String, Object>> rows) {
-        try {
+            @McpToolParam(description = "List of rows to upsert") List<Map<String, Object>> rows) throws Exception {
+        return safeExecute(() -> {
             requireNotBlank(connectionName, "connectionName");
             requireNotBlank(tableName, "tableName");
-            validateTableName(tableName);
+            validateIdentifier(tableName, "tableName");
             requireNotEmpty(rows, "rows");
             requireNotEmpty(keyColumns, "keyColumns");
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
@@ -323,35 +213,16 @@ public class EtlTools {
             List<String> allColumns = rows.get(0).keySet().stream().toList();
             String upsertSql = dialect.buildUpsertSql(tableName, allColumns, keyColumns);
             if (upsertSql == null) {
-                return errorResponse(Map.of("connectionName", connectionName, "tableName", tableName),
-                        "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName(),
-                        "UnsupportedOperationException");
+                throw new McpToolException(ErrorCode.UPSERT_NOT_SUPPORTED, "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName() + " (connectionName=" + connectionName + ", tableName=" + tableName + ")");
             }
             long startTime = System.currentTimeMillis();
-            int[][] updateCounts = jdbcTemplate.batchUpdate(upsertSql, rows, 1000, (ps, row) -> {
-                for (int i = 0; i < allColumns.size(); i++) {
-                    ps.setObject(i + 1, row.get(allColumns.get(i)));
-                }
-            });
-            long duration = System.currentTimeMillis() - startTime;
-            int totalRows = 0;
-            for (int[] batch : updateCounts) {
-                for (int count : batch) {
-                    totalRows += count;
-                }
-            }
-            return Map.of(
-                    "success", true,
-                    "connectionName", connectionName,
-                    "tableName", tableName,
-                    "keyColumns", keyColumns,
-                    "rowCount", totalRows,
-                    "durationMs", duration,
-                    "message", String.format("Upserted %d rows into %s", totalRows, tableName));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName, "tableName", tableName),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, upsertSql, rows, 1000, BatchInsertHelper.setRowColumns(allColumns));
+            return success(Map.of(
+                    "connectionName", connectionName, "tableName", tableName,
+                    "keyColumns", keyColumns, "rowCount", totalRows, "durationMs", System.currentTimeMillis() - startTime,
+                    "message", String.format("Upserted %d rows into %s", totalRows, tableName)
+            ));
+        });
     }
 
     @McpTool(description = "Validate data quality in a table (nulls, duplicates, types)")
@@ -359,60 +230,47 @@ public class EtlTools {
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Table name to validate") String tableName,
             @McpToolParam(description = "Columns to check (null for all)", required = false) List<String> columns) {
-        try {
+        return safeExecute(() -> {
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             DatabaseDialect dialect = context.getDialect();
             if (!dialect.isValidIdentifier(tableName)) {
-                return errorResponse(Map.of("connectionName", connectionName, "tableName", tableName),
-                        "Invalid table name: " + tableName, "ValidationException");
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid table name: " + tableName + " (connectionName=" + connectionName + ", tableName=" + tableName + ")");
             }
             String validatedTable = dialect.normalizeTableName(tableName);
+            List<String> colList = (columns == null || columns.isEmpty())
+                    ? jdbcTemplate.queryForList("SELECT column_name FROM user_tab_columns WHERE table_name = ?", validatedTable)
+                            .stream().map(row -> (String) row.get("column_name")).toList()
+                    : columns;
+            for (String column : colList) {
+                if (!dialect.isValidIdentifier(column)) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid column name: " + column + " (connectionName=" + connectionName + ", tableName=" + tableName + ", column=" + column + ")");
+                }
+            }
+            String columnList = colList.stream().map(dialect::quote).reduce((a, b) -> a + ", " + b).orElse("");
             List<Map<String, Object>> issues = new ArrayList<>();
             int totalChecks = 0;
-            if (columns == null || columns.isEmpty()) {
-                columns = jdbcTemplate.queryForList("SELECT column_name FROM user_tab_columns WHERE table_name = ?", validatedTable)
-                        .stream().map(row -> (String) row.get("column_name")).toList();
-            }
-            for (String column : columns) {
-                if (!dialect.isValidIdentifier(column)) {
-                    return errorResponse(Map.of("connectionName", connectionName, "tableName", tableName, "column", column),
-                            "Invalid column name: " + column, "ValidationException");
-                }
-            }
-            String columnList = columns.stream().map(dialect::quote).reduce((a, b) -> a + ", " + b).orElse("");
-            for (String column : columns) {
+            for (String column : colList) {
                 totalChecks++;
-                String quotedColumn = dialect.quote(column);
-                Long nullCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + validatedTable + " WHERE " + quotedColumn + " IS NULL", Long.class);
-                if (nullCount != null && nullCount > 0) {
-                    issues.add(Map.of("type", "NULL_VALUES", "column", column, "count", nullCount, "severity", "WARNING"));
-                }
+                Long nullCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + validatedTable + " WHERE " + dialect.quote(column) + " IS NULL", Long.class);
+                if (nullCount != null && nullCount > 0) issues.add(Map.of("type", "NULL_VALUES", "column", column, "count", nullCount, "severity", "WARNING"));
             }
             totalChecks++;
-            Long duplicateCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + validatedTable + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)", Long.class);
-            if (duplicateCount != null && duplicateCount > 0) {
-                issues.add(Map.of("type", "DUPLICATES", "columns", columns, "count", duplicateCount, "severity", "ERROR"));
-            }
+            Long duplicateCount = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + validatedTable + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)", Long.class);
+            if (duplicateCount != null && duplicateCount > 0) issues.add(Map.of("type", "DUPLICATES", "columns", colList, "count", duplicateCount, "severity", "ERROR"));
             totalChecks++;
             Long rowCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + validatedTable, Long.class);
-            Map<String, Object> summary = Map.of(
-                    "table", validatedTable,
-                    "totalRows", rowCount != null ? rowCount : 0,
-                    "columnsChecked", columns.size(),
-                    "issuesFound", issues.size(),
-                    "totalChecks", totalChecks,
-                    "passed", totalChecks - issues.size(),
-                    "failed", issues.size(),
-                    "qualityScore", totalChecks > 0 ? (double) (totalChecks - issues.size()) / totalChecks * 100 : 100.0);
-            return successResponse(Map.of(
-                    "summary", summary,
+            double score = totalChecks > 0 ? (double) (totalChecks - issues.size()) / totalChecks * 100 : 100.0;
+            return success(Map.of(
+                    "summary", Map.of("table", validatedTable, "totalRows", rowCount != null ? rowCount : 0,
+                            "columnsChecked", colList.size(), "issuesFound", issues.size(),
+                            "totalChecks", totalChecks, "passed", totalChecks - issues.size(),
+                            "failed", issues.size(), "qualityScore", score),
                     "issues", issues,
-                    "message", String.format("Data quality check completed: %.1f%% passed", (double) (totalChecks - issues.size()) / totalChecks * 100)));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName, "tableName", tableName),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+                    "message", String.format("Data quality check completed: %.1f%% passed", score)
+            ));
+        });
     }
 
     @McpTool(description = "Export query results to a table with automatic batching")
@@ -420,204 +278,189 @@ public class EtlTools {
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Source SELECT query") String sourceSql,
             @McpToolParam(description = "Target table name") String targetTable,
-            @McpToolParam(description = "Batch size for processing", required = false) Integer batchSize) {
-        try {
+            @McpToolParam(description = "Batch size for processing", required = false) Integer batchSize) throws Exception {
+        return safeExecute(() -> {
             ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
             JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             DatabaseDialect dialect = context.getDialect();
             if (!dialect.isValidIdentifier(targetTable)) {
-                return errorResponse(Map.of("connectionName", connectionName),
-                        "Invalid target table name: " + targetTable, "ValidationException");
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid target table name: " + targetTable + " (connectionName=" + connectionName + ")");
             }
             String validatedTargetTable = dialect.normalizeTableName(targetTable);
             int size = batchSize != null ? batchSize : 1000;
             long startTime = System.currentTimeMillis();
             int totalRows = 0;
+            var repo = context.getReadRepository();
             String continuationToken = null;
+            int maxPages = 500; // safety limit: max 500 pages × batchSize rows
+            int pageCount = 0;
             do {
-                PaginatedQueryResult result = context.getReadRepository().executeQuery(sourceSql, size, continuationToken);
-                if (result.rows().isEmpty()) {
-                    break;
-                }
+                PaginatedQueryResult result = repo.executeQuery(sourceSql, size, continuationToken);
+                if (result.rows().isEmpty()) break;
                 List<Map<String, Object>> rows = result.rows();
                 List<String> columns = rows.get(0).keySet().stream().toList();
-                String columnList = String.join(", ", columns);
-                String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
-                String insertSql = String.format("INSERT INTO %s (%s) VALUES (%s)", validatedTargetTable, columnList, placeholderList);
-                jdbcTemplate.batchUpdate(insertSql, rows, size, (ps, row) -> {
-                    for (int i = 0; i < columns.size(); i++) {
-                        ps.setObject(i + 1, row.get(columns.get(i)));
-                    }
-                });
+                String insertSql = BatchInsertHelper.buildInsertSql(validatedTargetTable, columns);
+                BatchInsertHelper.batchInsert(jdbcTemplate, insertSql, rows, size, BatchInsertHelper.setRowColumns(columns));
                 totalRows += rows.size();
                 continuationToken = result.continuationToken();
+                if (++pageCount >= maxPages) {
+                    log.warn("exportQueryToTable reached maxPages={} for table={}, stopping", maxPages, validatedTargetTable);
+                    break;
+                }
             } while (continuationToken != null && !continuationToken.isBlank());
-            long duration = System.currentTimeMillis() - startTime;
-            return Map.of(
-                    "success", true,
-                    "connectionName", connectionName,
-                    "sourceQuery", sourceSql,
-                    "targetTable", validatedTargetTable,
-                    "rowCount", totalRows,
-                    "batchSize", size,
-                    "durationMs", duration,
-                    "message", String.format("Exported %d rows to %s", totalRows, validatedTargetTable));
-        } catch (Exception e) {
-            return errorResponse(Map.of("connectionName", connectionName, "targetTable", targetTable),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
+            return success(Map.of(
+                    "connectionName", connectionName, "sourceQuery", sourceSql,
+                    "targetTable", validatedTargetTable, "rowCount", totalRows, "batchSize", size,
+                    "durationMs", System.currentTimeMillis() - startTime,
+                    "message", String.format("Exported %d rows to %s", totalRows, validatedTargetTable)
+            ));
+        });
     }
 
-    // ─── ETL Job Management (from EtlJobTools) ───────────────────────────────
-
     @McpTool(description = "Submit an ETL job for execution (MigrationJob DSL)")
-    public Map<String, Object> submitEtlJob(
-            @McpToolParam(description = "Job definition (id, name, description, steps)") Object jobDefinition) {
-        @SuppressWarnings("unchecked")
-        Map<String, Object> jd = (Map<String, Object>) jobDefinition;
-        try {
+    public Map<String, Object> submitEtlJob(@McpToolParam(description = "Job definition (id, name, description, steps)") Object jobDefinition) {
+        return safeExecute(() -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> jd = (Map<String, Object>) jobDefinition;
             String jobId = (String) jd.get("id");
             String jobName = (String) jd.get("name");
             String description = (String) jd.getOrDefault("description", "");
-            @SuppressWarnings("unchecked")
-            List<?> rawSteps = (List<?>) jd.get("steps");
-            if (!(rawSteps instanceof List<?>)) {
-                throw new IllegalArgumentException("steps must be a list");
-            }
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> stepDefs = (List<Map<String, Object>>) rawSteps;
-            if (stepDefs == null) {
-                throw new IllegalArgumentException("steps must not be null");
-            }
+            List<Map<String, Object>> stepDefs = (List<Map<String, Object>>) jd.get("steps");
             requireNotEmpty(stepDefs, "steps");
             List<Step> steps = new ArrayList<>();
             for (Map<String, Object> stepDef : stepDefs) {
                 String stepId = (String) stepDef.get("id");
                 String typeStr = (String) stepDef.get("type");
-                if (stepId == null || stepId.isBlank()) {
-                    log.warn("Skipping step with null or blank id");
-                    continue;
-                }
-                if (typeStr == null || typeStr.isBlank()) {
-                    log.warn("Skipping step with null or blank type for step id: {}", stepId);
-                    continue;
-                }
+                if (stepId == null || stepId.isBlank()) { log.warn("Skipping step with null or blank id"); continue; }
+                if (typeStr == null || typeStr.isBlank()) { log.warn("Skipping step with null or blank type for step id: {}", stepId); continue; }
                 StepType type = StepType.from(typeStr);
-                List<String> dependsOn = new ArrayList<>();
+                List<String> dependsOn;
                 if (stepDef.containsKey("dependsOn")) {
                     Object deps = stepDef.get("dependsOn");
                     if (deps instanceof List<?> depList) {
-                        for (Object dep : depList) {
-                            dependsOn.add(dep.toString());
-                        }
+                        dependsOn = new ArrayList<>();
+                        depList.forEach(dep -> dependsOn.add(dep.toString()));
                     } else if (deps instanceof String depStr) {
                         dependsOn = Arrays.asList(depStr.split(","));
+                    } else {
+                        dependsOn = new ArrayList<>();
                     }
+                } else {
+                    dependsOn = new ArrayList<>();
                 }
-                String connection = (String) stepDef.get("connection");
-                String sourceSql = (String) stepDef.get("sourceSql");
-                String targetTable = (String) stepDef.get("targetTable");
-                String targetConnection = (String) stepDef.get("targetConnection");
                 @SuppressWarnings("unchecked")
                 Map<String, Object> params = new HashMap<>();
                 if (stepDef.containsKey("params")) {
                     Object rawParams = stepDef.get("params");
-                    if (!(rawParams instanceof Map<?, ?>)) {
-                        throw new IllegalArgumentException("params must be a map");
-                    }
+                    if (!(rawParams instanceof Map<?, ?>)) throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "params must be a map");
                     params.putAll((Map<String, Object>) rawParams);
                 }
-                steps.add(new Step(stepId, type, dependsOn, connection, sourceSql, targetTable, targetConnection, params));
+                steps.add(new Step(stepId, type, dependsOn,
+                        (String) stepDef.get("connection"), (String) stepDef.get("sourceSql"),
+                        (String) stepDef.get("targetTable"), (String) stepDef.get("targetConnection"), params));
             }
-            MigrationJob job = new MigrationJob(jobId, jobName, description, steps);
-            JobExecution execution = executionEngine.submit(job);
-            return Map.of(
-                    "success", true,
-                    "jobId", jobId,
-                    "jobName", jobName,
-                    "totalSteps", steps.size(),
-                    "status", execution.status(),
-                    "message", "Job submitted successfully");
-        } catch (Exception e) {
-            log.warn("Failed to submit ETL job", e);
-            return errorResponse(Map.of(), e.getMessage(), e.getClass().getSimpleName());
-        }
+            JobExecution execution = executionEngine.submit(new MigrationJob(jobId, jobName, description, steps));
+            return success(Map.of(
+                    "jobId", jobId, "jobName", jobName, "totalSteps", steps.size(),
+                    "status", execution.status(), "message", "Job submitted successfully"
+            ));
+        });
     }
 
     @McpTool(description = "Get the status of an ETL job")
-    public Map<String, Object> getJobStatus(
-            @McpToolParam(description = "Job identifier") String jobId) {
-        try {
+    public Map<String, Object> getJobStatus(@McpToolParam(description = "Job identifier") String jobId) {
+        return safeExecute(() -> {
             Optional<JobExecution> execution = executionEngine.getExecution(jobId);
-            if (execution.isEmpty()) {
-                return errorResponse(Map.of("jobId", jobId), "Job not found: " + jobId, "ValidationException");
-            }
-            JobExecution exec = execution.get();
+            if (execution.isEmpty()) throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Job not found: " + jobId + " (jobId=" + jobId + ")");
+            var exec = execution.get();
             List<Map<String, Object>> stepStates = exec.stepStates().entrySet().stream()
                     .map(e -> {
-                        com.entropy.database.mcp.etl.StepExecutionState state = e.getValue();
-                        Map<String, Object> stepMap = new LinkedHashMap<>();
-                        stepMap.put("stepId", state.stepId());
-                        stepMap.put("status", state.status());
-                        stepMap.put("startedAt", state.startedAt() != null ? state.startedAt().toString() : null);
-                        stepMap.put("completedAt", state.completedAt() != null ? state.completedAt().toString() : null);
-                        stepMap.put("rowsAffected", state.rowsAffected());
-                        stepMap.put("error", state.error());
-                        return stepMap;
-                    })
-                    .collect(Collectors.toList());
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("jobId", exec.jobId());
-            result.put("jobName", exec.jobName());
-            result.put("status", exec.status());
-            result.put("startedAt", exec.startedAt() != null ? exec.startedAt().toString() : null);
-            result.put("completedAt", exec.completedAt() != null ? exec.completedAt().toString() : null);
-            result.put("progress", String.format("%.1f%%", exec.getProgress()));
-            result.put("steps", stepStates);
-            return successResponse(Map.of("job", result));
-        } catch (Exception e) {
-            return errorResponse(Map.of("jobId", jobId), e.getMessage(), e.getClass().getSimpleName());
-        }
+                        var state = e.getValue();
+                        return context(
+                                "stepId", state.stepId(), "status", state.status(),
+                                "startedAt", state.startedAt() != null ? state.startedAt().toString() : null,
+                                "completedAt", state.completedAt() != null ? state.completedAt().toString() : null,
+                                "rowsAffected", state.rowsAffected(), "error", state.error());
+                    }).toList();
+            return success(Map.of("job", context(
+                    "jobId", exec.jobId(), "jobName", exec.jobName(), "status", exec.status(),
+                    "startedAt", exec.startedAt() != null ? exec.startedAt().toString() : null,
+                    "completedAt", exec.completedAt() != null ? exec.completedAt().toString() : null,
+                    "progress", String.format("%.1f%%", exec.getProgress()),
+                    "steps", stepStates)));
+        });
     }
 
     @McpTool(description = "List all submitted ETL jobs")
     public Map<String, Object> listJobs() {
-        try {
-            Collection<JobExecution> executions = executionEngine.listExecutions();
-            List<Map<String, Object>> jobs = executions.stream()
+        return safeExecute(() -> {
+            List<Map<String, Object>> jobs = executionEngine.listExecutions().stream()
                     .map(exec -> Map.<String, Object>of(
-                            "jobId", exec.jobId(),
-                            "jobName", exec.jobName(),
-                            "status", exec.status(),
+                            "jobId", exec.jobId(), "jobName", exec.jobName(), "status", exec.status(),
                             "startedAt", exec.startedAt() != null ? exec.startedAt().toString() : null,
                             "completedAt", exec.completedAt() != null ? exec.completedAt().toString() : null,
                             "progress", String.format("%.1f%%", exec.getProgress()),
                             "totalSteps", exec.stepStates().size(),
                             "completedSteps", exec.getCompletedStepIds().size(),
-                            "failedSteps", exec.getFailedStepIds().size()
-                    ))
+                            "failedSteps", exec.getFailedStepIds().size()))
                     .sorted(Comparator.comparing(m -> (String) m.get("jobId")))
-                    .collect(Collectors.toList());
-            return successResponse(Map.of("totalJobs", jobs.size(), "jobs", jobs));
-        } catch (Exception e) {
-            return errorResponse(Map.of(), e.getMessage(), e.getClass().getSimpleName());
-        }
+                    .toList();
+            return success(Map.of("totalJobs", jobs.size(), "jobs", jobs));
+        });
     }
 
     @McpTool(description = "Stop a running ETL job")
-    public Map<String, Object> stopJob(
-            @McpToolParam(description = "Job identifier to stop") String jobId) {
-        try {
+    public Map<String, Object> stopJob(@McpToolParam(description = "Job identifier to stop") String jobId) {
+        return safeExecute(() -> {
             Optional<JobExecution> execution = executionEngine.getExecution(jobId);
-            if (execution.isEmpty()) {
-                return errorResponse(Map.of("jobId", jobId), "Job not found: " + jobId, "ValidationException");
-            }
+            if (execution.isEmpty()) throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Job not found: " + jobId + " (jobId=" + jobId + ")");
             log.warn("Stop requested for job: {} (not implemented in demo)", jobId);
-            return successResponse(Map.of(
-                    "jobId", jobId,
-                    "message", "Stop signal sent (requires production job scheduler for graceful shutdown)"));
-        } catch (Exception e) {
-            return errorResponse(Map.of("jobId", jobId), e.getMessage(), e.getClass().getSimpleName());
+            return success(Map.of("jobId", jobId, "message", "Stop signal sent (requires production job scheduler for graceful shutdown)"));
+        });
+    }
+
+    private static final java.util.function.Function<String, String> IDENTITY = java.util.function.Function.identity();
+    private static final java.util.Map<String, java.util.function.Function<String, String>> TRANSFORM_FN = java.util.Map.of(
+            "upper",  s -> "UPPER(" + s + ")",
+            "lower",  s -> "LOWER(" + s + ")",
+            "trim",   s -> "TRIM(" + s + ")",
+            "int",    s -> "CAST(" + s + " AS INTEGER)",
+            "long",   s -> "CAST(" + s + " AS BIGINT)",
+            "double", s -> "CAST(" + s + " AS DOUBLE)"
+    );
+
+    private String buildTransformSelect(List<String> sourceColumns, List<String> transforms, List<String> targetColumns,
+                                         String sourceTable, String whereClause) {
+        List<String> selectExprs = new ArrayList<>();
+        for (int i = 0; i < sourceColumns.size(); i++) {
+            String src = sourceColumns.get(i);
+            String transform = transforms.get(i);
+            String expr = TRANSFORM_FN.getOrDefault(transform, IDENTITY).apply(src);
+            selectExprs.add(expr + " AS " + targetColumns.get(i));
+        }
+        String sql = "SELECT " + String.join(", ", selectExprs) + " FROM " + sourceTable;
+        if (whereClause != null && !whereClause.isBlank()) {
+            validateWhereClause(whereClause, "whereClause");
+            sql += " WHERE " + whereClause;
+        }
+        return sql;
+    }
+
+    private void validateTransformParams(String connectionName, String sourceTable,
+                                          String targetTable, List<String> columnMapping) {
+        requireNotBlank(connectionName, "connectionName");
+        requireNotBlank(sourceTable, "sourceTable");
+        requireNotBlank(targetTable, "targetTable");
+        validateIdentifier(sourceTable, "sourceTable");
+        validateIdentifier(targetTable, "targetTable");
+        requireNotEmpty(columnMapping, "columnMapping");
+        for (String mapping : columnMapping) {
+            String[] parts = mapping.split(":");
+            if (parts.length < 2) {
+                throw new McpValidationException(
+                        com.entropy.database.mcp.exception.ErrorCode.PARAMETER_VALIDATION_FAILED,
+                        "Invalid column mapping: " + mapping + ". Expected format: source:target[:transform]");
+            }
         }
     }
 }

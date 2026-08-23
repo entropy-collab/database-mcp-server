@@ -33,7 +33,7 @@ import java.util.stream.Collectors;
 @ConfigurationProperties(prefix = "entropy.mcp.database.masking")
 public class DataMaskingServiceImpl implements DataMaskingService {
 
-    private static final Logger log = LoggerFactory.getLogger(DataMaskingServiceImpl.class);
+    private final Logger log = LoggerFactory.getLogger(getClass());
 
     // Common PII patterns
     private static final List<MaskingRule> DEFAULT_RULES = List.of(

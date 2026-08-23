@@ -16,29 +16,45 @@
 package com.entropy.database.mcp.dialect;
 
 import javax.sql.DataSource;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.ServiceLoader;
 
+/**
+ * Resolves {@link DatabaseDialect} implementations by name or JDBC URL.
+ *
+ * <p>Follows the Strategy pattern: callers ask for a dialect by name and receive
+ * a concrete implementation suitable for that database product. This mirrors
+ * Spring Framework's {@code AbstractRoutingDataSource} resolution strategy.
+ *
+ * <p>Dialects are discovered via {@link ServiceLoader} from the classpath,
+ * allowing custom dialects to be plugged in without modifying this class.
+ */
 public class DialectResolver {
 
-    private final java.util.Map<String, DatabaseDialect> customDialects;
+    private final Map<String, DatabaseDialect> customDialects;
 
     public DialectResolver() {
         this.customDialects = loadCustomDialects();
     }
 
+    /**
+     * Resolve a dialect by its registered name.
+     *
+     * @param dialectName the dialect name (e.g., "oracle", "mysql"), or null for generic
+     * @param dataSource  the datasource to use for auto-detection when dialectName is "auto"
+     * @return the appropriate dialect implementation
+     */
     public DatabaseDialect resolve(String dialectName, DataSource dataSource) {
         if (dialectName == null || dialectName.isBlank()) {
             return new GenericDialect();
         }
         String lower = dialectName.toLowerCase();
-        
-        // Check custom dialects first
+
+        // Check SPI-discovered custom dialects first
         if (customDialects.containsKey(lower)) {
             return customDialects.get(lower);
         }
-        
+
         return switch (lower) {
             case "oracle" -> new OracleDialect();
             case "mysql" -> new MySqlDialect();
@@ -52,14 +68,21 @@ public class DialectResolver {
         };
     }
 
+    // ─── SPI Discovery ────────────────────────────────────────────────────
+
     private Map<String, DatabaseDialect> loadCustomDialects() {
-        Map<String, DatabaseDialect> map = new HashMap<>();
-        ServiceLoader<DialectProvider> loader = ServiceLoader.load(DialectProvider.class);
-        for (DialectProvider provider : loader) {
-            map.put(provider.getName().toLowerCase(), provider.getDialect());
-        }
-        return map;
+        return ServiceLoader.load(DialectProvider.class)
+                .stream()
+                .map(ServiceLoader.Provider::get)
+                .collect(java.util.stream.Collectors.toMap(
+                        DialectProvider::getName,
+                        DialectProvider::getDialect,
+                        (a, b) -> a,
+                        java.util.LinkedHashMap::new
+                ));
     }
+
+    // ─── JDBC URL Auto-Detection ───────────────────────────────────────────
 
     private DatabaseDialect detectFromJdbcUrl(DataSource dataSource) {
         try (var connection = dataSource.getConnection()) {
@@ -71,9 +94,9 @@ public class DialectResolver {
                 case "postgres" -> new PostgresDialect();
                 case "sqlserver" -> new SqlServerDialect();
                 case "sqlite" -> new SqliteDialect();
-            case "db2" -> new Db2Dialect();
-            case "h2" -> new H2Dialect();
-            default -> new GenericDialect();
+                case "db2" -> new Db2Dialect();
+                case "h2" -> new H2Dialect();
+                default -> new GenericDialect();
             };
         } catch (Exception e) {
             return new GenericDialect();

@@ -15,15 +15,14 @@
  */
 package com.entropy.database.mcp.tools;
 
-/**
- * Common annotation parameter values shared across all MCP tool classes.
- * <p>
- * Centralises the {@code @McpToolParam} description for the {@code connection}
- * parameter so it only needs to be maintained in one place. All tools reference
- * these constants instead of duplicating the description string.
- */
 import java.util.Map;
 
+/**
+ * Common annotation parameter values and error messages shared across all MCP tool classes.
+ * <p>
+ * Centralises {@code @McpToolParam} descriptions, user-facing error messages, and
+ * exception cause names so they only need to be maintained in one place.
+ */
 public final class ToolParams {
 
     private ToolParams() {
@@ -39,5 +38,28 @@ public final class ToolParams {
     /**
      * Standard SQL templates shared across tool classes.
      */
-    public static final Map<String, String> TEMPLATES = Map.of("select_sql", "SELECT * FROM {table} WHERE {condition} LIMIT {limit}", "tables_sql", "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = '{schema}'", "table_detail_sql", "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = '{table}' AND table_schema = '{schema}' ORDER BY ordinal_position");
+    public static final Map<String, String> TEMPLATES = Map.of(
+            "select_sql", "SELECT * FROM {table} WHERE {condition} LIMIT {limit}",
+            "tables_sql", "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = '{schema}'",
+            "table_detail_sql", "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = '{table}' AND table_schema = '{schema}' ORDER BY ordinal_position"
+    );
+
+    // ─── Error messages ─────────────────────────────────────────────────────
+
+    public static final String DDL_DISABLED_MSG =
+            "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable.";
+
+    public static final String GATEWAY_NOT_ENABLED_MSG = "Cross-database gateway is not enabled";
+
+    public static final String FEDERATED_GATEWAY_NOT_ENABLED_MSG = "Federated gateway is not enabled";
+
+    public static final String CONNECTION_NOT_FOUND = "Connection not found: ";
+
+    // ─── Exception cause names ──────────────────────────────────────────────
+
+    public static final String CAUSE_DISABLED = "DisabledException";
+    public static final String CAUSE_VALIDATION = "ValidationException";
+    public static final String CAUSE_NOT_FOUND = "NotFoundException";
+    public static final String CAUSE_SECURITY = "SecurityException";
+    public static final String CAUSE_CONFIGURATION = "ConfigurationException";
 }

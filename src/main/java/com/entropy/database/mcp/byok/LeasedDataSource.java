@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.byok;
 
+import com.entropy.database.mcp.exception.McpLeaseExpiredException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -68,7 +69,7 @@ public class LeasedDataSource {
         // Check max lifetime first
         if (now.isAfter(maxLifetime)) {
             log.warn("Datasource {} exceeded max lifetime, will be replaced", key);
-            throw new LeaseExpiredException("Datasource exceeded max lifetime: " + key);
+            throw new McpLeaseExpiredException("Datasource exceeded max lifetime: " + key);
         }
         
         // Renew lease

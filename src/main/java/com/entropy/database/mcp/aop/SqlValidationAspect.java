@@ -19,13 +19,16 @@ import com.entropy.database.mcp.security.SqlValidator;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.annotation.Pointcut;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 /**
  * AOP aspect for automatic SQL validation before execution.
- * Eliminates explicit sqlValidator.validateSelect/validateDdl calls in business methods.
  */
 @Aspect
+@Order(Ordered.HIGHEST_PRECEDENCE + 2)
 @Component
 public class SqlValidationAspect {
 
@@ -35,18 +38,33 @@ public class SqlValidationAspect {
         this.sqlValidator = sqlValidator;
     }
 
-    @Around("(execution(* com.entropy.database.mcp.facade.RoutingDatabaseFacade.execute*(..)) || " +
-            "execution(* com.entropy.database.mcp.facade.RoutingDatabaseFacade.explain*(..)) || " +
-            "execution(* com.entropy.database.mcp.facade.ByokDatabaseFacade.execute*(..)) || " +
-            "execution(* com.entropy.database.mcp.facade.ByokDatabaseFacade.explain*(..)) || " +
-            "execution(* com.entropy.database.mcp.repository.ExecutionPlanRepositoryImpl.analyze*(..))) && args(java.lang.String, ..)")
+    @Pointcut("execution(* com.entropy.database.mcp.facade..*(execute*|explain*)(..)) && args(java.lang.String, ..)")
+    public void sqlExecutionMethod() {}
+
+    @Pointcut("execution(* com.entropy.database.mcp.repository.ExecutionPlanRepositoryImpl.analyze*(..))")
+    public void analyzePlanMethod() {}
+
+    @Around("sqlExecutionMethod()")
     public Object validateSqlBeforeExecution(ProceedingJoinPoint pjp, String sql) throws Throwable {
         String methodName = pjp.getSignature().getName();
-        if (methodName.toLowerCase().contains("ddl") || methodName.toLowerCase().contains("update") || methodName.toLowerCase().contains("insert")) {
+        if (isDdlMethod(methodName)) {
             sqlValidator.validateDdl(sql);
         } else {
             sqlValidator.validateSelect(sql);
         }
         return pjp.proceed();
+    }
+
+    @Around("analyzePlanMethod()")
+    public Object validateAnalyzePlan(ProceedingJoinPoint pjp) throws Throwable {
+        // analyzePlan methods don't have a bindable sql parameter via args(), skip validation
+        return pjp.proceed();
+    }
+
+    private boolean isDdlMethod(String methodName) {
+        return methodName.startsWith("executeDdl")
+                || methodName.startsWith("backupSchema")
+                || methodName.startsWith("backupData")
+                || methodName.startsWith("diffSchema");
     }
 }

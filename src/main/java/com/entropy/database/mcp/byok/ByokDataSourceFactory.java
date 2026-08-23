@@ -141,6 +141,7 @@ public class ByokDataSourceFactory {
         DatabaseProperties dbProps = databaseProperties.get();
         CacheConfig cc = cacheConfig.get();
         int fetchSize = defaultFetchSize;
+        int queryTimeoutSeconds = dbProps.query().timeoutSeconds();
 
         DatabaseCache cache = new DatabaseCacheImpl(
                 cc.maxSize(), cc.queryCacheTtl(), cc.metadataCacheTtl());
@@ -150,7 +151,7 @@ public class ByokDataSourceFactory {
                 jdbcTemplate, dialect, validator, cache, masking,
                 DatabaseReadRepository.DEFAULT_MAX_ROWS,
                 DatabaseReadRepository.DEFAULT_MAX_RESULT_ROWS,
-                fetchSize, null);
+                fetchSize, queryTimeoutSeconds, null);
         ByokWriteRepository writeRepo = new ByokWriteRepository(jdbcTemplate);
         ExecutionPlanRepository executionPlanRepo = new ExecutionPlanRepositoryImpl(
                 jdbcTemplate, dialect, validator);

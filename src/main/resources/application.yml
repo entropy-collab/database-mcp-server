@@ -23,12 +23,18 @@ logging:
     org.springframework.ai.tool: DEBUG
 
 spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
   ai:
     mcp:
       server:
         name: database-mcp-server
         version: 0.1.0
         protocol: STATELESS
+        tool-callback:
+          auto-detect: true
 
   main:
     banner-mode: off
@@ -49,6 +55,16 @@ entropy:
         retention-days: 7
         sql-truncate-length: 200
         entry-sql-truncate-length: 500
+        slow-query-threshold-ms: 5000
+        max-slow-queries: 1000
+        max-sql-patterns: 500
+      quality:
+        enabled: true
+        max-sample-rows: 10000
+        default-null-rate-threshold: 0.05
+        default-duplicate-rate-threshold: 0.01
+        alert-on-critical: true
+        alert-threshold-issues: 3
       ddl:
         allowed: true
       security:
@@ -74,6 +90,39 @@ entropy:
         cache-sql-limit: 2048
       metrics:
         slow-query-threshold-ms: 5000
+      backup:
+        enabled: true
+        incremental-enabled: true
+        max-backup-rows: 500000
+        retention-days: 30
+        auto-cleanup: true
+        default-backup-schema: backup_schema
+        recover-mode-cascade: true
+      lineage:
+        enabled: true
+        foreign-key-enabled: true
+        view-dependency-enabled: true
+        max-traversal-depth: 10
+        auto-analyze: true
+        max-tables-per-graph: 200
+      optimizer:
+        enabled: true
+        max-suggestions-per-query: 10
+        max-index-recommendations: 5
+        enable-composite-index-analysis: true
+      catalog:
+        enabled: true
+        auto-generate-comments: true
+        enable-sensitive-detection: true
+        max-search-results: 100
+      cdc:
+        enabled: true
+        enable-realtime-streaming: false
+        max-events-per-poll: 1000
+        default-poll-interval-ms: 1000
+        enable-mirror-tables: true
+        max-mirror-tasks: 10
+        enable-event-listeners: true
     gateway:
       enabled: true
     monitoring:

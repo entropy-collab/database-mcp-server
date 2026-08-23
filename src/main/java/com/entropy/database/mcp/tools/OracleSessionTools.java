@@ -15,29 +15,24 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 
-import static com.entropy.database.mcp.tools.McpToolUtils.errorResponse;
-import static com.entropy.database.mcp.tools.McpToolUtils.successResponse;
 import static com.entropy.database.mcp.util.ValidationUtils.requireNotBlank;
 
 /**
  * Oracle session management tools.
  */
-@Configuration
-public class OracleSessionTools {
-
-    private static final Logger log = LoggerFactory.getLogger(OracleSessionTools.class);
+@Component
+public class OracleSessionTools extends McpToolBase {
 
     private final DynamicDataSourceManager dataSourceManager;
     private final boolean ddlAllowed;
@@ -53,24 +48,21 @@ public class OracleSessionTools {
             @McpToolParam(description = "Session identifier in format 'sid,serial#' (e.g. '123,4567')") String sessionId,
             @McpToolParam(description = "Kill mode: IMMEDIATE (default) or POST_TRANSACTION", required = false) String mode,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        requireNotBlank(sessionId, "sessionId");
-        requireNotBlank(connection, "connection");
-        String trimmed = sessionId.trim();
-        if (!trimmed.matches("\\d+,\\d+")) {
-            return errorResponse(Map.of("sessionId", sessionId), "sessionId must be in format 'sid,serial#' (e.g. '123,4567')", "ValidationException");
-        }
+        return safeExecute(() -> {
+            requireNotBlank(sessionId, "sessionId");
+            requireNotBlank(connection, "connection");
+            String trimmed = sessionId.trim();
+            if (!trimmed.matches("\\d+,\\d+")) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "sessionId must be in format 'sid,serial#' (e.g. '123,4567') (sessionId=" + sessionId + ")");
+            }
 
-        String killMode = (mode == null || mode.isBlank()) ? "IMMEDIATE" : mode.trim().toUpperCase();
-        if (!killMode.equals("IMMEDIATE") && !killMode.equals("POST_TRANSACTION")) {
-            return errorResponse(Map.of("mode", mode), "mode must be IMMEDIATE or POST_TRANSACTION", "ValidationException");
-        }
+            String killMode = (mode == null || mode.isBlank()) ? "IMMEDIATE" : mode.trim().toUpperCase();
+            if (!killMode.equals("IMMEDIATE") && !killMode.equals("POST_TRANSACTION")) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "mode must be IMMEDIATE or POST_TRANSACTION");
+            }
 
-        try {
-            Map<String, Object> errorCtx = buildContext(trimmed, killMode, connection);
             if (!ddlAllowed) {
-                return errorResponse(errorCtx,
-                        "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable.",
-                        "ConfigurationException");
+                throw new McpToolException(ErrorCode.SQL_OPERATION_NOT_ALLOWED, "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable. (sessionId=" + trimmed + ", connection=" + connection + ")");
             }
 
             ByokDataSourceContext context = dataSourceManager.acquire(connection);
@@ -79,40 +71,16 @@ public class OracleSessionTools {
 
             String sql = dialect.killSessionSql(trimmed, killMode);
             if (sql == null) {
-                Map<String, Object> ctx = new LinkedHashMap<>();
-                ctx.put("sessionId", trimmed);
-                ctx.put("mode", killMode);
-                ctx.put("connection", connection);
-                return errorResponse(ctx,
-                        "Kill session is not supported for dialect: " + dialect.getClass().getSimpleName(),
-                        dialect.getClass().getSimpleName());
+                throw new McpToolException(ErrorCode.KILL_SESSION_NOT_SUPPORTED, "Kill session is not supported for dialect: " + dialect.getClass().getSimpleName() + " (sessionId=" + trimmed + ", mode=" + killMode + ", connection=" + connection + ")");
             }
 
             long startTime = System.currentTimeMillis();
             int affected = jdbcTemplate.update(sql);
-            long duration = System.currentTimeMillis() - startTime;
-
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("sql", sql);
-            result.put("sessionId", trimmed);
-            result.put("mode", killMode);
-            result.put("affectedRows", affected);
-            result.put("durationMs", duration);
-            result.put("connectionName", connection);
-            result.put("message", "Session killed successfully");
-            return successResponse(result);
-        } catch (Exception e) {
-            log.error("killSession failed: sessionId={}, mode={}, connection={}", trimmed, killMode, connection, e);
-            return errorResponse(buildContext(trimmed, killMode, connection),
-                    e.getMessage(), e.getClass().getSimpleName());
-        }
-    }
-
-    private Map<String, Object> buildContext(String sessionId, String mode, String connection) {
-        Map<String, Object> ctx = new LinkedHashMap<>();
-        ctx.put("sessionId", sessionId);
-        ctx.put("mode", mode);
-        ctx.put("connection", connection);
-        return ctx;
+            return success(Map.of(
+                    "sql", sql, "sessionId", trimmed, "mode", killMode,
+                    "affectedRows", affected, "durationMs", System.currentTimeMillis() - startTime,
+                    "connectionName", connection, "message", "Session killed successfully"
+            ));
+        });
     }
 }

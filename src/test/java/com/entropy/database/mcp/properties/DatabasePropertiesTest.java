@@ -18,6 +18,13 @@ package com.entropy.database.mcp.properties;
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import com.entropy.database.mcp.properties.QualityProperties;
+import com.entropy.database.mcp.properties.BackupProperties;
+import com.entropy.database.mcp.properties.LineageProperties;
+import com.entropy.database.mcp.properties.OptimizerProperties;
+import com.entropy.database.mcp.properties.CatalogProperties;
+import com.entropy.database.mcp.properties.CdcProperties;
+
 class DatabasePropertiesTest {
 
     @Test
@@ -27,13 +34,19 @@ class DatabasePropertiesTest {
             "   ",
             new DatabaseProperties.QueryProperties(100, 30, true, 10000, 500, 100),
             new DatabaseProperties.AuditProperties(true, 7),
+            new QualityProperties(),
             new DatabaseProperties.DdlProperties(false),
             new DatabaseProperties.SecurityProperties(10, 5),
             new DatabaseProperties.EtlProperties(4),
             new DatabaseProperties.CacheProperties(1000, 30, 5, 10),
             new DatabaseProperties.ConnectionPoolProperties(30000, 600000, 1800000),
             new DatabaseProperties.PreparedStatementProperties(250, 2048),
-            new DatabaseProperties.MetricsProperties(5000)
+            new DatabaseProperties.MetricsProperties(5000),
+            new BackupProperties(),
+            new LineageProperties(),
+            new OptimizerProperties(),
+            new CatalogProperties(),
+            new CdcProperties()
         );
 
         Assertions.assertThat(properties.dialect()).isEqualTo("oracle");
@@ -46,13 +59,19 @@ class DatabasePropertiesTest {
             "mysql",
             new DatabaseProperties.QueryProperties(100, 30, true, 10000, 500, 100),
             new DatabaseProperties.AuditProperties(true, 7),
+            new QualityProperties(),
             new DatabaseProperties.DdlProperties(false),
             new DatabaseProperties.SecurityProperties(10, 5),
             new DatabaseProperties.EtlProperties(4),
             new DatabaseProperties.CacheProperties(1000, 30, 5, 10),
             new DatabaseProperties.ConnectionPoolProperties(30000, 600000, 1800000),
             new DatabaseProperties.PreparedStatementProperties(250, 2048),
-            new DatabaseProperties.MetricsProperties(5000)
+            new DatabaseProperties.MetricsProperties(5000),
+            new BackupProperties(),
+            new LineageProperties(),
+            new OptimizerProperties(),
+            new CatalogProperties(),
+            new CdcProperties()
         );
 
         Assertions.assertThat(properties.dialect()).isEqualTo("mysql");

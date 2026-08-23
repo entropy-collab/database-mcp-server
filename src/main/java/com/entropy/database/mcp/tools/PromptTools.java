@@ -20,7 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpArg;
 import org.springframework.ai.mcp.annotation.McpPrompt;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 
@@ -30,7 +30,7 @@ import java.util.List;
  * Prompts appear in {@code prompts/list} and can be invoked by clients
  * to receive structured guidance for common workflows.
  */
-@Configuration
+@Component
 public class PromptTools {
 
     private static final Logger log = LoggerFactory.getLogger(PromptTools.class);

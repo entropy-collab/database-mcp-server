@@ -43,6 +43,7 @@ public class ByokReadRepository {
     private final QueryAuditLogger auditLogger;
     private final int maxRows;
     private final int maxResultRows;
+    private final int queryTimeoutSeconds;
 
     public ByokReadRepository(JdbcTemplate jdbcTemplate,
                               DatabaseDialect dialect,
@@ -51,7 +52,8 @@ public class ByokReadRepository {
                               DatabaseHealthMonitor healthMonitor,
                               QueryAuditLogger auditLogger,
                               int maxRows,
-                              int maxResultRows) {
+                              int maxResultRows,
+                              int queryTimeoutSeconds) {
         this.jdbcTemplate = jdbcTemplate;
         this.dialect = dialect;
         this.sqlValidator = sqlValidator;
@@ -60,6 +62,7 @@ public class ByokReadRepository {
         this.auditLogger = auditLogger;
         this.maxRows = maxRows;
         this.maxResultRows = maxResultRows;
+        this.queryTimeoutSeconds = queryTimeoutSeconds;
     }
 
     public PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken) {
@@ -87,8 +90,8 @@ public class ByokReadRepository {
             long duration = System.currentTimeMillis() - start;
             healthMonitor.recordQuery(duration, 0, false);
             auditLogger.log("executeQuery", sql, 0, duration, false, e.getMessage(), (String) null);
-            throw new com.entropy.database.mcp.exception.DatabaseMcpException(
-                com.entropy.database.mcp.exception.ErrorCode.QUERY_ERROR,
+            throw new com.entropy.database.mcp.exception.McpQueryException(
+                com.entropy.database.mcp.exception.ErrorCode.QUERY_EXECUTION_FAILED,
                 "Query failed: " + e.getMessage(), e);
         }
     }

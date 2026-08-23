@@ -18,9 +18,11 @@ package com.entropy.database.mcp.byok;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.byok.ConnectionMetadata;
 import com.entropy.database.mcp.byok.ConnectionProperties;
+import com.entropy.database.mcp.monitor.HikariPoolStats;
 
 import javax.sql.DataSource;
 import java.util.Collection;
+import java.util.Map;
 
 /**
  * Central manager for all datasources.
@@ -30,6 +32,8 @@ public interface DynamicDataSourceManager {
 
     /**
      * Acquire a datasource context by key.
+     * If the same physical connection (same jdbcUrl + username + dialect) is already cached under a different name,
+     * this name is registered as an alias and returns the same underlying pool.
      */
     ByokDataSourceContext acquire(String key, ConnectionProperties connection);
 
@@ -82,4 +86,11 @@ public interface DynamicDataSourceManager {
      * This is a no-op if no entries have expired.
      */
     void evictExpired();
+
+    /**
+     * Get real-time HikariCP pool statistics for all registered connections.
+     *
+     * @return map of connection name → pool stats, empty if no HikariDataSource available
+     */
+    Map<String, HikariPoolStats> getPoolStats();
 }

@@ -15,8 +15,10 @@
  */
 package com.entropy.database.mcp.byok;
 
+import com.entropy.database.mcp.exception.McpLeaseExpiredException;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.DialectResolver;
+import com.entropy.database.mcp.monitor.HikariPoolStats;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.ByokProperties;
 import org.slf4j.Logger;
@@ -46,6 +48,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     private final ByokDataSourceFactory dataSourceFactory;
     private final com.github.benmanes.caffeine.cache.Cache<String, LeasedDataSource> leasedCache;
     private final Map<String, ConnectionMetadata> metadataRegistry;
+    private final Map<String, String> contentFingerprintToKey; // content fingerprint → canonical key
     private final Map<String, Object> keyLocks;
     private final Duration leaseDuration;
     private final Duration maxLifetime;
@@ -74,6 +77,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         this.metricsCollector = deps.metricsCollector();
 
         this.metadataRegistry = new ConcurrentHashMap<>();
+        this.contentFingerprintToKey = new ConcurrentHashMap<>();
         this.keyLocks = new ConcurrentHashMap<>();
 
         this.leasedCache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
@@ -85,6 +89,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                         value.close();
                     }
                     metadataRegistry.remove(key);
+                    contentFingerprintToKey.values().remove(key);
                     keyLocks.remove(key);
                     if (metricsCollector != null) {
                         metricsCollector.recordByokConnectionRemoved();
@@ -95,16 +100,38 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
     /**
      * Acquire a datasource context by key.
+     * Uses content fingerprint to deduplicate: if the same physical connection (jdbcUrl+username+dialect)
+     * is already cached under a different name, this name becomes an alias to the existing pool.
      */
     @Override
     public ByokDataSourceContext acquire(String key, ConnectionProperties connection) {
+        String fingerprint = connection.getCacheKey();
+
+        // Check if an identical physical connection already exists under a different name
+        String canonicalKey = contentFingerprintToKey.get(fingerprint);
+        if (canonicalKey != null && !canonicalKey.equals(key)) {
+            log.info("Connection '{}' is an alias for existing connection '{}', reusing same pool", key, canonicalKey);
+            LeasedDataSource existing = leasedCache.getIfPresent(canonicalKey);
+            if (existing != null) {
+                try {
+                    return existing.renewLease();
+                } catch (McpLeaseExpiredException e) {
+                    log.warn("Canonical connection '{}' expired, recreating", canonicalKey);
+                    contentFingerprintToKey.remove(fingerprint);
+                    leasedCache.invalidate(canonicalKey);
+                    existing.close();
+                }
+            }
+        }
+
         LeasedDataSource existing = leasedCache.getIfPresent(key);
         if (existing != null) {
             try {
                 return existing.renewLease();
-            } catch (LeaseExpiredException e) {
+            } catch (McpLeaseExpiredException e) {
                 log.warn("Datasource {} exceeded max lifetime, evicting and recreating", key);
                 leasedCache.invalidate(key);
+                contentFingerprintToKey.remove(fingerprint);
                 existing.close();
             }
         }
@@ -112,28 +139,41 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         Object lock = keyLocks.computeIfAbsent(key, k -> new Object());
         boolean created = false;
         synchronized (lock) {
-            try {
-                // Double-check after acquiring lock
-                existing = leasedCache.getIfPresent(key);
-                if (existing != null) {
-                    try {
-                        return existing.renewLease();
-                    } catch (LeaseExpiredException e) {
-                        log.warn("Datasource {} exceeded max lifetime during lock, evicting and recreating", key);
-                        leasedCache.invalidate(key);
-                        existing.close();
-                    }
-                }
-
-                LeasedDataSource newLeased = createLeasedDataSource(key, connection);
-                leasedCache.put(key, newLeased);
-                created = true;
-                return newLeased.renewLease();
-            } finally {
-                if (!created) {
-                    keyLocks.remove(key, lock);
+            // Double-check after acquiring lock
+            existing = leasedCache.getIfPresent(key);
+            if (existing != null) {
+                try {
+                    return existing.renewLease();
+                } catch (McpLeaseExpiredException e) {
+                    log.warn("Datasource {} exceeded max lifetime during lock, evicting and recreating", key);
+                    leasedCache.invalidate(key);
+                    contentFingerprintToKey.remove(fingerprint);
+                    existing.close();
                 }
             }
+
+            // Re-check canonical key in case another thread created it
+            canonicalKey = contentFingerprintToKey.get(fingerprint);
+            if (canonicalKey != null && !canonicalKey.equals(key)) {
+                log.info("Another thread created canonical connection '{}', reusing", canonicalKey);
+                LeasedDataSource alias = leasedCache.getIfPresent(canonicalKey);
+                if (alias != null) {
+                    try {
+                        return alias.renewLease();
+                    } catch (McpLeaseExpiredException e) {
+                        log.warn("Canonical connection '{}' expired during lock", canonicalKey);
+                        contentFingerprintToKey.remove(fingerprint);
+                        leasedCache.invalidate(canonicalKey);
+                        alias.close();
+                    }
+                }
+            }
+
+            LeasedDataSource newLeased = createLeasedDataSource(key, connection);
+            leasedCache.put(key, newLeased);
+            contentFingerprintToKey.put(fingerprint, key);
+            created = true;
+            return newLeased.renewLease();
         }
     }
 
@@ -150,7 +190,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         }
         try {
             return existing.renewLease();
-        } catch (LeaseExpiredException e) {
+        } catch (McpLeaseExpiredException e) {
             log.warn("Datasource {} exceeded max lifetime", key);
             throw new IllegalArgumentException("Connection expired: " + key, e);
         }
@@ -283,6 +323,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             }
         }
         leasedCache.invalidateAll();
+        contentFingerprintToKey.clear();
         metadataRegistry.clear();
         log.info("All datasources shut down");
     }
@@ -303,5 +344,68 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     @Override
     public void evictExpired() {
         leasedCache.cleanUp();
+    }
+
+    @Override
+    public Map<String, HikariPoolStats> getPoolStats() {
+        Map<String, HikariPoolStats> result = new java.util.LinkedHashMap<>();
+        for (var entry : leasedCache.asMap().entrySet()) {
+            String key = entry.getKey();
+            LeasedDataSource leased = entry.getValue();
+            ByokDataSourceContext context = leased.getContext();
+            DataSource ds = context.getDataSource();
+            ConnectionMetadata meta = metadataRegistry.get(key);
+
+            if (ds instanceof com.zaxxer.hikari.HikariDataSource hikari) {
+                com.zaxxer.hikari.HikariPoolMXBean pool = hikari.getHikariPoolMXBean();
+                if (pool != null) {
+                    int active = pool.getActiveConnections();
+                    int idle = pool.getIdleConnections();
+                    int total = pool.getTotalConnections();
+                    int waiting = pool.getThreadsAwaitingConnection();
+                    java.util.List<String> warnings = new java.util.ArrayList<>();
+                    boolean healthy = true;
+                    if (waiting > 5) {
+                        warnings.add("High wait count: " + waiting + " threads pending");
+                        healthy = false;
+                    }
+                    if (total > 0 && (double) active / total > 0.9) {
+                        warnings.add("Pool near exhaustion: " + active + "/" + total + " connections active");
+                        healthy = false;
+                    }
+                    result.put(key, new HikariPoolStats(
+                            key,
+                            meta != null ? meta.dialect() : "unknown",
+                            meta != null ? meta.jdbcUrlMasked() : "unknown",
+                            total, active, idle, waiting,
+                            hikari.getMaximumPoolSize(),
+                            hikari.getMinimumIdle(),
+                            hikari.getConnectionTimeout(),
+                            hikari.getIdleTimeout(),
+                            hikari.getMaxLifetime(),
+                            hikari.getLeakDetectionThreshold(),
+                            healthy,
+                            warnings
+                    ));
+                } else {
+                    // Pool not initialized yet (HikariCP lazy init)
+                    result.put(key, new HikariPoolStats(
+                            key,
+                            meta != null ? meta.dialect() : "unknown",
+                            meta != null ? meta.jdbcUrlMasked() : "unknown",
+                            0, 0, 0, 0,
+                            hikari.getMaximumPoolSize(),
+                            hikari.getMinimumIdle(),
+                            hikari.getConnectionTimeout(),
+                            hikari.getIdleTimeout(),
+                            hikari.getMaxLifetime(),
+                            hikari.getLeakDetectionThreshold(),
+                            false,
+                            java.util.List.of("Pool not yet initialized")
+                    ));
+                }
+            }
+        }
+        return result;
     }
 }
