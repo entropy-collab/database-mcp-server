@@ -53,10 +53,10 @@ public class PoolStatsMBean implements PoolStatsMBeanMxBean {
     private void registerJmx() {
         try {
             MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+            jmxObjectName = new ObjectName(OBJECT_NAME);
             if (mbs.isRegistered(jmxObjectName)) {
                 mbs.unregisterMBean(jmxObjectName);
             }
-            jmxObjectName = new ObjectName(OBJECT_NAME);
             mbs.registerMBean(this, jmxObjectName);
             log.info("PoolStatsMBean registered at {}", OBJECT_NAME);
         } catch (Exception e) {
