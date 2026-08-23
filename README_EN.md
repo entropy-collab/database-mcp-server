@@ -239,4 +239,3 @@ Apache License 2.0
 ## Support
 
 - GitHub Issues: Report bugs and feature requests
-- Documentation: See [docs/](docs/) for detailed guides

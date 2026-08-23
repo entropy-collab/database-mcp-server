@@ -299,8 +299,6 @@ src/main/java/com/entropy/database/mcp/
 
 ## 📖 参考文档
 
-- [架构设计文档](docs/ARCHITECTURE.md)
-- [CentOS Docker 部署指南](docs/deploy/centos8-docker-compose-deployment.md)
 - [MCP 协议规范](https://modelcontextprotocol.io)
 
 ---
