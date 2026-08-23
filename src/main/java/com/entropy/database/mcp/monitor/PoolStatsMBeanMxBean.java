@@ -18,8 +18,7 @@ package com.entropy.database.mcp.monitor;
 import java.util.Map;
 
 /**
- * JMX MBean interface for real-time connection pool statistics.
- * Exposed at {@code com.entropy.database.mcp:type=PoolStats}
+ * Interface for retrieving pool and MCP metrics.
  */
 public interface PoolStatsMBeanMxBean {
 
@@ -33,9 +32,4 @@ public interface PoolStatsMBeanMxBean {
      * Get MCP server-wide metrics snapshot (tool execution stats, cache hit rate, etc.).
      */
     Map<String, Object> getMetrics();
-
-    /**
-     * Returns the JMX object name this bean is registered under.
-     */
-    String getRegisteredObjectName();
 }

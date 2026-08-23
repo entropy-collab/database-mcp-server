@@ -18,53 +18,32 @@ package com.entropy.database.mcp.monitor;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.actuate.endpoint.jmx.annotation.JmxEndpoint;
 import org.springframework.stereotype.Component;
 
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
-import java.lang.management.ManagementFactory;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * JMX MBean exposing real-time HikariCP pool statistics.
- * Accessible via JConsole, VisualVM, or {@code jcmd}.
+ * Exposes real-time HikariCP pool statistics and MCP metrics.
+ * Provides {@link #getPoolStats()} and {@link #getMetrics()} methods
+ * accessible via Spring Actuator or programmatic access.
  */
 @Component
-public class PoolStatsMBean implements PoolStatsMBeanMxBean {
+public class PoolStatsMBean {
 
     private static final Logger log = LoggerFactory.getLogger(PoolStatsMBean.class);
-    private static final String OBJECT_NAME = "com.entropy.database.mcp:type=PoolStats";
 
     private final DynamicDataSourceManager dataSourceManager;
     private final McpMetricsCollector metricsCollector;
-    private volatile ObjectName jmxObjectName;
 
     public PoolStatsMBean(DynamicDataSourceManager dataSourceManager,
                           McpMetricsCollector metricsCollector) {
         this.dataSourceManager = dataSourceManager;
         this.metricsCollector = metricsCollector;
-        registerJmx();
+        log.info("PoolStatsMBean initialized");
     }
 
-    @SuppressWarnings("unchecked")
-    private void registerJmx() {
-        try {
-            MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
-            jmxObjectName = new ObjectName(OBJECT_NAME);
-            if (mbs.isRegistered(jmxObjectName)) {
-                mbs.unregisterMBean(jmxObjectName);
-            }
-            mbs.registerMBean(this, jmxObjectName);
-            log.info("PoolStatsMBean registered at {}", OBJECT_NAME);
-        } catch (Exception e) {
-            log.warn("Failed to register PoolStatsMBean: {}", e.getMessage(), e);
-        }
-    }
-
-    @Override
     public Map<String, Object> getPoolStats() {
         Map<String, HikariPoolStats> stats = dataSourceManager.getPoolStats();
         Map<String, Object> result = new LinkedHashMap<>();
@@ -74,13 +53,7 @@ public class PoolStatsMBean implements PoolStatsMBeanMxBean {
         return result;
     }
 
-    @Override
     public Map<String, Object> getMetrics() {
         return metricsCollector.getMetrics();
-    }
-
-    @Override
-    public String getRegisteredObjectName() {
-        return jmxObjectName != null ? jmxObjectName.toString() : "Not registered";
     }
 }
