@@ -26,6 +26,7 @@ import org.springframework.stereotype.Service;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Routing facade that delegates to BYOK datasources only.
@@ -58,7 +59,19 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
         try {
             return dynamicDataSourceManager.acquire(connection);
         } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("Connection not found: " + connection, e);
+            // Preserve the original error message and append available connections
+            String originalMsg = e.getMessage();
+            Collection<String> registered = dynamicDataSourceManager.listConnectionKeys();
+            String tip;
+            if (registered.isEmpty()) {
+                tip = "No connections registered. Call createNamedConnection first.";
+            } else {
+                String connectionList = registered.stream()
+                        .map(name -> "  - " + name)
+                        .collect(Collectors.joining("\n"));
+                tip = String.format("\nAvailable connections:\n%s\nUse one of these names.", connectionList);
+            }
+            throw new IllegalArgumentException(originalMsg + tip, e);
         }
     }
 
@@ -73,19 +86,31 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
                       2. Then pass the connection name to this tool.
                     For help, call prompt("database-quick-start").""";
         }
+        // Format connections as a clear list for the LLM
+        String connectionList = registered.stream()
+                .map(name -> "  - " + name)
+                .collect(Collectors.joining("\n"));
         return """
                 Connection is required but not provided.
-                Registered connections: %s
-                Pass the connection name explicitly, or call createNamedConnection first.
-                """.formatted(registered);
+                Available connections:
+                %s
+                You MUST pass one of these connection names to the tool.
+                Example: pass connection="fcs_analyst_v2" to use the connection above.
+                """.formatted(connectionList);
     }
 
     private String buildConnectionNotFoundMessage(String connection) {
         Collection<String> registered = dynamicDataSourceManager.listConnectionKeys();
-        String tip = registered.isEmpty()
-                ? "No connections registered. Call createNamedConnection first."
-                : "Available connections: " + registered;
-        return "Connection not found: " + connection + ". " + tip + " ";
+        String tip;
+        if (registered.isEmpty()) {
+            tip = "No connections registered. Call createNamedConnection first.";
+        } else {
+            String connectionList = registered.stream()
+                    .map(name -> "  - " + name)
+                    .collect(Collectors.joining("\n"));
+            tip = String.format("Available connections:\n%s\nUse one of these names instead.", connectionList);
+        }
+        return "Connection not found: " + connection + ". " + tip;
     }
 
     private ByokDatabaseFacade resolveFacade(String connection) {

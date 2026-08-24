@@ -90,23 +90,25 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 .maximumSize(maxCachedConnections)
                 .expireAfterAccess(leaseDuration)
                 .removalListener((String key, LeasedDataSource value, com.github.benmanes.caffeine.cache.RemovalCause cause) -> {
-                    // Removal listener runs on a background thread; use synchronized to
-                    // ensure atomicity of multi-map cleanup (metadataRegistry, contentFingerprintToKey).
-                    // NOTE: keyLocks entry is intentionally left for shutdown-phase cleanup
-                    // to avoid race with threads that may still hold the lock.
-                    synchronized (keyLocks) {
-                        metadataRegistry.remove(key);
-                        contentFingerprintToKey.values().removeIf(v -> v.equals(key));
+                    // Acquire per-key lock to coordinate with acquire() threads
+                    Object lock = keyLocks.get(key, k -> new Object());
+                    synchronized (lock) {
+                        synchronized (keyLocks) {
+                            metadataRegistry.remove(key);
+                            contentFingerprintToKey.values().removeIf(v -> v.equals(key));
+                        }
+                        if (metricsCollector != null) {
+                            metricsCollector.recordByokConnectionRemoved();
+                        }
+                        // Close datasource while holding the per-key lock to prevent
+                        // concurrent acquire() from getting a closed datasource
+                        if (value != null) {
+                            log.info("Removing expired datasource: {} (cause: {})", key, cause);
+                            value.close();
+                        }
                     }
-                    if (metricsCollector != null) {
-                        metricsCollector.recordByokConnectionRemoved();
-                    }
-                    // Close datasource OUTSIDE the synchronized block to avoid holding
-                    // the global keyLocks lock while waiting for HikariCP to drain connections.
-                    if (value != null) {
-                        log.info("Removing expired datasource: {} (cause: {})", key, cause);
-                        value.close();
-                    }
+                    // Remove lock entry after cleanup
+                    keyLocks.invalidate(key);
                 })
                 .build();
     }
@@ -124,29 +126,44 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         String canonicalKey = contentFingerprintToKey.get(fingerprint);
         if (canonicalKey != null && !canonicalKey.equals(key)) {
             log.info("Connection '{}' is an alias for existing connection '{}', reusing same pool", key, canonicalKey);
-            LeasedDataSource existing = leasedCache.getIfPresent(canonicalKey);
-            if (existing != null) {
-                try {
-                    return existing.renewLease();
-                } catch (McpLeaseExpiredException e) {
-                    log.warn("Canonical connection '{}' expired, recreating", canonicalKey);
+            Object lock = keyLocks.get(canonicalKey, k -> new Object());
+            synchronized (lock) {
+                LeasedDataSource existing = leasedCache.getIfPresent(canonicalKey);
+                if (existing != null && !existing.isClosed()) {
+                    try {
+                        return existing.renewLease();
+                    } catch (McpLeaseExpiredException e) {
+                        log.warn("Canonical connection '{}' expired, recreating", canonicalKey);
+                        contentFingerprintToKey.remove(fingerprint);
+                        leasedCache.invalidate(canonicalKey);
+                        existing.close();
+                    }
+                } else if (existing != null && existing.isClosed()) {
+                    log.warn("Canonical connection '{}' is closed, evicting", canonicalKey);
                     contentFingerprintToKey.remove(fingerprint);
                     leasedCache.invalidate(canonicalKey);
-                    existing.close();
                 }
             }
         }
 
         LeasedDataSource existing = leasedCache.getIfPresent(key);
-        if (existing != null) {
+        if (existing != null && !existing.isClosed()) {
             try {
                 return existing.renewLease();
             } catch (McpLeaseExpiredException e) {
                 log.warn("Datasource {} exceeded max lifetime, evicting and recreating", key);
-                leasedCache.invalidate(key);
-                contentFingerprintToKey.remove(fingerprint);
-                existing.close();
+                Object lock = keyLocks.get(key, k -> new Object());
+                synchronized (lock) {
+                    leasedCache.invalidate(key);
+                    contentFingerprintToKey.remove(fingerprint);
+                    existing.close();
+                }
             }
+        } else if (existing != null && existing.isClosed()) {
+            // Connection is being closed by removalListener, evict and recreate
+            log.warn("Datasource {} is closed (eviction in progress), evicting and recreating", key);
+            leasedCache.invalidate(key);
+            contentFingerprintToKey.remove(fingerprint);
         }
 
         Object lock = keyLocks.get(key, k -> new Object());
@@ -154,7 +171,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         synchronized (lock) {
             // Double-check after acquiring lock
             existing = leasedCache.getIfPresent(key);
-            if (existing != null) {
+            if (existing != null && !existing.isClosed()) {
                 try {
                     return existing.renewLease();
                 } catch (McpLeaseExpiredException e) {
@@ -163,6 +180,11 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                     contentFingerprintToKey.remove(fingerprint);
                     existing.close();
                 }
+            } else if (existing != null && existing.isClosed()) {
+                // Evict closed connection and proceed to create new one
+                log.warn("Datasource {} is closed (eviction in progress), evicting", key);
+                leasedCache.invalidate(key);
+                contentFingerprintToKey.remove(fingerprint);
             }
 
             // Re-check canonical key in case another thread created it
@@ -170,7 +192,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             if (canonicalKey != null && !canonicalKey.equals(key)) {
                 log.info("Another thread created canonical connection '{}', reusing", canonicalKey);
                 LeasedDataSource alias = leasedCache.getIfPresent(canonicalKey);
-                if (alias != null) {
+                if (alias != null && !alias.isClosed()) {
                     try {
                         return alias.renewLease();
                     } catch (McpLeaseExpiredException e) {
@@ -179,12 +201,19 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                         leasedCache.invalidate(canonicalKey);
                         alias.close();
                     }
+                } else if (alias != null && alias.isClosed()) {
+                    log.warn("Canonical connection '{}' is closed during lock", canonicalKey);
+                    contentFingerprintToKey.remove(fingerprint);
+                    leasedCache.invalidate(canonicalKey);
                 }
             }
 
             LeasedDataSource newLeased = createLeasedDataSource(key, connection);
             leasedCache.put(key, newLeased);
             contentFingerprintToKey.put(fingerprint, key);
+            registerMetadata(key, connection,
+                    dialectResolver.resolve(connection.dialect(), null),
+                    newLeased.getContext().getDataSource());
             created = true;
             return newLeased.renewLease();
         }
@@ -220,8 +249,8 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             LeasedDataSource existing = leasedCache.getIfPresent(key);
             if (existing != null) {
                 log.warn("Datasource {} already registered, replacing", key);
-                existing.close();
-                leasedCache.invalidate(key);
+                leasedCache.invalidate(key); // Invalidate first to prevent new access
+                existing.close(); // Then close (will be idempotent if already closed by removalListener)
             }
 
             ByokDataSourceContext context = dataSourceFactory.createExisting(key, existingDataSource, dialect);
@@ -321,18 +350,36 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
     @Override
     public Collection<ConnectionMetadata> getAllConnectionMetadata() {
-        return metadataRegistry.values();
+        // Return a snapshot to avoid ConcurrentModificationException if metadataRegistry is modified during iteration
+        return new java.util.ArrayList<>(metadataRegistry.values());
     }
 
     // ─── Shutdown ───────────────────────────────────────────────────────────
 
     @Override
     public void shutdown() {
-        for (LeasedDataSource leased : leasedCache.asMap().values()) {
-            try {
-                leased.close();
-            } catch (Exception e) {
-                log.warn("Failed to close datasource during shutdown: {}", leased.getKey(), e);
+        // Snapshot the cache to avoid ConcurrentModificationException during iteration
+        Map<String, LeasedDataSource> snapshot = new java.util.HashMap<>(leasedCache.asMap());
+        for (var entry : snapshot.entrySet()) {
+            String key = entry.getKey();
+            LeasedDataSource leased = entry.getValue();
+            // Acquire lock before closing to ensure no concurrent access
+            Object lock = keyLocks.getIfPresent(key);
+            if (lock != null) {
+                synchronized (lock) {
+                    try {
+                        leased.close();
+                    } catch (Exception e) {
+                        log.warn("Failed to close datasource during shutdown: {}", key, e);
+                    }
+                }
+            } else {
+                // Lock already evicted, close directly
+                try {
+                    leased.close();
+                } catch (Exception e) {
+                    log.warn("Failed to close datasource during shutdown: {}", key, e);
+                }
             }
         }
         leasedCache.invalidateAll();
@@ -348,11 +395,13 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
     @Override
     public int getActiveConnectionCount() {
+        // Use size() on snapshot to ensure consistency during iteration
         return (int) leasedCache.asMap().size();
     }
 
     /**
      * Force Caffeine to check for expired entries and trigger removal listener.
+     * Safe to call concurrently - will acquire per-key locks for any evictions.
      */
     @Override
     public void evictExpired() {
@@ -362,61 +411,75 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     @Override
     public Map<String, HikariPoolStats> getPoolStats() {
         Map<String, HikariPoolStats> result = new java.util.LinkedHashMap<>();
-        for (var entry : leasedCache.asMap().entrySet()) {
+        // Take a snapshot to avoid ConcurrentModificationException during iteration
+        Map<String, LeasedDataSource> snapshot = new java.util.HashMap<>(leasedCache.asMap());
+        for (var entry : snapshot.entrySet()) {
             String key = entry.getKey();
             LeasedDataSource leased = entry.getValue();
+            // Skip closed datasources to avoid "HikariDataSource has been closed" errors
+            if (leased.isClosed()) {
+                log.debug("Skipping closed datasource: {}", key);
+                continue;
+            }
             ByokDataSourceContext context = leased.getContext();
             DataSource ds = context.getDataSource();
             ConnectionMetadata meta = metadataRegistry.get(key);
 
-            if (ds instanceof com.zaxxer.hikari.HikariDataSource hikari) {
-                com.zaxxer.hikari.HikariPoolMXBean pool = hikari.getHikariPoolMXBean();
-                if (pool != null) {
-                    int active = pool.getActiveConnections();
-                    int idle = pool.getIdleConnections();
-                    int total = pool.getTotalConnections();
-                    int waiting = pool.getThreadsAwaitingConnection();
-                    java.util.List<String> warnings = new java.util.ArrayList<>();
-                    boolean healthy = true;
-                    if (waiting > 5) {
-                        warnings.add("High wait count: " + waiting + " threads pending");
-                        healthy = false;
+            try {
+                if (ds instanceof com.zaxxer.hikari.HikariDataSource hikari) {
+                    com.zaxxer.hikari.HikariPoolMXBean pool = hikari.getHikariPoolMXBean();
+                    if (pool != null) {
+                        int active = pool.getActiveConnections();
+                        int idle = pool.getIdleConnections();
+                        int total = pool.getTotalConnections();
+                        int waiting = pool.getThreadsAwaitingConnection();
+                        java.util.List<String> warnings = new java.util.ArrayList<>();
+                        boolean healthy = true;
+                        if (waiting > 5) {
+                            warnings.add("High wait count: " + waiting + " threads pending");
+                            healthy = false;
+                        }
+                        if (total > 0 && (double) active / total > 0.9) {
+                            warnings.add("Pool near exhaustion: " + active + "/" + total + " connections active");
+                            healthy = false;
+                        }
+                        result.put(key, new HikariPoolStats(
+                                key,
+                                meta != null ? meta.dialect() : "unknown",
+                                meta != null ? meta.jdbcUrlMasked() : "unknown",
+                                total, active, idle, waiting,
+                                hikari.getMaximumPoolSize(),
+                                hikari.getMinimumIdle(),
+                                hikari.getConnectionTimeout(),
+                                hikari.getIdleTimeout(),
+                                hikari.getMaxLifetime(),
+                                hikari.getLeakDetectionThreshold(),
+                                healthy,
+                                warnings
+                        ));
+                    } else {
+                        // Pool not initialized yet (HikariCP lazy init)
+                        result.put(key, new HikariPoolStats(
+                                key,
+                                meta != null ? meta.dialect() : "unknown",
+                                meta != null ? meta.jdbcUrlMasked() : "unknown",
+                                0, 0, 0, 0,
+                                hikari.getMaximumPoolSize(),
+                                hikari.getMinimumIdle(),
+                                hikari.getConnectionTimeout(),
+                                hikari.getIdleTimeout(),
+                                hikari.getMaxLifetime(),
+                                hikari.getLeakDetectionThreshold(),
+                                false,
+                                java.util.List.of("Pool not yet initialized")
+                        ));
                     }
-                    if (total > 0 && (double) active / total > 0.9) {
-                        warnings.add("Pool near exhaustion: " + active + "/" + total + " connections active");
-                        healthy = false;
-                    }
-                    result.put(key, new HikariPoolStats(
-                            key,
-                            meta != null ? meta.dialect() : "unknown",
-                            meta != null ? meta.jdbcUrlMasked() : "unknown",
-                            total, active, idle, waiting,
-                            hikari.getMaximumPoolSize(),
-                            hikari.getMinimumIdle(),
-                            hikari.getConnectionTimeout(),
-                            hikari.getIdleTimeout(),
-                            hikari.getMaxLifetime(),
-                            hikari.getLeakDetectionThreshold(),
-                            healthy,
-                            warnings
-                    ));
-                } else {
-                    // Pool not initialized yet (HikariCP lazy init)
-                    result.put(key, new HikariPoolStats(
-                            key,
-                            meta != null ? meta.dialect() : "unknown",
-                            meta != null ? meta.jdbcUrlMasked() : "unknown",
-                            0, 0, 0, 0,
-                            hikari.getMaximumPoolSize(),
-                            hikari.getMinimumIdle(),
-                            hikari.getConnectionTimeout(),
-                            hikari.getIdleTimeout(),
-                            hikari.getMaxLifetime(),
-                            hikari.getLeakDetectionThreshold(),
-                            false,
-                            java.util.List.of("Pool not yet initialized")
-                    ));
                 }
+            } catch (IllegalStateException e) {
+                // DataSource was closed during iteration
+                log.debug("Skipping datasource {} as it was closed during stats collection", key);
+            } catch (Exception e) {
+                log.warn("Failed to collect stats for datasource {}: {}", key, e.getMessage());
             }
         }
         return result;

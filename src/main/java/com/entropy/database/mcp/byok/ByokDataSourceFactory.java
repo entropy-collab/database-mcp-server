@@ -156,7 +156,7 @@ public class ByokDataSourceFactory {
                 DatabaseReadRepository.DEFAULT_MAX_ROWS,
                 DatabaseReadRepository.DEFAULT_MAX_RESULT_ROWS,
                 fetchSize, queryTimeoutSeconds, null);
-        ByokWriteRepository writeRepo = new ByokWriteRepository(jdbcTemplate);
+        ByokWriteRepository writeRepo = new ByokWriteRepository(jdbcTemplate, validator);
         ExecutionPlanRepository executionPlanRepo = new ExecutionPlanRepositoryImpl(
                 jdbcTemplate, dialect, validator);
 

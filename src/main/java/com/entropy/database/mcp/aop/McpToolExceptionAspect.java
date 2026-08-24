@@ -32,7 +32,9 @@ import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.stereotype.Component;
 
+import java.util.Collection;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * AOP aspect for connection injection and session context management in MCP tools.
@@ -80,7 +82,12 @@ public class McpToolExceptionAspect {
             log.debug("MCP tool exit: tool={}, elapsed={}ms", toolName, context.elapsedMillis());
             return result;
         } catch (Throwable t) {
-            throw enhanceWithDialectHint(t, context.connection());
+            Throwable enhanced = enhanceWithDialectHint(t, context.connection());
+            // Provide friendly hint when connection parameter is missing
+            if (context.connection() == null || context.connection().isBlank()) {
+                return enhanceMissingConnectionHint(enhanced, toolName);
+            }
+            throw enhanced;
         } finally {
             context.close();
         }
@@ -100,6 +107,33 @@ public class McpToolExceptionAspect {
         if (cause instanceof BadSqlGrammarException bsge && bsge.getMessage() != null) {
             String enhancedMsg = bsge.getMessage() + hint;
             return new BadSqlGrammarException(enhancedMsg, bsge.getSql(), bsge.getSQLException());
+        }
+        return t;
+    }
+
+    /**
+     * Replace connection-related exceptions with a friendly hint when connection param is missing.
+     */
+    private Throwable enhanceMissingConnectionHint(Throwable t, String toolName) {
+        Throwable root = findRootCause(t);
+        String msg = root.getMessage();
+        if (msg != null && (msg.contains("Connection is required") || msg.contains("connection")
+                || msg.contains("Connection not found"))) {
+            // Get available connections to help the LLM
+            Collection<String> registered = dataSourceManager.listConnectionKeys();
+            String connectionHint;
+            if (registered.isEmpty()) {
+                connectionHint = "No connections registered. Call createNamedConnection first.";
+            } else {
+                String connectionList = registered.stream()
+                        .map(name -> "  - " + name)
+                        .collect(Collectors.joining("\n"));
+                connectionHint = String.format("Available connections:\n%s\nUse one of these names as the connection parameter.", connectionList);
+            }
+            return new McpToolException(
+                    com.entropy.database.mcp.exception.ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "参数 'connection' 未提供。\n" + connectionHint,
+                    root.getCause());
         }
         return t;
     }

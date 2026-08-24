@@ -226,7 +226,7 @@ public class QueryAnalysisTools extends McpToolBase {
                 }
             }
         } catch (Exception e) {
-            // Table not found or no statistics
+            log.debug("Failed to get row count for table '{}': {}", tableName, e.getMessage());
         }
         return null;
     }

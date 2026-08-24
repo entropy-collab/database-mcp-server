@@ -49,7 +49,13 @@ public class QueryTools extends McpToolBase {
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
 
-    @McpTool(description = "[PREREQ] Call createNamedConnection first to register a database connection. Then execute a SQL SELECT query with pagination support. Pass the connection name via the 'connection' parameter.")
+    @McpTool(description = """
+            Execute a read-only SQL SELECT query with automatic pagination.
+            Prerequisite: call createNamedConnection first to register the database connection, then pass the connection name.
+            Returns columns, rows, rowCount, hasMore, and continuationToken for pagination.
+            Use executeQueryWithFilter for parameterized queries to prevent SQL injection.
+            Tags: [read, query, select, paginated]
+            """)
     public Map<String, Object> executeQuery(
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
@@ -81,7 +87,11 @@ public class QueryTools extends McpToolBase {
         return routingFacade.getDatabaseInfo(connection);
     }
 
-    @McpTool(description = "Execute multiple SQL queries in batch mode (max 5 queries)")
+    @McpTool(description = """
+            Execute up to 5 SQL SELECT queries concurrently. Each result includes columns, rows, and rowCount.
+            Use for batch analysis across multiple queries without sequential waiting.
+            Tags: [read, query, batch, select]
+            """)
     public List<Map<String, Object>> batchQuery(
             @McpToolParam(description = "List of SQL queries (max 5)") List<String> sqls,
             @McpToolParam(description = "Maximum rows per query", required = false) Integer maxRows,

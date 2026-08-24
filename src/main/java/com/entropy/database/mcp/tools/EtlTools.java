@@ -83,12 +83,14 @@ public class EtlTools extends McpToolBase {
             properties.validate();
             ByokDataSourceContext context = dataSourceManager.acquire(name, properties);
             context.getJdbcTemplate().queryForList(context.getDialect().connectionTestQuery());
-            // Verify connection is immediately available; retry with backoff if registration is delayed.
-            verifyConnectionReady(name, 5, 100);
+            // Connection registration is synchronous, but the MCP tool result is serialized to the client.
+            // Advise the LLM to verify the connection before use, as rapid subsequent calls may race with
+            // the response delivery.
             return success(Map.of(
                     "connectionName", name,
                     "dialect", properties.dialect(),
-                    "message", "Connection created and tested successfully"
+                    "message", "Connection created and tested successfully. Call describeConnection to confirm before querying.",
+                    "recommendation", "Call describeConnection(\"connection\": \"" + name + "\") before using this connection for queries."
             ));
         });
     }
@@ -468,24 +470,6 @@ public class EtlTools extends McpToolBase {
                 throw new McpValidationException(
                         com.entropy.database.mcp.exception.ErrorCode.PARAMETER_VALIDATION_FAILED,
                         "Invalid column mapping: " + mapping + ". Expected format: source:target[:transform]");
-            }
-        }
-    }
-
-    /**
-     * Verify the named connection is ready for use by polling with backoff.
-     * Replaces the fixed Thread.sleep(500) with a resilient retry loop.
-     */
-    private void verifyConnectionReady(String name, int maxRetries, long retryDelayMs) throws InterruptedException {
-        for (int i = 0; i < maxRetries; i++) {
-            try {
-                dataSourceManager.acquire(name);
-                return; // success
-            } catch (Exception e) {
-                if (i == maxRetries - 1) {
-                    throw new RuntimeException("Connection '" + name + "' not ready after " + maxRetries + " attempts", e);
-                }
-                Thread.sleep(retryDelayMs);
             }
         }
     }

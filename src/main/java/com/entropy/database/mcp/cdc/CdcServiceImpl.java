@@ -69,14 +69,17 @@ public class CdcServiceImpl implements CdcService {
 
     @Override
     public boolean isCdcSupported(String connection) {
+        ByokDataSourceContext ctx = null;
         try {
-            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+            ctx = dataSourceManager.acquire(connection);
             DatabaseDialect dialect = ctx.getDialect();
             String sql = dialect.cdcCheckSupportSql();
             return sql != null && Integer.valueOf(1).equals(ctx.getJdbcTemplate().queryForObject(sql, Integer.class));
         } catch (Exception e) {
-            log.debug("CDC support check failed for '{}': {}", connection, e.getMessage());
+            log.warn("CDC support check failed for '{}': {}", connection, e.getMessage(), e);
             return false;
+        } finally {
+            if (ctx != null) ctx.close();
         }
     }
 
@@ -84,18 +87,19 @@ public class CdcServiceImpl implements CdcService {
 
     @Override
     public List<CdcChangeEvent> readChanges(String connection, String schema, String table, long fromLsn) {
-        ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-        DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
-
-        String sql = dialect.cdcReadChangesSql(schema, table, fromLsn);
-        if (sql == null) {
-            log.warn("CDC read not supported for dialect '{}'", dialect.getDialectName());
-            return List.of();
-        }
-
         List<CdcChangeEvent> events = new ArrayList<>();
+        ByokDataSourceContext ctx = null;
         try {
+            ctx = dataSourceManager.acquire(connection);
+            DatabaseDialect dialect = ctx.getDialect();
+            JdbcTemplate jdbc = ctx.getJdbcTemplate();
+
+            String sql = dialect.cdcReadChangesSql(schema, table, fromLsn);
+            if (sql == null) {
+                log.warn("CDC read not supported for dialect '{}'", dialect.getDialectName());
+                return List.of();
+            }
+
             for (Map<String, Object> row : jdbc.queryForList(sql, fromLsn)) {
                 CdcChangeType changeType = CdcChangeType.fromCode((String) row.get("change_type"));
                 if (changeType == null) continue;
@@ -115,6 +119,8 @@ public class CdcServiceImpl implements CdcService {
             }
         } catch (Exception e) {
             log.warn("Failed to read CDC changes for {}.{}: {}", schema, table, e.getMessage(), e);
+        } finally {
+            if (ctx != null) ctx.close();
         }
         return events;
     }
@@ -177,18 +183,23 @@ public class CdcServiceImpl implements CdcService {
     @Override
     public void createMirrorTable(String connection, String sourceSchema, String sourceTable,
                                   String targetSchema, String targetTable) {
-        ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-        DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
+        ByokDataSourceContext ctx = null;
+        try {
+            ctx = dataSourceManager.acquire(connection);
+            DatabaseDialect dialect = ctx.getDialect();
+            JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
-        String sql = dialect.cdcCreateMirrorTableSql(targetSchema, targetTable,
-                "SELECT * FROM " + dialect.quote(sourceTable));
-        if (sql == null) {
-            throw new UnsupportedOperationException(
-                    "Mirror table creation not supported for dialect: " + dialect.getDialectName());
+            String sql = dialect.cdcCreateMirrorTableSql(targetSchema, targetTable,
+                    "SELECT * FROM " + dialect.quote(sourceTable));
+            if (sql == null) {
+                throw new UnsupportedOperationException(
+                        "Mirror table creation not supported for dialect: " + dialect.getDialectName());
+            }
+            jdbc.execute(sql);
+            log.info("Created mirror table {}.{} from {}.{}", targetSchema, targetTable, sourceSchema, sourceTable);
+        } finally {
+            if (ctx != null) ctx.close();
         }
-        jdbc.execute(sql);
-        log.info("Created mirror table {}.{} from {}.{}", targetSchema, targetTable, sourceSchema, sourceTable);
     }
 
     // ─── Subscription Management ──────────────────────────────────────────

@@ -239,9 +239,16 @@ public class CrossDatabaseTools extends McpToolBase {
         String dblinkSql = String.format(
                 "CREATE DATABASE LINK %s CONNECT TO %s IDENTIFIED BY \"%s\" USING '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVICE_NAME=%s)))'",
                 dbLinkName, username, escapedPassword, host, port, serviceName);
+        sqlValidator.validateDdl(dblinkSql);
         return safeExecute(() -> {
-            dataSourceManager.acquire(connection).getJdbcTemplate().execute(dblinkSql);
-            return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' created successfully", dbLinkName)));
+            ByokDataSourceContext ctx = null;
+            try {
+                ctx = dataSourceManager.acquire(connection);
+                ctx.getJdbcTemplate().execute(dblinkSql);
+                return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' created successfully", dbLinkName)));
+            } finally {
+                if (ctx != null) ctx.close();
+            }
         });
     }
 
@@ -252,9 +259,16 @@ public class CrossDatabaseTools extends McpToolBase {
         if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
+        sqlValidator.validateDdl(dropSql);
         return safeExecute(() -> {
-            dataSourceManager.acquire(connection).getJdbcTemplate().execute(dropSql);
-            return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
+            ByokDataSourceContext ctx = null;
+            try {
+                ctx = dataSourceManager.acquire(connection);
+                ctx.getJdbcTemplate().execute(dropSql);
+                return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
+            } finally {
+                if (ctx != null) ctx.close();
+            }
         });
     }
 

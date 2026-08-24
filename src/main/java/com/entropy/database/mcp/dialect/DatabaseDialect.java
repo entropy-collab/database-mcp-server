@@ -28,6 +28,15 @@ public interface DatabaseDialect {
     boolean supportsSchema();
 
     /**
+     * Rewrites a user-provided SQL that contains LIMIT/FETCH clauses into a dialect-compatible form.
+     * Default: returns SQL unchanged (dialect natively supports LIMIT).
+     * Oracle overrides to convert LIMIT → ROWNUM or FETCH FIRST.
+     */
+    default String rewriteLimitInSql(String sql) {
+        return sql;
+    }
+
+    /**
      * SQL to list all schemas in the database.
      */
     default String schemasQuery() {

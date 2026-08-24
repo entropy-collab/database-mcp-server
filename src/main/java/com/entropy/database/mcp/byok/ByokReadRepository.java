@@ -69,13 +69,16 @@ public class ByokReadRepository {
         long start = System.currentTimeMillis();
         try {
             sqlValidator.validateSelect(sql);
-            
+
+            // Rewrite LIMIT/FETCH clauses for dialects that don't support them natively (e.g. Oracle)
+            String rewrittenSql = dialect.rewriteLimitInSql(sql);
+
             int limit = maxRows > 0 ? Math.min(maxRows, this.maxRows) : this.maxRows;
             int offset = 0;
-            
+
             String limitedSql = dialect.supportsLimit()
-                    ? dialect.applyLimit(sql, limit, offset)
-                    : sql;
+                    ? dialect.applyLimit(rewrittenSql, limit, offset)
+                    : rewrittenSql;
             
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(limitedSql);
             long duration = System.currentTimeMillis() - start;

@@ -48,13 +48,14 @@ class LeasedDataSourceTest {
     @Test
     void renewLeaseThrowsWhenMaxLifetimeExceeded() {
         ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+        // Use short lease + maxLifetime just slightly over it so we can force expiry
         LeasedDataSource leased = new LeasedDataSource(
-                "key1", context, Duration.ofMinutes(30), Duration.ofMillis(1)
+                "key1", context, Duration.ofMillis(10), Duration.ofMillis(20)
         );
 
         // Wait for max lifetime to expire
         try {
-            Thread.sleep(10);
+            Thread.sleep(25);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -79,11 +80,11 @@ class LeasedDataSourceTest {
     void isMaxLifetimeExceededReturnsTrueAfterMaxLifetime() {
         ByokDataSourceContext context = mock(ByokDataSourceContext.class);
         LeasedDataSource leased = new LeasedDataSource(
-                "key1", context, Duration.ofMinutes(30), Duration.ofMillis(1)
+                "key1", context, Duration.ofMillis(10), Duration.ofMillis(20)
         );
 
         try {
-            Thread.sleep(10);
+            Thread.sleep(25);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }

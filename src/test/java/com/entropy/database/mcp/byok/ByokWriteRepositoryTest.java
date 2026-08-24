@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.byok;
 
+import com.entropy.database.mcp.security.SqlValidator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -28,10 +29,10 @@ import static org.mockito.Mockito.*;
 class ByokWriteRepositoryTest {
 
     @Test
-    void executeDdlReturnsAffectedRows(@Mock JdbcTemplate jdbcTemplate) {
+    void executeDdlReturnsAffectedRows(@Mock JdbcTemplate jdbcTemplate, @Mock SqlValidator sqlValidator) {
         when(jdbcTemplate.update("CREATE TABLE test (id INT)")).thenReturn(1);
 
-        ByokWriteRepository repository = new ByokWriteRepository(jdbcTemplate);
+        ByokWriteRepository repository = new ByokWriteRepository(jdbcTemplate, sqlValidator);
         var result = repository.executeDdl("CREATE TABLE test (id INT)");
 
         assertThat(result).containsEntry("affectedRows", 1);

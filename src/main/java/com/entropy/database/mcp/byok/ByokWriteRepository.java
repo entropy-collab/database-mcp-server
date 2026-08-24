@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.byok;
 
+import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.Map;
@@ -24,12 +25,15 @@ import java.util.Map;
  */
 public class ByokWriteRepository {
     private final JdbcTemplate jdbcTemplate;
+    private final SqlValidator sqlValidator;
 
-    public ByokWriteRepository(JdbcTemplate jdbcTemplate) {
+    public ByokWriteRepository(JdbcTemplate jdbcTemplate, SqlValidator sqlValidator) {
         this.jdbcTemplate = jdbcTemplate;
+        this.sqlValidator = sqlValidator;
     }
 
     public Map<String, Object> executeDdl(String sql) {
+        sqlValidator.validateDdl(sql);
         int affected = jdbcTemplate.update(sql);
 
         return Map.of(

@@ -120,6 +120,35 @@ public class OracleDialect extends AbstractDatabaseDialect {
     }
 
     /**
+     * Rewrite user SQL containing LIMIT/FETCH FIRST into Oracle-compatible ROWNUM syntax.
+     */
+    @Override
+    public String rewriteLimitInSql(String sql) {
+        if (sql == null) return null;
+        String s = sql.trim();
+        // Handle "FETCH FIRST N ROWS ONLY"
+        java.util.regex.Pattern fetchPattern = java.util.regex.Pattern.compile(
+                "\\bFETCH\\s+FIRST\\s+(\\d+)\\s+ROWS\\s+ONLY\\b", java.util.regex.Pattern.CASE_INSENSITIVE);
+        java.util.regex.Matcher m = fetchPattern.matcher(s);
+        if (m.find()) {
+            int limit = Integer.parseInt(m.group(1));
+            s = m.replaceFirst("");
+            return applyLimit(s, limit, 0);
+        }
+        // Handle plain "LIMIT N" or "LIMIT N OFFSET M"
+        java.util.regex.Pattern limitPattern = java.util.regex.Pattern.compile(
+                "\\bLIMIT\\s+(\\d+)(?:\\s+OFFSET\\s+(\\d+))?", java.util.regex.Pattern.CASE_INSENSITIVE);
+        m = limitPattern.matcher(s);
+        if (m.find()) {
+            int limit = Integer.parseInt(m.group(1));
+            int offset = (m.group(2) != null) ? Integer.parseInt(m.group(2)) : 0;
+            s = m.replaceFirst("");
+            return applyLimit(s, limit, offset);
+        }
+        return sql;
+    }
+
+    /**
      * Apply ROWNUM-based cursor pagination for stable deep-page queries.
      */
     public String applyRowidPagination(String sql, int limit, String lastRowid) {

@@ -22,6 +22,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -103,11 +104,33 @@ public class LeasedDataSource {
     }
 
     /**
-     * Close underlying datasource resources.
+     * Check if the lease has expired.
+     */
+    public boolean isExpired() {
+        return Instant.now().isAfter(leaseExpiry.get());
+    }
+
+    /**
+     * Check if max lifetime has been exceeded.
+     */
+    public boolean isMaxLifetimeExceeded() {
+        return Instant.now().isAfter(maxLifetime);
+    }
+
+    private final AtomicBoolean closed = new AtomicBoolean(false);
+
+    /**
+     * Check if this leased datasource has been closed.
+     */
+    public boolean isClosed() {
+        return closed.get();
+    }
+
+    /**
+     * Close underlying datasource resources. Idempotent - safe to call multiple times.
      */
     public void close() {
-        if (!closeable) {
-            log.debug("Skipping close for non-closeable datasource: {}", key);
+        if (!closeable || !closed.compareAndSet(false, true)) {
             return;
         }
         try {

@@ -28,11 +28,12 @@ public final class DialectUtils {
             return "generic";
         }
         if (jdbcUrl.startsWith("jdbc:oracle:")) return "oracle";
-        if (jdbcUrl.startsWith("jdbc:mysql:")) return "mysql";
+        if (jdbcUrl.startsWith("jdbc:mysql:") || jdbcUrl.startsWith("jdbc:mariadb:")) return "mysql";
         if (jdbcUrl.startsWith("jdbc:postgresql:")) return "postgres";
         if (jdbcUrl.startsWith("jdbc:sqlserver:")) return "sqlserver";
         if (jdbcUrl.startsWith("jdbc:sqlite:")) return "sqlite";
         if (jdbcUrl.startsWith("jdbc:db2:")) return "db2";
+        if (jdbcUrl.startsWith("jdbc:h2:")) return "h2";
         return "generic";
     }
 
@@ -42,6 +43,7 @@ public final class DialectUtils {
         }
         if (jdbcUrl.startsWith("jdbc:oracle:")) return "oracle.jdbc.OracleDriver";
         if (jdbcUrl.startsWith("jdbc:mysql:")) return "com.mysql.cj.jdbc.Driver";
+        if (jdbcUrl.startsWith("jdbc:mariadb:")) return "org.mariadb.jdbc.Driver";
         if (jdbcUrl.startsWith("jdbc:postgresql:")) return "org.postgresql.Driver";
         if (jdbcUrl.startsWith("jdbc:sqlserver:")) return "com.microsoft.sqlserver.jdbc.SQLServerDriver";
         if (jdbcUrl.startsWith("jdbc:sqlite:")) return "org.sqlite.JDBC";

@@ -205,14 +205,15 @@ public record StandardizedPlan(
     }
 
     private static int parseEstimatedRows(String rowObj) {
-        try {
-            // Format: "ROWNUM=1234"
-            int idx = rowObj.indexOf('=');
-            if (idx > 0) {
+        if (rowObj == null) return 0;
+        // Format: "ROWNUM=1234"
+        int idx = rowObj.indexOf('=');
+        if (idx > 0) {
+            try {
                 return Integer.parseInt(rowObj.substring(idx + 1).trim());
+            } catch (NumberFormatException e) {
+                return 0;
             }
-        } catch (Exception e) {
-            // Ignore
         }
         return 0;
     }

@@ -64,7 +64,11 @@ public class SchemaTools extends McpToolBase {
         return routingFacade.searchTables(keyword, connection);
     }
 
-    @McpTool(description = "列出数据库中所有可用的 Schema（用户）")
+    @McpTool(description = """
+            List all schema (user) names in the database.
+            Use this to discover available schemas before querying tables within them.
+            Tags: [schema, metadata, list]
+            """)
     public List<String> listSchemas(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.listSchemas(connection);
@@ -122,7 +126,14 @@ public class SchemaTools extends McpToolBase {
         return routingFacade.listSequences(schema, connection);
     }
 
-    @McpTool(name = "describe", description = "Describe database objects: TABLE, SCHEMA, INDEX, or VIEW")
+    @McpTool(name = "describe", description = """
+            Describe any database object: TABLE, SCHEMA, INDEX, or VIEW in one call.
+            Pass type=TABEL with table name to get columns and types.
+            Pass type=SCHEMA with schema name to list all tables.
+            Pass type=INDEX with index name to get index details.
+            Pass type=VIEW with view name to get definition.
+            Tags: [describe, metadata, introspect]
+            """)
     public Map<String, Object> describe(
             @McpToolParam(description = "Object type: TABLE, SCHEMA, INDEX, or VIEW") String type,
             @McpToolParam(description = "Object name (required for TABLE, INDEX)") String name,

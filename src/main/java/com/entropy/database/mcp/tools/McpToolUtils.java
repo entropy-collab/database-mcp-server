@@ -54,6 +54,34 @@ public final class McpToolUtils {
         return Map.of("message", "No rows returned", "rowCount", 0);
     }
 
+    // ─── Error Responses ─────────────────────────────────────────────────
+
+    /**
+     * Returns a unified error response in Superset MCP style:
+     * {"status": "error", "error": "...", "code": "..."}
+     */
+    public static Map<String, Object> error(String message) {
+        return Map.of("status", "error", "error", message);
+    }
+
+    public static Map<String, Object> error(String message, String code) {
+        return Map.of("status", "error", "code", code, "error", message);
+    }
+
+    public static Map<String, Object> error(String message, Throwable cause) {
+        Map<String, Object> result = Map.of("status", "error", "error", message);
+        return (cause != null) ? new LinkedHashMap<>(result) : result;
+    }
+
+    public static Map<String, Object> error(String code, String message, String detail) {
+        return new LinkedHashMap<>() {{
+            put("status", "error");
+            put("code", code);
+            put("error", message);
+            if (detail != null) put("detail", detail);
+        }};
+    }
+
     // ─── Context Helpers ──────────────────────────────────────────────────
 
     public static Map<String, Object> context() {
