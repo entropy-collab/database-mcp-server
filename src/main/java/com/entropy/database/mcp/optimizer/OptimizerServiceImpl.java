@@ -32,6 +32,53 @@ public class OptimizerServiceImpl implements OptimizerService {
 
     private static final Logger log = LoggerFactory.getLogger(OptimizerServiceImpl.class);
 
+    /**
+     * {@code SELECT *} detector.
+     *
+     * <p>Precompiled and used with {@code find()}. The previous
+     * {@code upper.matches(".*\\bSELECT\\s+\\*\\b.*")} never fired: {@code \b} after {@code \*}
+     * demands a word boundary between {@code *} and the following space, and neither is a word
+     * character, so {@code SELECT * FROM t} could not match. {@code matches()} plus a non-DOTALL
+     * {@code .} also failed on any multi-line statement.
+     */
+    private static final Pattern SELECT_STAR = Pattern.compile("\\bSELECT\\s+\\*",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+    /** A value that can appear on the right-hand side of an equality comparison. */
+    private static final String VALUE = "(?:'[^']*'|[-+]?\\d+(?:\\.\\d+)?|[A-Za-z_][\\w$#]*)";
+
+    /**
+     * Two equality comparisons on the <em>same</em> column joined by {@code OR} — the shape that
+     * actually benefits from {@code IN}. The old rule matched {@code (\w+)\s+IN\s*\(}, i.e. it
+     * detected SQL that already used {@code IN}: it never fired on an OR chain and told authors of
+     * correct {@code IN} queries to rewrite them as {@code IN}.
+     */
+    private static final Pattern OR_CHAIN_ON_SAME_COLUMN = Pattern.compile(
+            "([\\w.]+)\\s*=\\s*" + VALUE + "\\s+OR\\s+\\1\\s*=",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+    /** {@code col = a OR col = b} → {@code col IN (a, b)}. */
+    private static final Pattern OR_PAIR = Pattern.compile(
+            "([\\w.]+)\\s*=\\s*(" + VALUE + ")\\s+OR\\s+\\1\\s*=\\s*(" + VALUE + ")",
+            Pattern.CASE_INSENSITIVE);
+
+    /** {@code col IN (a, b) OR col = c} → {@code col IN (a, b, c)}, to fold longer chains. */
+    private static final Pattern IN_PLUS_EQUALS = Pattern.compile(
+            "([\\w.]+)\\s+IN\\s*\\(([^()]*)\\)\\s+OR\\s+\\1\\s*=\\s*(" + VALUE + ")",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Column on the left of a WHERE predicate.
+     *
+     * <p>The operator alternatives are ordered longest-first and, critically, carry no trailing
+     * {@code \b}: a {@code \b} after {@code =} demands a word boundary between {@code =} and the
+     * following space, which never holds, so {@code WHERE region = 'CN'} matched nothing and no
+     * index was ever recommended for an equality predicate.
+     */
+    private static final Pattern WHERE_PREDICATE_COLUMN = Pattern.compile(
+            "([\\w.\"\\[\\]`]+)\\s*(?:>=|<=|<>|!=|=|>|<|\\bIN\\b|\\bLIKE\\b)",
+            Pattern.CASE_INSENSITIVE);
+
     private final DynamicDataSourceManager dataSourceManager;
 
     public OptimizerServiceImpl(DynamicDataSourceManager dataSourceManager) {
@@ -106,7 +153,7 @@ public class OptimizerServiceImpl implements OptimizerService {
             List<IndexRecommendation> recs = new ArrayList<>();
             int priority = 1;
             for (Map<String, Object> row : candidates) {
-                String col = (String) row.get("column_name");
+                String col = columnNameOf(row);
                 if (col == null || indexedColumns.contains(col.toUpperCase())) continue;
 
                 // Determine index type and recommend SQL
@@ -139,7 +186,7 @@ public class OptimizerServiceImpl implements OptimizerService {
         String upper = sql.toUpperCase().trim();
 
         // SELECT * → specific columns
-        if (upper.matches(".*\\bSELECT\\s+\\*\\b.*")) {
+        if (SELECT_STAR.matcher(sql).find()) {
             suggestions.add(new RewriteSuggestion(
                     "SELECT_STAR",
                     "SELECT *",
@@ -171,10 +218,8 @@ public class OptimizerServiceImpl implements OptimizerService {
             ));
         }
 
-        // OR chain on same column
-        Pattern orPattern = Pattern.compile("(\\w+)\\s+IN\\s*\\(", Pattern.CASE_INSENSITIVE);
-        Matcher orMatcher = orPattern.matcher(upper);
-        if (orMatcher.find()) {
+        // OR chain of equality comparisons on the same column
+        if (OR_CHAIN_ON_SAME_COLUMN.matcher(sql).find()) {
             suggestions.add(new RewriteSuggestion(
                     "OR_TO_IN",
                     "A = x OR A = y OR A = z",
@@ -310,7 +355,10 @@ public class OptimizerServiceImpl implements OptimizerService {
 
     private long getEstimatedRowCount(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
         try {
-            String sql = dialect.getTableRowCountSql(tableName);
+            String queried = dialect.normalizeTableName(tableName);
+            // getTableRowCountSql declares no placeholder: the table name is an identifier in the
+            // FROM clause, which the dialect quotes into the SQL itself.
+            String sql = dialect.getTableRowCountSql(queried);
             if (sql == null) return -1;
             List<Map<String, Object>> rows = jdbc.queryForList(sql);
             if (!rows.isEmpty() && !rows.get(0).isEmpty()) {
@@ -325,17 +373,55 @@ public class OptimizerServiceImpl implements OptimizerService {
 
     private long getTableSizeMb(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
         try {
-            String sql = dialect.estimateTableSizeSql(tableName, null);
+            String queried = dialect.normalizeTableName(tableName);
+            String sql = dialect.estimateTableSizeSql(queried, null);
             if (sql == null) return -1;
-            List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
-            if (!rows.isEmpty() && !rows.get(0).isEmpty()) {
-                Object val = rows.get(0).values().iterator().next();
+            // One placeholder per the DatabaseDialect contract; GenericDialect renders a constant row
+            // with no placeholder, so only bind when the dialect actually declared one.
+            List<Map<String, Object>> rows = sql.contains("?")
+                    ? jdbc.queryForList(sql, queried)
+                    : jdbc.queryForList(sql);
+            if (!rows.isEmpty()) {
+                // Read the column by name: every dialect's size query starts with segment_name, so
+                // taking the first value returned the table name and degraded the size to -1.
+                Object val = sizeColumnOf(rows.get(0));
                 return val instanceof Number n ? n.longValue() : -1;
             }
         } catch (Exception e) {
             log.debug("Table size unavailable: {}", e.getMessage());
         }
         return -1;
+    }
+
+    /** {@code size_mb} under either casing, else the first numeric column of the row. */
+    private static Object sizeColumnOf(Map<String, Object> row) {
+        Object value = row.get("size_mb");
+        if (value == null) {
+            value = row.get("SIZE_MB");
+        }
+        if (value == null) {
+            for (Object candidate : row.values()) {
+                if (candidate instanceof Number) return candidate;
+            }
+        }
+        return value;
+    }
+
+    /** Oracle and H2 label the column {@code COLUMN_NAME}; MySQL and PostgreSQL use lower case. */
+    private static String columnNameOf(Map<String, Object> row) {
+        Object value = row.get("column_name");
+        if (value == null) {
+            value = row.get("COLUMN_NAME");
+        }
+        if (value == null) {
+            for (Map.Entry<String, Object> entry : row.entrySet()) {
+                if ("column_name".equalsIgnoreCase(entry.getKey())) {
+                    value = entry.getValue();
+                    break;
+                }
+            }
+        }
+        return value != null ? String.valueOf(value) : null;
     }
 
     private List<String> analyzePlan(List<String> planRows, String upperSql, DatabaseDialect dialect) {
@@ -399,6 +485,9 @@ public class OptimizerServiceImpl implements OptimizerService {
             List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
             for (Map<String, Object> row : rows) {
                 Object col = row.get("column_name");
+                if (col == null) {
+                    col = row.get("COLUMN_NAME");
+                }
                 if (col != null) cols.add(col.toString().toUpperCase());
             }
         } catch (Exception e) {
@@ -417,26 +506,28 @@ public class OptimizerServiceImpl implements OptimizerService {
         int whereIdx = upper.indexOf("WHERE ");
         if (whereIdx < 0) return recs;
 
-        String whereClause = sql.substring(whereIdx + 6).trim();
+        String whereClause = sql.substring(whereIdx + 6).trim().toUpperCase();
+        String table = tables.get(0);
+        String normalizedTable = dialect.normalizeTableName(table);
+
+        // The index list is a property of the table, not of the column being examined: fetching it
+        // once outside the loop replaces one connection acquisition plus one metadata query per
+        // distinct WHERE column with a single pair, and every one of those queries returned the
+        // same rows anyway.
+        ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+        Set<String> indexedCols = getIndexedColumns(ctx.getJdbcTemplate(), dialect, normalizedTable);
+
         // Simple extraction: column = value or column IN (...)
-        Pattern colPattern = Pattern.compile("([\\w.\"\\[\\]`]+)\\s*(=|IN|>=|<=|>|<|LIKE)\\b");
-        Matcher m = colPattern.matcher(whereClause.toUpperCase() + " " + whereClause);
+        Matcher m = WHERE_PREDICATE_COLUMN.matcher(whereClause);
         Set<String> seen = new HashSet<>();
         while (m.find()) {
             String col = m.group(1).replaceAll("[\"\\[\\]`]", "").toUpperCase();
-            if (seen.add(col)) {
-                String table = tables.get(0);
-                // Check if column is already indexed
-                ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-                Set<String> indexedCols = getIndexedColumns(ctx.getJdbcTemplate(), dialect,
-                        dialect.normalizeTableName(table));
-                if (indexedCols.contains(col)) continue;
-
-                String normalizedTable = dialect.normalizeTableName(table);
-                String createSql = buildCreateIndexSql(dialect, normalizedTable, col, "BTREE");
-                recs.add(new IndexRecommendation(normalizedTable, col, "BTREE",
-                        createSql, "WHERE 条件中未索引的列: " + col, 1));
+            if (!seen.add(col) || indexedCols.contains(col)) {
+                continue;
             }
+            String createSql = buildCreateIndexSql(dialect, normalizedTable, col, "BTREE");
+            recs.add(new IndexRecommendation(normalizedTable, col, "BTREE",
+                    createSql, "WHERE 条件中未索引的列: " + col, 1));
         }
         return recs;
     }
@@ -450,10 +541,11 @@ public class OptimizerServiceImpl implements OptimizerService {
         try {
             String candSql = dialect.candidateColumnsForIndexSql(tableName);
             if (candSql == null) return recs;
-            List<Map<String, Object>> candidates = jdbc.queryForList(candSql, tableName);
+            List<Map<String, Object>> candidates =
+                    jdbc.queryForList(candSql, tableName);
             if (candidates.size() >= 2) {
-                String col1 = (String) candidates.get(0).get("column_name");
-                String col2 = (String) candidates.get(1).get("column_name");
+                String col1 = columnNameOf(candidates.get(0));
+                String col2 = columnNameOf(candidates.get(1));
                 if (col1 != null && col2 != null && !indexedColumns.contains(col1.toUpperCase())
                         && !indexedColumns.contains(col2.toUpperCase())) {
                     String compositeSql = String.format(
@@ -543,27 +635,25 @@ public class OptimizerServiceImpl implements OptimizerService {
     }
 
     private String rewriteOrToIn(String sql) {
-        Pattern orPat = Pattern.compile(
-                "(\\w+)\\s*=\\s*'([^']+)'\s*OR\\s+\\1\\s*=\\s*'([^']+)'",
-                Pattern.CASE_INSENSITIVE);
-        Matcher m = orPat.matcher(sql);
-        return m.replaceAll("$1 IN ('$2', '$3')");
+        String current = sql;
+        for (int pass = 0; pass < 10; pass++) {
+            String folded = OR_PAIR.matcher(current).replaceAll("$1 IN ($2, $3)");
+            folded = IN_PLUS_EQUALS.matcher(folded).replaceAll("$1 IN ($2, $3)");
+            if (folded.equals(current)) {
+                return current;
+            }
+            current = folded;
+        }
+        return current;
     }
 
+    /**
+     * Delegates to {@link NotInToNotExistsRewriter}, which rewrites on the JSQLParser AST and
+     * returns the original SQL whenever a safe rewrite is not possible. The suggestion text below
+     * still explains the transformation, so an unrewritable query yields advice rather than SQL the
+     * model must not execute.
+     */
     private String rewriteNotInToNotExists(String sql) {
-        Pattern pat = Pattern.compile(
-                "NOT\\s+IN\\s*\\(\\s*SELECT\\s+(\\w+)\\s+FROM\\s+(\\w+)\\s*(WHERE\\s+[^)]+)?\\s*\\)",
-                Pattern.CASE_INSENSITIVE);
-        Matcher m = pat.matcher(sql);
-        if (m.find()) {
-            String col = m.group(1);
-            String table = m.group(2);
-            String where = m.group(3) != null ? m.group(3).trim() : "";
-            return sql.replaceAll("(?i)NOT\\s+IN\\s*\\(\\s*SELECT[^)]+\\)",
-                    "NOT EXISTS (SELECT 1 FROM " + table
-                            + (where.isEmpty() ? "" : " WHERE " + where)
-                            + " WHERE " + table + "." + col + " = outer." + col + ")");
-        }
-        return sql;
+        return NotInToNotExistsRewriter.rewrite(sql);
     }
 }

@@ -20,14 +20,17 @@ import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
+import com.entropy.database.mcp.properties.BackupProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.*;
 
@@ -39,13 +42,29 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseBackupServiceImpl.class);
 
+    /**
+     * Column names accepted as an incremental watermark, in order of preference.
+     *
+     * <p>Update timestamps come first: a creation timestamp only sees inserts, so an incremental
+     * backup keyed on it silently misses updates. That is still better than a full scan mislabelled
+     * as incremental, so creation timestamps are accepted last and reported in the result.
+     */
+    private static final List<String> WATERMARK_CANDIDATES = List.of(
+            "UPDATED_AT", "UPDATE_TIME", "UPDATED_ON", "UPDATED_TIME",
+            "MODIFIED_AT", "MODIFY_TIME", "MODIFIED_TIME", "LAST_MODIFIED",
+            "LAST_UPDATE", "LAST_UPDATED", "GMT_MODIFIED",
+            "CREATED_AT", "CREATE_TIME", "CREATED_TIME", "GMT_CREATE");
+
     private final DynamicDataSourceManager dataSourceManager;
     private final BackupMetadataRepository metadataRepository;
+    private final BackupProperties backupProperties;
 
     public DatabaseBackupServiceImpl(DynamicDataSourceManager dataSourceManager,
-                                     BackupMetadataRepository metadataRepository) {
+                                     BackupMetadataRepository metadataRepository,
+                                     BackupProperties backupProperties) {
         this.dataSourceManager = dataSourceManager;
         this.metadataRepository = metadataRepository;
+        this.backupProperties = backupProperties;
     }
 
     // ─── Full Backup ────────────────────────────────────────────────────────
@@ -58,8 +77,9 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         String sql = dialect.getTableDdlQuery(tableName, null);
         String ddl = jdbc.queryForObject(sql, new Object[]{tableName, null}, String.class);
 
+        Instant now = Instant.now();
         BackupMetadata meta = BackupMetadata.create(connection, tableName, null,
-                BackupType.FULL, BackupStatus.COMPLETED, ddl, 0, 0);
+                BackupType.FULL, BackupStatus.COMPLETED, ddl, 0, 0).withTiming(now, now);
         String id = metadataRepository.save(meta);
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -79,43 +99,73 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
 
     // ─── Incremental Backup ─────────────────────────────────────────────────
 
-    /**
-     * Backup only rows changed since the last completed backup.
-     * Watermark is tracked via the latest completed backup's completedAt timestamp.
-     */
+    @Override
     public Map<String, Object> backupDataIncremental(String tableName, int maxRows, String connection) {
+        return backupDataIncremental(tableName, maxRows, connection, null);
+    }
+
+    /**
+     * Backs up only the rows whose watermark column moved past the previous backup.
+     *
+     * <p>An incremental backup that does not filter is a full backup, and labelling it
+     * {@code INCREMENTAL} makes a later restore replay rows that are already there. So the filter is
+     * mandatory: when no watermark column is given and none can be detected, the request is
+     * <em>refused</em> with an explanation rather than degraded to a full scan under an incremental
+     * label. Callers who want everything can ask for a full backup explicitly.
+     *
+     * @param watermarkColumn the timestamp column to filter on, or {@code null} to auto-detect one
+     *                        from {@link #WATERMARK_CANDIDATES}
+     */
+    @Override
+    public Map<String, Object> backupDataIncremental(String tableName, int maxRows, String connection,
+                                                     String watermarkColumn) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
         JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
-        BackupMetadata lastBackup = metadataRepository.latestFor(connection, tableName);
-        Instant watermark = lastBackup != null ? lastBackup.completedAt() : Instant.EPOCH;
-
-        String columnsSql = dialect.columnsQuery(tableName, null);
-        List<Map<String, Object>> columnInfo = jdbc.queryForList(
-                columnsSql, null, dialect.normalizeTableName(tableName));
-
-        if (columnInfo.isEmpty()) {
+        List<String> columnNames = readColumnNames(jdbc, dialect, tableName, null);
+        if (columnNames.isEmpty()) {
             return Map.of("error", "Table not found: " + tableName);
         }
 
-        List<String> columnNames = new ArrayList<>();
-        for (Map<String, Object> col : columnInfo) {
-            columnNames.add((String) col.get("column_name"));
+        String resolvedWatermarkColumn = resolveWatermarkColumn(columnNames, watermarkColumn);
+        if (resolvedWatermarkColumn == null) {
+            return Map.of(
+                    "error", "Incremental backup refused for " + tableName
+                            + ": no watermark column available",
+                    "reason", watermarkColumn != null
+                            ? "Column '" + watermarkColumn + "' does not exist on " + tableName
+                            : "None of the recognised watermark columns exist on " + tableName,
+                    "recognisedWatermarkColumns", WATERMARK_CANDIDATES,
+                    "hint", "Pass an explicit watermark column, or run a FULL backup — a backup "
+                            + "without a watermark filter is a full copy and must not be recorded "
+                            + "as INCREMENTAL");
         }
 
-        String selectSql = "SELECT " + String.join(", ", columnNames)
-                + " FROM " + dialect.quote(tableName);
-        if (maxRows > 0) {
-            selectSql = dialect.applyLimit(selectSql, maxRows, 0);
+        Instant watermark = resolveWatermark(connection, tableName);
+
+        String selectSql = "SELECT " + quoteAll(dialect, columnNames)
+                + " FROM " + dialect.quote(tableName)
+                + " WHERE " + dialect.quote(resolvedWatermarkColumn) + " > ?";
+        selectSql = dialect.applyLimit(selectSql, resolveMaxRows(maxRows), 0);
+
+        List<Map<String, Object>> rows;
+        try {
+            rows = jdbc.queryForList(selectSql, Timestamp.from(watermark));
+        } catch (DataAccessException e) {
+            throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
+                    "Incremental backup of " + tableName + " failed while filtering on "
+                            + resolvedWatermarkColumn + " — the watermark column must be a date/time "
+                            + "type comparable to a timestamp. Cause: " + e.getMessage(), e);
         }
 
-        List<Map<String, Object>> rows = jdbc.queryForList(selectSql);
         List<String> insertStatements = generateInsertStatements(tableName, columnNames, rows, dialect);
 
+        Instant now = Instant.now();
         BackupMetadata meta = BackupMetadata.create(connection, tableName, null,
-                BackupType.INCREMENTAL, BackupStatus.COMPLETED,
-                String.join("\n", insertStatements), rows.size(), rows.size());
+                        BackupType.INCREMENTAL, BackupStatus.COMPLETED,
+                        String.join("\n", insertStatements), rows.size(), rows.size())
+                .withTiming(now, now);
         String id = metadataRepository.save(meta);
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -123,10 +173,47 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         result.put("tableName", tableName);
         result.put("connection", connection);
         result.put("type", "INCREMENTAL");
+        result.put("watermarkColumn", resolvedWatermarkColumn);
         result.put("watermark", watermark.toString());
         result.put("rowsBackedUp", rows.size());
         result.put("statements", insertStatements);
         return result;
+    }
+
+    /**
+     * @return the matching column name as spelled by the table, or {@code null} when there is none
+     */
+    private String resolveWatermarkColumn(List<String> columnNames, String requested) {
+        if (requested != null && !requested.isBlank()) {
+            return columnNames.stream()
+                    .filter(c -> c.equalsIgnoreCase(requested.trim()))
+                    .findFirst()
+                    .orElse(null);
+        }
+        for (String candidate : WATERMARK_CANDIDATES) {
+            Optional<String> match = columnNames.stream()
+                    .filter(c -> c.equalsIgnoreCase(candidate))
+                    .findFirst();
+            if (match.isPresent()) {
+                return match.get();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Watermark of the previous backup.
+     *
+     * <p>{@code completedAt} is null on a record that was never timed, so it is only used when
+     * present; {@code createdAt} is never null. The old {@code watermark.toString()} on a null
+     * {@code completedAt} threw an NPE instead.
+     */
+    private Instant resolveWatermark(String connection, String tableName) {
+        BackupMetadata lastBackup = metadataRepository.latestFor(connection, tableName);
+        if (lastBackup == null) {
+            return Instant.EPOCH;
+        }
+        return lastBackup.completedAt() != null ? lastBackup.completedAt() : lastBackup.createdAt();
     }
 
     // ─── Restore ─────────────────────────────────────────────────────────────
@@ -137,7 +224,14 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
      * <p>All statements run on one JDBC connection with {@code autoCommit=false}. Any failure
      * rolls the whole batch back and surfaces an error — a restore is never reported as
      * COMPLETED when part of it did not apply.
+     *
+     * <p>The backup record itself is never modified. Writing the restore's outcome back onto it
+     * conflated two different things: a failed restore marked the <em>backup</em> FAILED, and the
+     * {@code isFailed()} guard below then refused every later attempt — one transient outage in the
+     * target database permanently retired an intact backup. Restore outcomes live in the returned
+     * {@link RestoreResult} instead.
      */
+    @Override
     public Map<String, Object> restoreBackup(String backupId, String connection) {
         BackupMetadata meta = metadataRepository.get(backupId);
         if (meta == null) {
@@ -155,24 +249,17 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         try {
             restoredRows = replayInTransaction(ctx, null, statements);
         } catch (Exception e) {
-            metadataRepository.update(meta.withError("Restore failed: " + e.getMessage())
-                    .withTiming(startedAt, Instant.now()));
+            log.warn("Restore of backup {} failed after {} ms; the backup record is left intact "
+                            + "so the restore can be retried",
+                    backupId, java.time.Duration.between(startedAt, Instant.now()).toMillis(), e);
             throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
                     "Restore failed for backup " + backupId + " — the transaction was rolled back, "
-                            + "so the table is unchanged. Cause: " + e.getMessage(), e);
+                            + "so the table is unchanged and the backup remains usable. Cause: "
+                            + e.getMessage(), e);
         }
 
-        metadataRepository.update(BackupMetadata.updated(meta, BackupStatus.COMPLETED,
-                startedAt, Instant.now(), restoredRows, null));
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("backupId", backupId);
-        result.put("tableName", meta.tableName());
-        result.put("connection", connection);
-        result.put("statementsApplied", statements.size());
-        result.put("restoredRows", restoredRows);
-        result.put("status", "COMPLETED");
-        return result;
+        return new RestoreResult(backupId, meta.tableName(), connection, "COMPLETED",
+                statements.size(), restoredRows, startedAt, Instant.now()).asMap();
     }
 
     /**
@@ -184,6 +271,7 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
      * empty. {@code DELETE} participates in the transaction, so a failed replay restores the
      * original rows. The trade-off is speed on very large tables.
      */
+    @Override
     public Map<String, Object> quickRestore(String backupId, String connection) {
         BackupMetadata meta = metadataRepository.get(backupId);
         if (meta == null) {
@@ -207,25 +295,16 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
             restoredRows = replayInTransaction(ctx,
                     "DELETE FROM " + dialect.quote(tableName), inserts);
         } catch (Exception e) {
-            metadataRepository.update(meta.withError("Quick restore failed: " + e.getMessage())
-                    .withTiming(startedAt, Instant.now()));
+            log.warn("Quick restore of backup {} failed; the backup record is left intact so the "
+                    + "restore can be retried", backupId, e);
             throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
                     "Quick restore failed for backup " + backupId + " — the transaction was rolled "
-                            + "back, so " + tableName + " still holds its original rows. Cause: "
-                            + e.getMessage(), e);
+                            + "back, so " + tableName + " still holds its original rows and the "
+                            + "backup remains usable. Cause: " + e.getMessage(), e);
         }
 
-        metadataRepository.update(BackupMetadata.updated(meta, BackupStatus.COMPLETED,
-                startedAt, Instant.now(), restoredRows, null));
-
-        return Map.of(
-                "backupId", backupId,
-                "tableName", tableName,
-                "connection", connection,
-                "statementsApplied", inserts.size(),
-                "restoredRows", restoredRows,
-                "status", "QUICK_RESTORE_COMPLETED"
-        );
+        return new RestoreResult(backupId, tableName, connection, "QUICK_RESTORE_COMPLETED",
+                inserts.size(), restoredRows, startedAt, Instant.now()).asMap();
     }
 
     /**
@@ -390,34 +469,23 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         DatabaseDialect dialect = ctx.getDialect();
         JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
-        String columnsSql = dialect.columnsQuery(tableName, schema);
-        Object schemaArg = schema != null
-                ? ctx.getDialect().normalizeTableName(schema)
-                : null;
-        List<Map<String, Object>> columnInfo = jdbc.queryForList(
-                columnsSql, schemaArg, dialect.normalizeTableName(tableName));
-
-        if (columnInfo.isEmpty()) {
+        List<String> columnNames = readColumnNames(jdbc, dialect, tableName, schema);
+        if (columnNames.isEmpty()) {
             return Map.of("error", "Table not found: " + tableName);
         }
 
-        List<String> columnNames = new ArrayList<>();
-        for (Map<String, Object> col : columnInfo) {
-            columnNames.add((String) col.get("column_name"));
-        }
-
-        String selectSql = "SELECT " + String.join(", ", columnNames)
-                + " FROM " + dialect.quote(tableName);
-        if (maxRows > 0) {
-            selectSql = dialect.applyLimit(selectSql, maxRows, 0);
-        }
+        int effectiveMaxRows = resolveMaxRows(maxRows);
+        String selectSql = dialect.applyLimit("SELECT " + quoteAll(dialect, columnNames)
+                + " FROM " + dialect.quote(tableName), effectiveMaxRows, 0);
 
         List<Map<String, Object>> rows = jdbc.queryForList(selectSql);
         List<String> insertStatements = generateInsertStatements(tableName, columnNames, rows, dialect);
         String sqlScript = String.join("\n", insertStatements);
 
+        Instant now = Instant.now();
         BackupMetadata meta = BackupMetadata.create(connection, tableName, schema,
-                type, BackupStatus.COMPLETED, sqlScript, rows.size(), rows.size());
+                type, BackupStatus.COMPLETED, sqlScript, rows.size(), rows.size())
+                .withTiming(now, now);
         String id = metadataRepository.save(meta);
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -425,10 +493,82 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         result.put("tableName", tableName);
         result.put("connection", connection);
         result.put("type", type.name());
+        result.put("maxRows", effectiveMaxRows);
         result.put("totalRows", rows.size());
         result.put("rowCount", rows.size());
+        result.put("truncated", rows.size() >= effectiveMaxRows);
         result.put("statements", insertStatements);
         return result;
+    }
+
+    /**
+     * Row ceiling actually applied to a backup query.
+     *
+     * <p>{@code maxRows <= 0} used to mean "no limit at all": the whole table was read into memory,
+     * turned into one INSERT string per row and joined into a single script held by the metadata
+     * store, so the peak footprint was several times the table size. There is now always a ceiling,
+     * taken from {@code entropy.mcp.database.backup.max-backup-rows}.
+     */
+    private int resolveMaxRows(int requested) {
+        int ceiling = backupProperties.maxBackupRows();
+        if (requested <= 0) {
+            log.debug("Backup requested with maxRows={}, applying the configured ceiling of {}",
+                    requested, ceiling);
+            return ceiling;
+        }
+        return Math.min(requested, ceiling);
+    }
+
+    private List<String> readColumnNames(JdbcTemplate jdbc, DatabaseDialect dialect,
+                                          String tableName, String schema) {
+        String columnsSql = dialect.columnsQuery(tableName, schema);
+        Object schemaArg = schema != null ? dialect.normalizeTableName(schema) : null;
+        List<Map<String, Object>> columnInfo = jdbc.queryForList(columnsSql,
+                schemaAndTableArgs(columnsSql, schemaArg, dialect.normalizeTableName(tableName)));
+
+        List<String> columnNames = new ArrayList<>();
+        for (Map<String, Object> col : columnInfo) {
+            Object name = col.get("column_name");
+            if (name == null) {
+                name = col.get("COLUMN_NAME");
+            }
+            if (name != null) {
+                columnNames.add(String.valueOf(name));
+            }
+        }
+        return columnNames;
+    }
+
+    /**
+     * Binds the arguments a dialect's {@code columnsQuery} actually declares.
+     *
+     * <p>Most dialects emit two placeholders (schema, table), but those that cannot filter by schema
+     * emit only the table one. Passing a fixed pair of arguments to a single-placeholder statement
+     * fails with a parameter-count mismatch before the backup even starts, so the argument list
+     * follows the SQL rather than the other way round.
+     */
+    private static Object[] schemaAndTableArgs(String sql, Object schemaArg, Object tableArg) {
+        return countPlaceholders(sql) <= 1
+                ? new Object[]{tableArg}
+                : new Object[]{schemaArg, tableArg};
+    }
+
+    private static int countPlaceholders(String sql) {
+        int count = 0;
+        boolean inLiteral = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (c == '\'') {
+                inLiteral = !inLiteral;
+            } else if (c == '?' && !inLiteral) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private String quoteAll(DatabaseDialect dialect, List<String> columnNames) {
+        return columnNames.stream().map(dialect::quote).reduce((a, b) -> a + ", " + b).orElse("*");
     }
 
     private List<String> generateInsertStatements(String tableName, List<String> columnNames,
@@ -437,11 +577,11 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         for (Map<String, Object> row : rows) {
             StringBuilder sb = new StringBuilder();
             sb.append("INSERT INTO ").append(dialect.quote(tableName)).append(" (");
-            sb.append(String.join(", ", columnNames));
+            sb.append(quoteAll(dialect, columnNames));
             sb.append(") VALUES (");
             List<String> values = new ArrayList<>();
             for (String col : columnNames) {
-                Object val = row.get(col);
+                Object val = row.containsKey(col) ? row.get(col) : row.get(col.toUpperCase(Locale.ROOT));
                 values.add(formatValue(val));
             }
             sb.append(String.join(", ", values)).append(");");
@@ -453,19 +593,24 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
     private String formatValue(Object value) {
         if (value == null) return "NULL";
         if (value instanceof String) return "'" + ((String) value).replace("'", "''") + "'";
-        return String.valueOf(value);
+        if (value instanceof Number || value instanceof Boolean) return String.valueOf(value);
+        return "'" + String.valueOf(value).replace("'", "''") + "'";
     }
 
     private Map<String, Map<String, Object>> getTableColumns(String tableName,
                                                               DatabaseDialect dialect,
                                                               JdbcTemplate jdbc) {
         try {
-            List<Map<String, Object>> columns = jdbc.queryForList(
-                    dialect.columnsQuery(tableName, null),
-                    null, dialect.normalizeTableName(tableName));
+            String columnsSql = dialect.columnsQuery(tableName, null);
+            List<Map<String, Object>> columns = jdbc.queryForList(columnsSql,
+                    schemaAndTableArgs(columnsSql, null, dialect.normalizeTableName(tableName)));
             Map<String, Map<String, Object>> result = new LinkedHashMap<>();
             for (Map<String, Object> col : columns) {
-                result.put((String) col.get("column_name"), col);
+                Object name = col.get("column_name") != null
+                        ? col.get("column_name") : col.get("COLUMN_NAME");
+                if (name != null) {
+                    result.put(String.valueOf(name), col);
+                }
             }
             return result;
         } catch (Exception e) {

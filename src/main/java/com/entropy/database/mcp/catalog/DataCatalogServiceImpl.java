@@ -24,12 +24,26 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.regex.Pattern;
 
 @Service
 public class DataCatalogServiceImpl implements DataCatalogService {
 
     private static final Logger log = LoggerFactory.getLogger(DataCatalogServiceImpl.class);
+
+    /**
+     * Upper bound on concurrent per-table catalog generation.
+     *
+     * <p>Every table costs three round trips on a connection borrowed from the BYOK pool, so an
+     * unbounded {@code parallelStream()} over a thousand-table schema would try to occupy the whole
+     * pool (and starve every other caller of the same connection). Four is deliberately smaller
+     * than the default pool size.
+     */
+    private static final int SCAN_PARALLELISM = 4;
 
     /** Keyword patterns that indicate sensitive personal/financial data. */
     private static final List<Pattern> SENSITIVITY_PATTERNS = List.of(
@@ -73,34 +87,48 @@ public class DataCatalogServiceImpl implements DataCatalogService {
     public DataCatalogEntry generateCatalog(String tableName, String connection) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
-            DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
-            String normalizedTable = dialect.normalizeTableName(tableName);
-
-            // Table comments
-            String tableComment = fetchTableComment(jdbc, dialect, normalizedTable);
-
-            // Column comments
-            List<DataElement> columns = fetchColumnComments(jdbc, dialect, normalizedTable);
-
-            // Row count
-            long rowCount = estimateRowCount(jdbc, dialect, normalizedTable);
-
-            // Table size
-            long sizeMb = estimateTableSize(jdbc, dialect, normalizedTable);
-
-            // Classify
-            DataCategory overallCat = inferCategory(columns, tableComment);
-            SensitivityLevel maxSens = inferMaxSensitivity(columns);
-            List<String> keywords = extractKeywords(columns, tableComment);
-            String description = buildDescription(tableComment, rowCount, columns.size());
-
-            return new DataCatalogEntry(connection, null, normalizedTable, tableComment,
-                    rowCount, sizeMb, columns, overallCat, maxSens, keywords, description);
+            return generateCatalog(ctx, tableName, connection, null, null);
         } catch (Exception e) {
             log.warn("Failed to generate catalog for {}: {}", tableName, e.getMessage(), e);
-            return buildErrorEntry(tableName, connection, null);
+            return buildErrorEntry(tableName, connection);
         }
+    }
+
+    /**
+     * Builds one catalog entry on an already-acquired context.
+     *
+     * @param schema        the schema the table lives in, or {@code null} for the connection's current
+     *                      one. Passed on to every dialect metadata query: without it a scan of a
+     *                      non-default schema looked up each table in the current schema instead and
+     *                      came back empty.
+     * @param tableComments schema-wide table comment lookup (upper-cased table name to comment), or
+     *                      {@code null} to fetch the single table's comment on demand
+     */
+    private DataCatalogEntry generateCatalog(ByokDataSourceContext ctx, String tableName,
+                                             String connection, String schema,
+                                             Map<String, String> tableComments) {
+        DatabaseDialect dialect = ctx.getDialect();
+        JdbcTemplate jdbc = ctx.getJdbcTemplate();
+        String normalizedTable = dialect.normalizeTableName(tableName);
+
+        String tableComment = tableComments != null
+                ? tableComments.getOrDefault(normalize(normalizedTable), "")
+                : fetchTableComment(jdbc, dialect, schema, normalizedTable);
+
+        ColumnMetadata columnMetadata = fetchColumnComments(jdbc, dialect, schema, normalizedTable);
+        List<DataElement> columns = columnMetadata.columns();
+
+        long rowCount = estimateRowCount(jdbc, dialect, schema, normalizedTable);
+        long sizeMb = estimateTableSize(jdbc, dialect, schema, normalizedTable);
+
+        DataCategory overallCat = inferCategory(columns, tableComment);
+        SensitivityLevel maxSens = inferMaxSensitivity(columns);
+        List<String> keywords = extractKeywords(columns, tableComment);
+        String description = buildDescription(tableComment, rowCount, columns.size(),
+                columnMetadata.failure());
+
+        return new DataCatalogEntry(connection, schema, normalizedTable, tableComment,
+                rowCount, sizeMb, columns, overallCat, maxSens, keywords, description);
     }
 
     @Override
@@ -110,19 +138,24 @@ public class DataCatalogServiceImpl implements DataCatalogService {
             DatabaseDialect dialect = ctx.getDialect();
             JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
-            // Get all tables
-            List<Map<String, Object>> tables = jdbc.queryForList(dialect.tablesQuery(schema), schema);
-            List<DataCatalogEntry> entries = new ArrayList<>();
+            String tablesSql = dialect.tablesQuery(schema);
+            List<Map<String, Object>> tables = schema != null
+                    ? jdbc.queryForList(tablesSql, schema)
+                    : jdbc.queryForList(tablesSql);
 
-            int batchSize = 20;
-            for (int i = 0; i < tables.size(); i += batchSize) {
-                List<Map<String, Object>> batch = tables.subList(i, Math.min(i + batchSize, tables.size()));
-                batch.parallelStream().forEach(row -> {
-                    String tname = String.valueOf(row.get("table_name"));
-                    entries.add(generateCatalog(tname, connection));
-                });
+            List<String> tableNames = tables.stream()
+                    .map(row -> rowString(row, "table_name", null))
+                    .filter(Objects::nonNull)
+                    .filter(name -> !name.isBlank())
+                    .toList();
+            if (tableNames.isEmpty()) {
+                return List.of();
             }
-            return entries;
+
+            // One query for the whole schema instead of one per table.
+            Map<String, String> tableComments = fetchAllTableComments(jdbc, dialect, schema);
+
+            return generateCatalogs(ctx, tableNames, connection, schema, tableComments);
         } catch (Exception e) {
             log.warn("Schema scan failed for {}: {}", schema, e.getMessage(), e);
             return List.of();
@@ -137,23 +170,84 @@ public class DataCatalogServiceImpl implements DataCatalogService {
             JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
             String searchSql = dialect.searchTableCommentsQuery(keyword);
+            List<Map<String, Object>> rows;
             if (searchSql == null) {
                 // Fallback: search via standard table search
-                String fallbackSql = dialect.searchTablesQuery(keyword);
-                List<Map<String, Object>> rows = jdbc.queryForList(fallbackSql, keyword);
-                return rows.stream()
-                        .map(row -> generateCatalog((String) row.get("table_name"), connection))
-                        .toList();
+                rows = jdbc.queryForList(dialect.searchTablesQuery(keyword), "%" + keyword + "%");
+            } else {
+                String kw = "%" + keyword + "%";
+                rows = jdbc.queryForList(searchSql, kw, kw);
             }
 
-            String kw = "%" + keyword + "%";
-            List<Map<String, Object>> rows = jdbc.queryForList(searchSql, kw, kw);
-            return rows.stream()
-                    .map(row -> generateCatalog((String) row.get("table_name"), connection))
+            List<String> tableNames = rows.stream()
+                    .map(row -> rowString(row, "table_name", null))
+                    .filter(Objects::nonNull)
                     .toList();
+            if (tableNames.isEmpty()) {
+                return List.of();
+            }
+            return generateCatalogs(ctx, tableNames, connection, null,
+                    fetchAllTableComments(jdbc, dialect, null));
         } catch (Exception e) {
             log.warn("Asset search failed: {}", e.getMessage(), e);
             return List.of();
+        }
+    }
+
+    /**
+     * Generates catalog entries for several tables with bounded concurrency.
+     *
+     * <p>Results are collected from {@link Future}s in submission order: the previous implementation
+     * had every worker call {@code ArrayList.add} on one shared list, which drops entries, leaves
+     * null holes or throws {@code ArrayIndexOutOfBoundsException} depending on timing.
+     */
+    private List<DataCatalogEntry> generateCatalogs(ByokDataSourceContext ctx, List<String> tableNames,
+                                                    String connection, String schema,
+                                                    Map<String, String> tableComments) {
+        int parallelism = Math.min(SCAN_PARALLELISM, tableNames.size());
+        if (parallelism <= 1) {
+            return tableNames.stream()
+                    .map(name -> safeGenerateCatalog(ctx, name, connection, schema, tableComments))
+                    .toList();
+        }
+
+        try (ExecutorService pool = Executors.newFixedThreadPool(parallelism, runnable -> {
+            Thread thread = new Thread(runnable, "catalog-scan");
+            thread.setDaemon(true);
+            return thread;
+        })) {
+            List<Future<DataCatalogEntry>> futures = tableNames.stream()
+                    .map(name -> pool.submit(
+                            () -> safeGenerateCatalog(ctx, name, connection, schema, tableComments)))
+                    .toList();
+
+            List<DataCatalogEntry> entries = new ArrayList<>(futures.size());
+            for (int i = 0; i < futures.size(); i++) {
+                try {
+                    entries.add(futures.get(i).get());
+                } catch (ExecutionException e) {
+                    log.warn("Catalog generation failed for {}: {}",
+                            tableNames.get(i), e.getCause() != null ? e.getCause() : e, e);
+                    entries.add(buildErrorEntry(tableNames.get(i), connection));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("Schema scan interrupted after {} of {} tables",
+                            entries.size(), tableNames.size());
+                    return List.copyOf(entries);
+                }
+            }
+            return entries;
+        }
+    }
+
+    private DataCatalogEntry safeGenerateCatalog(ByokDataSourceContext ctx, String tableName,
+                                                 String connection, String schema,
+                                                 Map<String, String> tableComments) {
+        try {
+            return generateCatalog(ctx, tableName, connection, schema, tableComments);
+        } catch (Exception e) {
+            log.warn("Failed to generate catalog for {}: {}", tableName, e.getMessage(), e);
+            return buildErrorEntry(tableName, connection);
         }
     }
 
@@ -222,36 +316,82 @@ public class DataCatalogServiceImpl implements DataCatalogService {
 
     // ─── Private Helpers ─────────────────────────────────────────────────────
 
-    private String fetchTableComment(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
+    /**
+     * Reads the table comments of the whole schema once.
+     *
+     * @return upper-cased table name to comment; empty when the dialect exposes no comment source
+     */
+    private Map<String, String> fetchAllTableComments(JdbcTemplate jdbc, DatabaseDialect dialect,
+                                                      String schema) {
+        String sql = dialect.tableCommentsQuery(schema);
+        if (sql == null) {
+            return Map.of();
+        }
         try {
-            String sql = dialect.tableCommentsQuery();
-            if (sql == null) return "";
-            List<Map<String, Object>> rows = jdbc.queryForList(sql);
-            return rows.stream()
-                    .filter(r -> tableName.equalsIgnoreCase(String.valueOf(r.get("table_name"))))
-                    .map(r -> String.valueOf(r.getOrDefault("table_comment", "")))
-                    .findFirst()
-                    .orElse("");
+            Map<String, String> comments = new HashMap<>();
+            for (Map<String, Object> row : jdbc.queryForList(sql)) {
+                String name = rowString(row, "table_name", null);
+                if (name != null) {
+                    comments.put(normalize(name), rowString(row, "table_comment", ""));
+                }
+            }
+            return comments;
         } catch (Exception e) {
-            return "";
+            log.warn("Table comment fetch failed: {}", e.getMessage(), e);
+            return Map.of();
         }
     }
 
-    private List<DataElement> fetchColumnComments(JdbcTemplate jdbc, DatabaseDialect dialect,
-                                                   String tableName) {
+    /**
+     * Reads the comment of a single table.
+     *
+     * <p>Uses the single-table dialect query rather than reading the whole schema and discarding all
+     * but one row: on a thousand-table database, cataloguing one table used to transfer a thousand
+     * comments. Per the dialect contract the SQL carries exactly one {@code ?} for the table name.
+     */
+    private String fetchTableComment(JdbcTemplate jdbc, DatabaseDialect dialect, String schema,
+                                     String tableName) {
+        String sql = dialect.tableCommentQuery(schema, tableName);
+        if (sql == null) {
+            return "";
+        }
+        try {
+            for (Map<String, Object> row : jdbc.queryForList(sql, tableName)) {
+                return rowString(row, "table_comment", "");
+            }
+        } catch (Exception e) {
+            log.warn("Table comment fetch failed for {}: {}", tableName, e.getMessage(), e);
+        }
+        return "";
+    }
+
+    /**
+     * Reads column comments for one table.
+     *
+     * <p>Per the dialect contract the SQL carries exactly one {@code ?} for the table name, bound with
+     * the dialect-normalized name (upper case on Oracle, where {@code all_tab_columns.table_name} is
+     * stored upper case). The bind used to be derived by counting placeholders, which silently bound
+     * the table name into a schema parameter on the dialects that had two.
+     */
+    private ColumnMetadata fetchColumnComments(JdbcTemplate jdbc, DatabaseDialect dialect,
+                                               String schema, String tableName) {
+        String sql = dialect.columnCommentsQuery(schema, tableName);
+        if (sql == null) {
+            return ColumnMetadata.unsupported();
+        }
         List<DataElement> elements = new ArrayList<>();
         try {
-            String sql = dialect.columnCommentsQuery(tableName);
-            if (sql == null) return elements;
-            List<Map<String, Object>> rows = jdbc.queryForList(sql);
+            List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
             for (Map<String, Object> row : rows) {
-                String colName = String.valueOf(row.get("column_name"));
-                String dataType = String.valueOf(row.getOrDefault("data_type", "UNKNOWN"));
-                int nullable = row.get("nullable") instanceof Number n
-                        ? n.intValue() : 1;
-                String comment = String.valueOf(row.getOrDefault("column_comment", ""));
+                String colName = rowString(row, "column_name", null);
+                if (colName == null) {
+                    continue;
+                }
+                String dataType = rowString(row, "data_type", "UNKNOWN");
+                Integer nullable = parseNullable(rowValue(row, "nullable"));
+                String comment = rowString(row, "column_comment", "");
 
-        ClassifiedColumn classified = classifyColumn(colName, comment);
+                ClassifiedColumn classified = classifyColumn(colName, comment);
                 elements.add(new DataElement(
                         null, tableName, colName, dataType, nullable,
                         comment, List.of(), classified.sensitivity(),
@@ -259,16 +399,43 @@ public class DataCatalogServiceImpl implements DataCatalogService {
                 ));
             }
         } catch (Exception e) {
-            log.debug("Column comment fetch failed for {}: {}", tableName, e.getMessage());
+            // A failed query is not "this table has no columns": report it instead of hiding it,
+            // otherwise every downstream sensitivity decision silently degrades to INTERNAL.
+            log.warn("Column comment fetch failed for {}: {}", tableName, e.getMessage(), e);
+            return new ColumnMetadata(List.of(),
+                    "列元数据查询失败: " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
-        return elements;
+        return new ColumnMetadata(List.copyOf(elements), null);
     }
 
-    private long estimateRowCount(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
+    /**
+     * Row count for one table: the catalog prefers the optimizer's estimate, which reads a catalog
+     * view, and only falls back to an exact {@code COUNT(*)} when the dialect has no estimate or has
+     * never had statistics gathered. A schema scan would otherwise scan every table in the schema.
+     */
+    private long estimateRowCount(JdbcTemplate jdbc, DatabaseDialect dialect, String schema,
+                                  String tableName) {
+        long estimate = queryRowCount(jdbc,
+                dialect.getTableRowCountEstimateSql(schema, tableName), tableName);
+        if (estimate >= 0) {
+            return estimate;
+        }
+        return queryRowCount(jdbc, dialect.getTableRowCountSql(schema, tableName), null);
+    }
+
+    /**
+     * @param tableNameArg the value for the single {@code ?} the SQL declares, or {@code null} when it
+     *                     declares none (the exact count quotes the table name into the SQL, since a
+     *                     {@code FROM} clause cannot take a bind parameter)
+     */
+    private long queryRowCount(JdbcTemplate jdbc, String sql, String tableNameArg) {
+        if (sql == null) {
+            return -1;
+        }
         try {
-            String sql = dialect.getTableRowCountSql(tableName);
-            if (sql == null) return -1;
-            List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
+            List<Map<String, Object>> rows = tableNameArg == null
+                    ? jdbc.queryForList(sql)
+                    : jdbc.queryForList(sql, tableNameArg);
             if (!rows.isEmpty() && !rows.get(0).isEmpty()) {
                 Object val = rows.get(0).values().iterator().next();
                 return val instanceof Number n ? n.longValue() : -1;
@@ -279,9 +446,15 @@ public class DataCatalogServiceImpl implements DataCatalogService {
         return -1;
     }
 
-    private long estimateTableSize(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
+    /**
+     * Table size in MB. Per the dialect contract the SQL takes the table name as its only bind value;
+     * a dialect with no size source (the generic one) declares no placeholder and is reported as
+     * unknown rather than as a fabricated zero.
+     */
+    private long estimateTableSize(JdbcTemplate jdbc, DatabaseDialect dialect, String schema,
+                                   String tableName) {
         try {
-            String sql = dialect.estimateTableSizeSql(tableName, null);
+            String sql = dialect.estimateTableSizeSql(tableName, schema);
             if (sql == null) return -1;
             List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
             if (!rows.isEmpty() && !rows.get(0).isEmpty()) {
@@ -295,7 +468,7 @@ public class DataCatalogServiceImpl implements DataCatalogService {
     }
 
     private DataCategory inferCategory(List<DataElement> columns, String tableComment) {
-        String comment = tableComment.toLowerCase();
+        String comment = tableComment == null ? "" : tableComment.toLowerCase();
         for (DataElement col : columns) {
             if (col.sensitivityLevel().getLevel() >= 3) return DataCategory.PERSONAL_INFO;
         }
@@ -333,7 +506,8 @@ public class DataCatalogServiceImpl implements DataCatalogService {
         return new ArrayList<>(keywords);
     }
 
-    private String buildDescription(String tableComment, long rowCount, int columnCount) {
+    private String buildDescription(String tableComment, long rowCount, int columnCount,
+                                     String columnFailure) {
         StringBuilder sb = new StringBuilder();
         if (tableComment != null && !tableComment.isBlank()) {
             sb.append(tableComment);
@@ -344,13 +518,85 @@ public class DataCatalogServiceImpl implements DataCatalogService {
             sb.append("，").append(rowCount).append(" 行数据");
         }
         sb.append("，").append(columnCount).append(" 个字段");
+        if (columnFailure != null) {
+            sb.append("（").append(columnFailure).append("）");
+        }
         return sb.toString();
     }
 
-    private DataCatalogEntry buildErrorEntry(String tableName, String connection, String errorMsg) {
+    private DataCatalogEntry buildErrorEntry(String tableName, String connection) {
         return new DataCatalogEntry(connection, null, tableName, "", 0, 0, List.of(),
                 DataCategory.OTHER, SensitivityLevel.INTERNAL, List.of(),
                 "生成失败");
     }
 
+    // ─── Result-set helpers ──────────────────────────────────────────────────
+
+    /**
+     * Column-comment lookup outcome.
+     *
+     * @param columns the columns that were read
+     * @param failure non-null when the query failed, so an empty column list is never mistaken for
+     *                "this table genuinely has no columns"
+     */
+    private record ColumnMetadata(List<DataElement> columns, String failure) {
+        static ColumnMetadata unsupported() {
+            return new ColumnMetadata(List.of(), null);
+        }
+    }
+
+    /**
+     * Case-insensitive column lookup.
+     *
+     * <p>JDBC drivers disagree on label case: Oracle and H2 return {@code TABLE_NAME} while MySQL
+     * and PostgreSQL return {@code table_name}, so a plain {@code row.get("table_name")} yields
+     * null on half of the supported dialects.
+     */
+    private static Object rowValue(Map<String, Object> row, String column) {
+        if (row == null || row.isEmpty()) {
+            return null;
+        }
+        if (row.containsKey(column)) {
+            return row.get(column);
+        }
+        String upper = column.toUpperCase(Locale.ROOT);
+        if (row.containsKey(upper)) {
+            return row.get(upper);
+        }
+        String lower = column.toLowerCase(Locale.ROOT);
+        if (row.containsKey(lower)) {
+            return row.get(lower);
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(column)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static String rowString(Map<String, Object> row, String column, String fallback) {
+        Object value = rowValue(row, column);
+        return value != null ? String.valueOf(value) : fallback;
+    }
+
+    /** Accepts both the numeric flag and the {@code YES}/{@code NO} spelling of {@code IS_NULLABLE}. */
+    private static Integer parseNullable(Object value) {
+        if (value instanceof Number n) {
+            return n.intValue();
+        }
+        if (value instanceof Boolean b) {
+            return b ? 1 : 0;
+        }
+        if (value instanceof String s) {
+            String v = s.trim();
+            if (v.equalsIgnoreCase("NO") || v.equalsIgnoreCase("N") || v.equals("0")) return 0;
+            if (v.equalsIgnoreCase("YES") || v.equalsIgnoreCase("Y") || v.equals("1")) return 1;
+        }
+        return 1;
+    }
+
+    private static String normalize(String name) {
+        return name == null ? "" : name.trim().toUpperCase(Locale.ROOT);
+    }
 }

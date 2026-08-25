@@ -35,12 +35,24 @@ public interface DatabaseBackupService {
     Map<String, Object> backupData(String tableName, int maxRows, String connection);
 
     /**
-     * Incremental backup: backup only rows changed since last completed backup.
+     * Incremental backup: back up only the rows whose watermark column moved past the previous
+     * backup. A watermark column is auto-detected; when none can be found the request is refused
+     * rather than silently degraded to a full copy labelled INCREMENTAL.
      */
     Map<String, Object> backupDataIncremental(String tableName, int maxRows, String connection);
 
     /**
+     * Incremental backup against an explicit watermark column.
+     *
+     * @param watermarkColumn date/time column to filter on; {@code null} auto-detects one
+     */
+    Map<String, Object> backupDataIncremental(String tableName, int maxRows, String connection,
+                                              String watermarkColumn);
+
+    /**
      * Restore a table from a backup by replaying the saved SQL script in a transaction.
+     *
+     * <p>The backup record is not modified: a failed restore leaves the backup usable for a retry.
      */
     Map<String, Object> restoreBackup(String backupId, String connection);
 
