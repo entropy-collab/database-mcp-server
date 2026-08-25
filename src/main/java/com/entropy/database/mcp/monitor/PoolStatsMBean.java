@@ -15,7 +15,6 @@
  */
 package com.entropy.database.mcp.monitor;
 
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -34,18 +33,18 @@ public class PoolStatsMBean {
 
     private static final Logger log = LoggerFactory.getLogger(PoolStatsMBean.class);
 
-    private final DynamicDataSourceManager dataSourceManager;
+    private final PoolStatsSource poolStatsSource;
     private final McpMetricsCollector metricsCollector;
 
-    public PoolStatsMBean(DynamicDataSourceManager dataSourceManager,
+    public PoolStatsMBean(PoolStatsSource poolStatsSource,
                           McpMetricsCollector metricsCollector) {
-        this.dataSourceManager = dataSourceManager;
+        this.poolStatsSource = poolStatsSource;
         this.metricsCollector = metricsCollector;
         log.info("PoolStatsMBean initialized");
     }
 
     public Map<String, Object> getPoolStats() {
-        Map<String, HikariPoolStats> stats = dataSourceManager.getPoolStats();
+        Map<String, HikariPoolStats> stats = poolStatsSource.getPoolStats();
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<String, HikariPoolStats> entry : stats.entrySet()) {
             result.put(entry.getKey(), entry.getValue().toMap());

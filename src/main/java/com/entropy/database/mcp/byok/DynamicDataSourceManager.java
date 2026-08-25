@@ -18,7 +18,7 @@ package com.entropy.database.mcp.byok;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.byok.ConnectionMetadata;
 import com.entropy.database.mcp.byok.ConnectionProperties;
-import com.entropy.database.mcp.monitor.HikariPoolStats;
+import com.entropy.database.mcp.monitor.PoolStatsSource;
 
 import javax.sql.DataSource;
 import java.util.Collection;
@@ -27,8 +27,11 @@ import java.util.Map;
 /**
  * Central manager for all datasources.
  * All connections are equal BYOK connections; there is no primary/default concept.
+ *
+ * <p>Implements {@link PoolStatsSource} so that monitoring components read pool statistics through
+ * that port instead of depending on the registry itself.</p>
  */
-public interface DynamicDataSourceManager {
+public interface DynamicDataSourceManager extends PoolStatsSource {
 
     /**
      * Acquire a datasource context by key.
@@ -94,11 +97,4 @@ public interface DynamicDataSourceManager {
      * This is a no-op if no entries have expired.
      */
     void evictExpired();
-
-    /**
-     * Get real-time HikariCP pool statistics for all registered connections.
-     *
-     * @return map of connection name → pool stats, empty if no HikariDataSource available
-     */
-    Map<String, HikariPoolStats> getPoolStats();
 }

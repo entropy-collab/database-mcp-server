@@ -141,13 +141,14 @@ class ArchitectureRulesTest {
     /** R4 - facade contract interfaces depending on Spring JDBC / pool types. Enforced at 0. */
     private static final int R4_BASELINE = 0;
     /**
-     * R5 - package cycles. Down from 25 to 10 once {@code BatchInsertHelper} left {@code tools}: the
-     * {@code facade -> tools} edge was pulling {@code tools} into cycles with {@code facade},
-     * {@code quality}, {@code gateway} and {@code config}. What remains is rooted in
-     * {@code backup}, {@code byok} and {@code config}, where configuration records and wiring live
-     * in the same package as the classes they configure.
+     * R5 - package cycles. Enforced at 0. Getting here took three steps: moving
+     * {@code BatchInsertHelper} out of {@code tools} (25 -> 10), moving the {@code CacheConfig} /
+     * {@code EtlConfig} / {@code QueryConfig} records out of {@code config} into the leaf package
+     * {@code properties} so that {@code config} is only a wiring layer (10 -> 1), and letting the
+     * connection registry implement {@code monitor.PoolStatsSource} instead of {@code monitor}
+     * depending back on it (1 -> 0).
      */
-    private static final int R5_BASELINE = 10;
+    private static final int R5_BASELINE = 0;
 
     private static JavaClasses productionClasses;
 
