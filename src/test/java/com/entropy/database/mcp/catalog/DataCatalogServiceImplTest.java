@@ -18,7 +18,10 @@ package com.entropy.database.mcp.catalog;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.ByokInfrastructure;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.byok.StatementTemplates;
 import com.entropy.database.mcp.dialect.H2Dialect;
+import com.entropy.database.mcp.dialect.OracleDialect;
+import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.RepeatedTest;
@@ -93,11 +96,12 @@ class DataCatalogServiceImplTest {
 
     private DataCatalogServiceImpl service(H2Dialect dialect) {
         ByokDataSourceContext ctx = new ByokDataSourceContext(CONNECTION,
-                jdbcTemplate.getDataSource(), dialect, jdbcTemplate,
+                jdbcTemplate.getDataSource(), dialect,
+                StatementTemplates.over(jdbcTemplate.getDataSource(), jdbcTemplate, null),
                 new ByokInfrastructure(null, null, null, null, null, null));
         DynamicDataSourceManager manager = mock(DynamicDataSourceManager.class);
         when(manager.acquire(anyString())).thenReturn(ctx);
-        return new DataCatalogServiceImpl(manager);
+        return new DataCatalogServiceImpl(manager, ThreadPoolProperties.defaults());
     }
 
     // ─── Column comments ──────────────────────────────────────────────────
@@ -219,6 +223,26 @@ class DataCatalogServiceImplTest {
         assertThat(service().scanSchema("NO_SUCH_SCHEMA", CONNECTION)).isEmpty();
     }
 
+    @Test
+    @DisplayName("a dialect that resolves the schema itself is queried without binding it")
+    void scanSchemaBindsNothingForTheTableList() {
+        // Oracle's tablesQuery has always inlined the owner and declared no placeholder, while this
+        // scan bound the schema whenever one was given. The mismatch threw, the exception was
+        // swallowed, and the catalog - and with it getSensitiveColumns - came back empty on Oracle.
+        List<DataCatalogEntry> entries = service(new InlinedSchemaTablesDialect())
+                .scanSchema("WIDE", CONNECTION);
+
+        assertThat(entries).hasSize(WIDE_TABLE_COUNT);
+        assertThat(entries).extracting(DataCatalogEntry::tableName)
+                .allSatisfy(name -> assertThat(name).startsWith("T"));
+    }
+
+    @Test
+    @DisplayName("Oracle's table list really does declare no placeholder")
+    void oracleTableListDeclaresNoPlaceholder() {
+        assertThat(new OracleDialect().tablesQuery("WIDE")).doesNotContain("?");
+    }
+
     // ─── Test dialects ────────────────────────────────────────────────────
 
     /** Stands in for a dialect whose comment query cannot run against the live schema. */
@@ -234,6 +258,23 @@ class DataCatalogServiceImplTest {
         @Override
         public String columnCommentsQuery(String schema, String tableName) {
             return null;
+        }
+    }
+
+    /**
+     * Reproduces Oracle's table list on H2: the schema is part of the SQL text, so the statement
+     * declares no bind parameter at all.
+     */
+    private static final class InlinedSchemaTablesDialect extends H2Dialect {
+        @Override
+        public String tablesQuery(String schema) {
+            return """
+                    SELECT TABLE_NAME, 0 AS ROW_COUNT
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_TYPE = 'BASE TABLE'
+                      AND TABLE_SCHEMA = 'WIDE'
+                    ORDER BY TABLE_NAME
+                    """;
         }
     }
 }

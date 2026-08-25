@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Core data quality check engine.
@@ -354,17 +355,42 @@ public class QualityCheckService {
         return usable;
     }
 
+    /**
+     * Reads the table's column names from the dialect's metadata query.
+     *
+     * <p>Per the dialect contract the SQL carries exactly one {@code ?} for the table name, bound with
+     * the dialect-normalized spelling. Binding nothing - which is what this did - made every dialect
+     * reject the statement, and because the failure is absorbed here the column list came back empty:
+     * no per-column null-rate check and no duplicate-row check ever ran, so {@code rulesChecked} was
+     * always 0 and the quality score always a perfect 100.
+     *
+     * <p>The label is read case-insensitively: Oracle and H2 report {@code COLUMN_NAME} while MySQL
+     * and PostgreSQL report {@code column_name}.
+     */
     private List<String> queryColumns(DatabaseReadOperations db, String connection, String tableName,
                                       DatabaseDialect dialect) {
         try {
             String colQuery = dialect.columnsQuery(tableName, null);
-            return db.queryRows(colQuery, connection).stream()
-                    .map(row -> (String) row.get("column_name"))
+            return db.queryRows(colQuery, connection, dialect.normalizeTableName(tableName)).stream()
+                    .map(QualityCheckService::columnNameOf)
+                    .filter(Objects::nonNull)
                     .toList();
         } catch (Exception e) {
             log.warn("Failed to list columns for table '{}': {}", tableName, e.getMessage(), e);
             return List.of();
         }
+    }
+
+    private static String columnNameOf(Map<String, Object> row) {
+        if (row == null) {
+            return null;
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase("column_name")) {
+                return entry.getValue() == null ? null : String.valueOf(entry.getValue());
+            }
+        }
+        return null;
     }
 
     private long queryNullCount(DatabaseReadOperations db, String connection, String tableName,

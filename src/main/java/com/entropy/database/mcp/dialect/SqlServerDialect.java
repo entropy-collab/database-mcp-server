@@ -29,33 +29,38 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
         return "[" + name.replace("]", "]]") + "]";
     }
 
+    /**
+     * Resolves the schema side of a metadata predicate without spending a placeholder on it.
+     * {@code SCHEMA_NAME()} is the caller's default schema, which is what an omitted schema means.
+     */
+    private String schemaExpression(String schema) {
+        return DialectUtils.schemaExpression(schema, "SCHEMA_NAME()");
+    }
+
     @Override
     public String tablesQuery(String schema) {
-        var schemaFilter = schema != null ? "AND TABLE_SCHEMA = ?" : "";
         return """
             SELECT TABLE_NAME AS table_name, 0 AS row_count
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_TYPE = 'BASE TABLE'
-            %s
+              AND TABLE_SCHEMA = %s
             ORDER BY TABLE_NAME
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
     public String columnsQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND TABLE_SCHEMA = ?" : "";
         return """
             SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_NAME = ?
-            %s
+              AND TABLE_SCHEMA = %s
             ORDER BY ORDINAL_POSITION
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
     public String indexesQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND s.name = ?" : "";
         return """
             SELECT i.name AS index_name,
                    CASE WHEN i.is_unique = 1 THEN 0 ELSE 1 END AS non_unique,
@@ -68,9 +73,9 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
             JOIN sys.schemas s ON t.schema_id = s.schema_id
             WHERE i.type_desc <> 'HEAP'
               AND t.name = ?
-              %s
+              AND s.name = %s
             ORDER BY i.name, ic.key_ordinal
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -146,16 +151,25 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
         return "SELECT COUNT(*) AS row_count FROM " + qualifiedTableName(schema, tableName);
     }
 
-    /** {@code sys.dm_db_partition_stats.row_count} is maintained per partition, hence the SUM. */
+    /**
+     * {@code sys.dm_db_partition_stats.row_count} is maintained per partition, hence the SUM.
+     *
+     * <p>The schema has to take part in the join: {@code sys.tables.name} is only unique per schema,
+     * so without it {@code dbo.ORDERS} and {@code staging.ORDERS} were summed into a single number
+     * that belonged to neither. It is resolved here rather than bound, so the one-placeholder
+     * contract holds whether or not a schema was supplied.
+     */
     @Override
     public String getTableRowCountEstimateSql(String schema, String tableName) {
         return """
             SELECT SUM(ps.row_count) AS row_count
             FROM sys.dm_db_partition_stats ps
             JOIN sys.tables t ON t.object_id = ps.object_id
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
             WHERE ps.index_id IN (0, 1)
               AND t.name = ?
-            """;
+              AND s.name = %s
+            """.formatted(schemaExpression(schema));
     }
 
     @Override

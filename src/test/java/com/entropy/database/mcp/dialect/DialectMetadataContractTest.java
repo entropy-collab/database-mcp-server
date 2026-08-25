@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Pins the bind-parameter and direction contracts documented on {@link DatabaseDialect}.
@@ -96,20 +97,18 @@ class DialectMetadataContractTest {
         return new H2Dialect();
     }
 
-    /** Every dialect, so a newly added one cannot quietly skip the contract. */
+    /**
+     * Every dialect, so a newly added one cannot quietly skip the contract.
+     *
+     * <p>This is the only source the contract tests use. Hand-picked sub-lists of "the dialects that
+     * implement this" were what let {@link SqlServerDialect} ship a schema-blind
+     * {@code getTableRowCountEstimateSql}: the method was implemented but the dialect was not on the
+     * list, so nothing checked it. A dialect that does not implement a query returns {@code null} and
+     * the case is skipped instead of being enumerated by hand.
+     */
     private static Stream<DatabaseDialect> allDialects() {
         return Stream.of(oracle(), mysql(), postgres(), h2(),
                 new SqlServerDialect(), new SqliteDialect(), new Db2Dialect(), new GenericDialect());
-    }
-
-    /** The four dialects that implement the comment and lineage metadata queries. */
-    private static Stream<DatabaseDialect> metadataDialects() {
-        return Stream.of(oracle(), mysql(), postgres(), h2());
-    }
-
-    /** The three dialects with a real table-size source and index statistics. */
-    private static Stream<DatabaseDialect> statisticsAwareDialects() {
-        return Stream.of(oracle(), mysql(), postgres());
     }
 
     private static int placeholders(String sql) {
@@ -121,67 +120,125 @@ class DialectMetadataContractTest {
         return sql.replaceAll("\\s+", " ");
     }
 
+    /**
+     * A schema predicate compared against {@code NULL}: {@code TABLE_SCHEMA IS NULL},
+     * {@code owner IS NULL}, {@code n.nspname IS NULL}. Matched on the flattened text so a line break
+     * or a different continuation cannot slip past, which a literal {@code "IS NULL AND"} check did.
+     */
+    private static final java.util.regex.Pattern NULL_SCHEMA_PREDICATE =
+            java.util.regex.Pattern.compile("(?i)\\b[\\w.]*(SCHEMA|OWNER|NSPNAME)\\b\\s+IS\\s+NULL");
+
+    /** Asserts the query is implemented, or reports it as skipped when the dialect has no such SQL. */
+    private static void requireImplemented(String sql, String label) {
+        assumeTrue(sql != null, label + " is not implemented by this dialect");
+    }
+
     // ─── One placeholder: the table name ──────────────────────────────────
 
     @ParameterizedTest
-    @MethodSource("metadataDialects")
+    @MethodSource("allDialects")
+    @DisplayName("columnsQuery declares exactly one placeholder")
+    void columnsQueryHasOnePlaceholder(DatabaseDialect dialect) {
+        String sql = dialect.columnsQuery(TABLE, null);
+        requireImplemented(sql, "columnsQuery");
+
+        assertThat(placeholders(sql))
+                .as("%s.columnsQuery", dialect.getDialectName())
+                .isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("allDialects")
+    @DisplayName("indexesQuery declares exactly one placeholder")
+    void indexesQueryHasOnePlaceholder(DatabaseDialect dialect) {
+        String sql = dialect.indexesQuery(TABLE, null);
+        requireImplemented(sql, "indexesQuery");
+
+        assertThat(placeholders(sql))
+                .as("%s.indexesQuery", dialect.getDialectName())
+                .isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("allDialects")
     @DisplayName("columnCommentsQuery declares exactly one placeholder")
     void columnCommentsQueryHasOnePlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.columnCommentsQuery(TABLE)))
+        String sql = dialect.columnCommentsQuery(TABLE);
+        requireImplemented(sql, "columnCommentsQuery");
+
+        assertThat(placeholders(sql))
                 .as("%s.columnCommentsQuery", dialect.getDialectName())
                 .isEqualTo(1);
     }
 
     @ParameterizedTest
-    @MethodSource("metadataDialects")
+    @MethodSource("allDialects")
     @DisplayName("tableCommentQuery declares exactly one placeholder")
     void tableCommentQueryHasOnePlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.tableCommentQuery(null, TABLE)))
+        String sql = dialect.tableCommentQuery(null, TABLE);
+        requireImplemented(sql, "tableCommentQuery");
+
+        assertThat(placeholders(sql))
                 .as("%s.tableCommentQuery", dialect.getDialectName())
                 .isEqualTo(1);
     }
 
     @ParameterizedTest
-    @MethodSource("statisticsAwareDialects")
+    @MethodSource("allDialects")
     @DisplayName("estimateTableSizeSql declares exactly one placeholder")
     void estimateTableSizeSqlHasOnePlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.estimateTableSizeSql(TABLE, null)))
+        String sql = dialect.estimateTableSizeSql(TABLE, null);
+        requireImplemented(sql, "estimateTableSizeSql");
+
+        assertThat(placeholders(sql))
                 .as("%s.estimateTableSizeSql", dialect.getDialectName())
                 .isEqualTo(1);
     }
 
     @ParameterizedTest
-    @MethodSource("statisticsAwareDialects")
+    @MethodSource("allDialects")
     @DisplayName("candidateColumnsForIndexSql declares exactly one placeholder")
     void candidateColumnsForIndexSqlHasOnePlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.candidateColumnsForIndexSql(TABLE)))
+        String sql = dialect.candidateColumnsForIndexSql(TABLE);
+        requireImplemented(sql, "candidateColumnsForIndexSql");
+
+        assertThat(placeholders(sql))
                 .as("%s.candidateColumnsForIndexSql", dialect.getDialectName())
                 .isEqualTo(1);
     }
 
     @ParameterizedTest
-    @MethodSource("statisticsAwareDialects")
+    @MethodSource("allDialects")
     @DisplayName("listTableIndexesSql declares exactly one placeholder")
     void listTableIndexesSqlHasOnePlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.listTableIndexesSql(TABLE)))
+        String sql = dialect.listTableIndexesSql(TABLE);
+        requireImplemented(sql, "listTableIndexesSql");
+
+        assertThat(placeholders(sql))
                 .as("%s.listTableIndexesSql", dialect.getDialectName())
                 .isEqualTo(1);
     }
 
     @ParameterizedTest
-    @MethodSource("statisticsAwareDialects")
+    @MethodSource("allDialects")
     @DisplayName("getTableRowCountEstimateSql declares exactly one placeholder")
     void rowCountEstimateSqlHasOnePlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.getTableRowCountEstimateSql(TABLE)))
+        String sql = dialect.getTableRowCountEstimateSql(TABLE);
+        requireImplemented(sql, "getTableRowCountEstimateSql");
+
+        assertThat(placeholders(sql))
                 .as("%s.getTableRowCountEstimateSql", dialect.getDialectName())
                 .isEqualTo(1);
     }
 
     @ParameterizedTest
-    @MethodSource("metadataDialects")
+    @MethodSource("allDialects")
     @DisplayName("both foreign-key queries declare exactly one placeholder")
     void foreignKeyQueriesHaveOnePlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.foreignKeyUpstreamQuery(TABLE)))
+        String upstream = dialect.foreignKeyUpstreamQuery(TABLE);
+        requireImplemented(upstream, "foreignKeyUpstreamQuery");
+
+        assertThat(placeholders(upstream))
                 .as("%s.foreignKeyUpstreamQuery", dialect.getDialectName())
                 .isEqualTo(1);
         assertThat(placeholders(dialect.foreignKeyDownstreamQuery(TABLE)))
@@ -190,20 +247,33 @@ class DialectMetadataContractTest {
     }
 
     /**
-     * The generic dialect is the one documented deviation: it has no size source, so the row is a
-     * constant and there is nothing to filter.
+     * The generic dialect has no size source, and now says so instead of rendering a constant
+     * zero-sized row - which read like a measurement of an empty table and was the last reason a
+     * caller had to look for a {@code ?} before binding.
      */
     @Test
-    @DisplayName("the generic dialect's size stub declares no placeholder and cannot be injected")
-    void genericSizeStubIsConstant() {
-        GenericDialect generic = new GenericDialect();
-
-        assertThat(placeholders(generic.estimateTableSizeSql(TABLE, null))).isZero();
-        assertThat(generic.estimateTableSizeSql("x' UNION SELECT 1 --", null))
-                .doesNotContain("UNION");
+    @DisplayName("the generic dialect reports no size source at all")
+    void genericDialectHasNoSizeSource() {
+        assertThat(new GenericDialect().estimateTableSizeSql(TABLE, null)).isNull();
+        assertThat(new GenericDialect().estimateTableSizeSql(TABLE, SCHEMA)).isNull();
     }
 
     // ─── No placeholder: the identifier is quoted into the SQL ─────────────
+
+    @ParameterizedTest
+    @MethodSource("allDialects")
+    @DisplayName("tablesQuery declares no placeholder")
+    void tablesQueryHasNoPlaceholder(DatabaseDialect dialect) {
+        String sql = dialect.tablesQuery(null);
+        requireImplemented(sql, "tablesQuery");
+
+        assertThat(placeholders(sql))
+                .as("%s.tablesQuery", dialect.getDialectName())
+                .isZero();
+        assertThat(placeholders(dialect.tablesQuery(SCHEMA)))
+                .as("%s.tablesQuery(schema)", dialect.getDialectName())
+                .isZero();
+    }
 
     @ParameterizedTest
     @MethodSource("allDialects")
@@ -231,10 +301,13 @@ class DialectMetadataContractTest {
     }
 
     @ParameterizedTest
-    @MethodSource("metadataDialects")
+    @MethodSource("allDialects")
     @DisplayName("the whole-schema comment and lineage queries declare no placeholder")
     void wholeSchemaQueriesHaveNoPlaceholder(DatabaseDialect dialect) {
-        assertThat(placeholders(dialect.tableCommentsQuery()))
+        String comments = dialect.tableCommentsQuery();
+        requireImplemented(comments, "tableCommentsQuery");
+
+        assertThat(placeholders(comments))
                 .as("%s.tableCommentsQuery", dialect.getDialectName())
                 .isZero();
         assertThat(placeholders(dialect.foreignKeyAllEdgesQuery(null)))
@@ -245,26 +318,33 @@ class DialectMetadataContractTest {
     // ─── The schema never becomes a placeholder ────────────────────────────
 
     private static Stream<Arguments> schemaAwareQueries() {
-        return metadataDialects().flatMap(d -> Stream.of(
-                Arguments.of(d.getDialectName() + ".columnCommentsQuery",
+        return allDialects().flatMap(d -> Stream.of(
+                Arguments.of(d.getDialectName() + ".tablesQuery", d,
+                        d.tablesQuery(null), d.tablesQuery(SCHEMA)),
+                Arguments.of(d.getDialectName() + ".columnsQuery", d,
+                        d.columnsQuery(TABLE, null), d.columnsQuery(TABLE, SCHEMA)),
+                Arguments.of(d.getDialectName() + ".indexesQuery", d,
+                        d.indexesQuery(TABLE, null), d.indexesQuery(TABLE, SCHEMA)),
+                Arguments.of(d.getDialectName() + ".columnCommentsQuery", d,
                         d.columnCommentsQuery(null, TABLE), d.columnCommentsQuery(SCHEMA, TABLE)),
-                Arguments.of(d.getDialectName() + ".tableCommentQuery",
+                Arguments.of(d.getDialectName() + ".tableCommentQuery", d,
                         d.tableCommentQuery(null, TABLE), d.tableCommentQuery(SCHEMA, TABLE)),
-                Arguments.of(d.getDialectName() + ".tableCommentsQuery",
+                Arguments.of(d.getDialectName() + ".tableCommentsQuery", d,
                         d.tableCommentsQuery(null), d.tableCommentsQuery(SCHEMA)),
-                Arguments.of(d.getDialectName() + ".foreignKeyAllEdgesQuery",
+                Arguments.of(d.getDialectName() + ".foreignKeyAllEdgesQuery", d,
                         d.foreignKeyAllEdgesQuery(null), d.foreignKeyAllEdgesQuery(SCHEMA)),
-                Arguments.of(d.getDialectName() + ".getTableRowCountEstimateSql",
+                Arguments.of(d.getDialectName() + ".getTableRowCountEstimateSql", d,
                         d.getTableRowCountEstimateSql(null, TABLE),
                         d.getTableRowCountEstimateSql(SCHEMA, TABLE)),
-                Arguments.of(d.getDialectName() + ".estimateTableSizeSql",
+                Arguments.of(d.getDialectName() + ".estimateTableSizeSql", d,
                         d.estimateTableSizeSql(TABLE, null), d.estimateTableSizeSql(TABLE, SCHEMA))));
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("schemaAwareQueries")
     @DisplayName("supplying a schema neither adds a bind parameter nor yields IS NULL")
-    void schemaIsNeverAPlaceholder(String label, String withoutSchema, String withSchema) {
+    void schemaIsNeverAPlaceholder(String label, DatabaseDialect dialect,
+                                   String withoutSchema, String withSchema) {
         if (withoutSchema == null) {
             assertThat(withSchema)
                     .as("%s: both variants must be supported or neither", label)
@@ -276,10 +356,12 @@ class DialectMetadataContractTest {
                 .isEqualTo(placeholders(withoutSchema));
         // A `<schema column> IS NULL` predicate matches no row in any information schema, so a missing
         // schema has to degrade to the current one instead.
-        assertThat(withoutSchema.toUpperCase())
-                .as("%s must not filter on a null schema", label)
-                .doesNotContain("IS NULL AND");
-        assertThat(withSchema).as("%s must honour the requested schema", label).contains(SCHEMA);
+        assertThat(NULL_SCHEMA_PREDICATE.matcher(flat(withoutSchema)).find())
+                .as("%s must not filter on a null schema: %s", label, flat(withoutSchema))
+                .isFalse();
+        if (dialect.supportsSchema()) {
+            assertThat(withSchema).as("%s must honour the requested schema", label).contains(SCHEMA);
+        }
     }
 
     // ─── Direction, asserted on the SQL text ──────────────────────────────
@@ -386,6 +468,21 @@ class DialectMetadataContractTest {
         assertThat(jdbc.queryForList(sql, "ORDER_LINE"))
                 .extracting(row -> row.get("COLUMN_NAME"))
                 .containsExactly("ID", "ORDER_ID");
+    }
+
+    @Test
+    @DisplayName("H2: tablesQuery binds nothing and still resolves the current schema")
+    void h2TablesQueryWithoutSchemaResolvesTheCurrentSchema() {
+        assertThat(jdbc.queryForList(h2().tablesQuery(null)))
+                .extracting(row -> row.get("TABLE_NAME"))
+                .contains("CUSTOMER_ORDER", "ORDER_LINE");
+    }
+
+    @Test
+    @DisplayName("H2: indexesQuery takes the table name as its only argument")
+    void h2IndexesQueryBindsOnlyTheTableName() {
+        assertThat(jdbc.queryForList(h2().indexesQuery("ORDER_LINE", null), "ORDER_LINE"))
+                .isNotEmpty();
     }
 
     @Test

@@ -18,8 +18,10 @@ package com.entropy.database.mcp.catalog;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -31,19 +33,9 @@ import java.util.concurrent.Future;
 import java.util.regex.Pattern;
 
 @Service
-public class DataCatalogServiceImpl implements DataCatalogService {
+public class DataCatalogServiceImpl implements DataCatalogService, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(DataCatalogServiceImpl.class);
-
-    /**
-     * Upper bound on concurrent per-table catalog generation.
-     *
-     * <p>Every table costs three round trips on a connection borrowed from the BYOK pool, so an
-     * unbounded {@code parallelStream()} over a thousand-table schema would try to occupy the whole
-     * pool (and starve every other caller of the same connection). Four is deliberately smaller
-     * than the default pool size.
-     */
-    private static final int SCAN_PARALLELISM = 4;
 
     /** Keyword patterns that indicate sensitive personal/financial data. */
     private static final List<Pattern> SENSITIVITY_PATTERNS = List.of(
@@ -77,8 +69,36 @@ public class DataCatalogServiceImpl implements DataCatalogService {
 
     private final DynamicDataSourceManager dataSourceManager;
 
-    public DataCatalogServiceImpl(DynamicDataSourceManager dataSourceManager) {
+    /**
+     * Upper bound on concurrent per-table catalog generation.
+     *
+     * <p>Every table costs three round trips on a connection borrowed from the BYOK pool, so an
+     * unbounded {@code parallelStream()} over a thousand-table schema would try to occupy the whole
+     * pool (and starve every other caller of the same connection). The default of four is
+     * deliberately smaller than the default pool size.
+     *
+     * <p>It bounds <b>one shared pool</b> rather than a pool per call: a per-call pool bounded each
+     * scan individually but nothing bounded the total, so N concurrent {@code scanSchema} calls
+     * meant 4N threads competing for the same BYOK connections.
+     */
+    private final int scanParallelism;
+    private final ExecutorService scanPool;
+
+    public DataCatalogServiceImpl(DynamicDataSourceManager dataSourceManager,
+                                  ThreadPoolProperties threadPoolProperties) {
         this.dataSourceManager = dataSourceManager;
+        this.scanParallelism = (threadPoolProperties != null ? threadPoolProperties
+                : ThreadPoolProperties.defaults()).catalogScanSize();
+        this.scanPool = Executors.newFixedThreadPool(scanParallelism, runnable -> {
+            Thread thread = new Thread(runnable, "catalog-scan");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    @Override
+    public void destroy() {
+        scanPool.shutdownNow();
     }
 
     // ─── Catalog Generation ──────────────────────────────────────────────────
@@ -138,10 +158,12 @@ public class DataCatalogServiceImpl implements DataCatalogService {
             DatabaseDialect dialect = ctx.getDialect();
             JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
+            // Per the dialect contract tablesQuery resolves the schema itself and declares no
+            // placeholder. Binding one when a schema was given is what made this fail on Oracle -
+            // its tablesQuery never had a schema parameter - and the exception was swallowed below,
+            // so the whole catalog and every sensitive-column scan came back empty.
             String tablesSql = dialect.tablesQuery(schema);
-            List<Map<String, Object>> tables = schema != null
-                    ? jdbc.queryForList(tablesSql, schema)
-                    : jdbc.queryForList(tablesSql);
+            List<Map<String, Object>> tables = jdbc.queryForList(tablesSql);
 
             List<String> tableNames = tables.stream()
                     .map(row -> rowString(row, "table_name", null))
@@ -204,40 +226,37 @@ public class DataCatalogServiceImpl implements DataCatalogService {
     private List<DataCatalogEntry> generateCatalogs(ByokDataSourceContext ctx, List<String> tableNames,
                                                     String connection, String schema,
                                                     Map<String, String> tableComments) {
-        int parallelism = Math.min(SCAN_PARALLELISM, tableNames.size());
+        int parallelism = Math.min(scanParallelism, tableNames.size());
         if (parallelism <= 1) {
             return tableNames.stream()
                     .map(name -> safeGenerateCatalog(ctx, name, connection, schema, tableComments))
                     .toList();
         }
 
-        try (ExecutorService pool = Executors.newFixedThreadPool(parallelism, runnable -> {
-            Thread thread = new Thread(runnable, "catalog-scan");
-            thread.setDaemon(true);
-            return thread;
-        })) {
-            List<Future<DataCatalogEntry>> futures = tableNames.stream()
-                    .map(name -> pool.submit(
-                            () -> safeGenerateCatalog(ctx, name, connection, schema, tableComments)))
-                    .toList();
+        List<Future<DataCatalogEntry>> futures = tableNames.stream()
+                .map(name -> scanPool.submit(
+                        () -> safeGenerateCatalog(ctx, name, connection, schema, tableComments)))
+                .toList();
 
-            List<DataCatalogEntry> entries = new ArrayList<>(futures.size());
-            for (int i = 0; i < futures.size(); i++) {
-                try {
-                    entries.add(futures.get(i).get());
-                } catch (ExecutionException e) {
-                    log.warn("Catalog generation failed for {}: {}",
-                            tableNames.get(i), e.getCause() != null ? e.getCause() : e, e);
-                    entries.add(buildErrorEntry(tableNames.get(i), connection));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    log.warn("Schema scan interrupted after {} of {} tables",
-                            entries.size(), tableNames.size());
-                    return List.copyOf(entries);
-                }
+        List<DataCatalogEntry> entries = new ArrayList<>(futures.size());
+        for (int i = 0; i < futures.size(); i++) {
+            try {
+                entries.add(futures.get(i).get());
+            } catch (ExecutionException e) {
+                log.warn("Catalog generation failed for {}: {}",
+                        tableNames.get(i), e.getCause() != null ? e.getCause() : e, e);
+                entries.add(buildErrorEntry(tableNames.get(i), connection));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                // Abandoning the remaining futures would leave them running against a connection
+                // the caller is about to release, so cancel what has not started yet.
+                futures.subList(i, futures.size()).forEach(f -> f.cancel(true));
+                log.warn("Schema scan interrupted after {} of {} tables",
+                        entries.size(), tableNames.size());
+                return List.copyOf(entries);
             }
-            return entries;
         }
+        return entries;
     }
 
     private DataCatalogEntry safeGenerateCatalog(ByokDataSourceContext ctx, String tableName,
@@ -448,8 +467,8 @@ public class DataCatalogServiceImpl implements DataCatalogService {
 
     /**
      * Table size in MB. Per the dialect contract the SQL takes the table name as its only bind value;
-     * a dialect with no size source (the generic one) declares no placeholder and is reported as
-     * unknown rather than as a fabricated zero.
+     * a dialect with no size source returns {@code null} and the size is reported as unknown rather
+     * than as a fabricated zero.
      */
     private long estimateTableSize(JdbcTemplate jdbc, DatabaseDialect dialect, String schema,
                                    String tableName) {

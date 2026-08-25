@@ -22,7 +22,6 @@ import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpQueryException;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
-import com.entropy.database.mcp.stream.SseStreamManager;
 import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
 import org.junit.jupiter.api.BeforeAll;
@@ -93,12 +92,8 @@ class DatabaseReadRepositoryTest {
     // ─── Fixtures ─────────────────────────────────────────────────────────
 
     private DatabaseReadRepository repository(int maxRows, int maxResultRows) {
-        return repository(maxRows, maxResultRows, null);
-    }
-
-    private DatabaseReadRepository repository(int maxRows, int maxResultRows, SseStreamManager sse) {
         return new DatabaseReadRepository(jdbcTemplate, new H2Dialect(), new StubValidator(),
-            cache, IDENTITY_MASKING, maxRows, maxResultRows, 100, 30, sse);
+            cache, IDENTITY_MASKING, maxRows, maxResultRows, 100, 30);
     }
 
     private static List<Integer> idsOf(PaginatedQueryResult result) {
@@ -209,17 +204,6 @@ class DatabaseReadRepositoryTest {
         }
 
         @Test
-        @DisplayName("the SSE wrapper produces the same page as the direct path")
-        void sseWrapperPreservesPagination() {
-            PaginatedQueryResult page = repository(100, 10000, new SseStreamManager())
-                .executeQuery(ORDERED_QUERY, 4, "4");
-
-            assertThat(idsOf(page)).containsExactly(5, 6, 7, 8);
-            assertThat(page.hasMore()).isTrue();
-            assertThat(page.continuationToken()).isEqualTo("8");
-        }
-
-        @Test
         @DisplayName("a negative token restarts at page one and yields a usable next token")
         void negativeTokenMustNotProduceANegativeToken() {
             PaginatedQueryResult page = repository(100, 10000).executeQuery(ORDERED_QUERY, 3, "-5");
@@ -273,7 +257,7 @@ class DatabaseReadRepositoryTest {
         @DisplayName("QueryLimits constructor feeds both ceilings")
         void queryLimitsConstructorIsHonoured() {
             DatabaseReadRepository repo = new DatabaseReadRepository(jdbcTemplate, new H2Dialect(),
-                new StubValidator(), cache, IDENTITY_MASKING, new QueryLimits(3, 10000), null);
+                new StubValidator(), cache, IDENTITY_MASKING, new QueryLimits(3, 10000));
 
             assertThat(idsOf(repo.executeQuery(ORDERED_QUERY, 100, null))).containsExactly(1, 2, 3);
         }
@@ -371,7 +355,7 @@ class DatabaseReadRepositoryTest {
         void degradesWithoutDataSource() {
             DatabaseReadRepository repo = new DatabaseReadRepository(new JdbcTemplate(),
                 new H2Dialect(), new StubValidator(), cache, IDENTITY_MASKING,
-                100, 10000, 100, 30, null);
+                100, 10000, 100, 30);
 
             assertThat(repo.getDatabaseInfo())
                 .containsExactly(Map.entry("error", "Connection information unavailable"));
@@ -384,7 +368,7 @@ class DatabaseReadRepositoryTest {
             when(failing.getConnection()).thenThrow(new SQLException("pool exhausted"));
             DatabaseReadRepository repo = new DatabaseReadRepository(new JdbcTemplate(failing),
                 new H2Dialect(), new StubValidator(), cache, IDENTITY_MASKING,
-                100, 10000, 100, 30, null);
+                100, 10000, 100, 30);
 
             assertThat(repo.getDatabaseInfo())
                 .containsExactly(Map.entry("error", "Connection information unavailable"));
@@ -437,8 +421,41 @@ class DatabaseReadRepositoryTest {
         }
     }
 
-    // ─── Test doubles ─────────────────────────────────────────────────────
+    // ─── listTables / listIndexes ─────────────────────────────────────────
 
+    /**
+     * Both used to bind the schema as a leading argument. The dialects resolve it themselves now, so
+     * the table list takes no argument at all and the index list takes only the table name; passing
+     * the schema left the statement with more arguments than placeholders.
+     */
+    @Nested
+    @DisplayName("schema-resolving metadata listings")
+    class MetadataListings {
+
+        @Test
+        @DisplayName("listTables resolves the requested schema without binding it")
+        void listTablesBindsNothing() {
+            assertThat(repository(100, 10000).listTables("PUBLIC"))
+                .extracting(row -> row.get("TABLE_NAME"))
+                .contains("NUMS");
+        }
+
+        @Test
+        @DisplayName("listTables with no schema falls back to the current one")
+        void listTablesWithoutSchemaUsesTheCurrentOne() {
+            assertThat(repository(100, 10000).listTables(null))
+                .extracting(row -> row.get("TABLE_NAME"))
+                .contains("NUMS");
+        }
+
+        @Test
+        @DisplayName("listIndexes takes the table name as its only argument")
+        void listIndexesBindsOnlyTheTableName() {
+            assertThat(repository(100, 10000).listIndexes("NUMS", "PUBLIC")).isNotEmpty();
+        }
+    }
+
+    // ─── Test doubles ─────────────────────────────────────────────────────
     /** Masking disabled: returns the very same list, which is the repository's "unmasked" path. */
     private static final DataMaskingService IDENTITY_MASKING = new DataMaskingService() {
         @Override
@@ -489,7 +506,8 @@ class DatabaseReadRepositoryTest {
         @Override public double queryHitRate() { return 0d; }
         @Override public double metadataHitRate() { return 0d; }
         @Override public Map<String, Object> getStatistics() { return Map.of(); }
-        @Override public BloomFilter<String> getQueryBloomFilter() { return bloomFilter; }
+        @Override public boolean mightContainQuery(String key) { return bloomFilter.mightContain(key); }
+        @Override public void recordQueryKey(String key) { bloomFilter.put(key); }
     }
 
     /**

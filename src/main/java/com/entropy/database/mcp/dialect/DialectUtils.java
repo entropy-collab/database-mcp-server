@@ -23,14 +23,20 @@ import java.util.Map;
 
 /**
  * Utility methods for dialect and driver class inference from JDBC URLs,
- * plus normalization of the heterogeneous CDC watermarks (SCN / LSN / binlog
- * coordinate) that dialects return.
+ * plus normalization of the heterogeneous CDC watermarks (Oracle SCN, PostgreSQL WAL LSN,
+ * MySQL Unix-second timestamp) that dialects return.
  */
 public final class DialectUtils {
 
-    /** Column names that carry a plain numeric watermark, matched case-insensitively. */
+    /**
+     * Column names that carry a plain numeric watermark, matched case-insensitively.
+     *
+     * <p>{@code position} / {@code binlog_position} 已移除：现在没有方言用它们做位点别名，而
+     * {@code SHOW MASTER STATUS} 的结果行恰好带一个 {@code Position} 列——留着它就意味着一个 binlog
+     * 偏移会被当成合法位点悄悄读走（例如 512 被解释成「Unix 秒 512」），这正是位点单位串味的入口。
+     */
     private static final List<String> NUMERIC_LSN_COLUMNS =
-            List.of("current_scn", "scn", "lsn", "current_lsn", "position", "binlog_position");
+            List.of("current_scn", "scn", "lsn", "current_lsn");
 
     private DialectUtils() {
     }
@@ -159,13 +165,31 @@ public final class DialectUtils {
                     "Malformed PostgreSQL WAL LSN '%s'; expected the 'X/Y' form returned by pg_current_wal_lsn()"
                             .formatted(text));
         }
+        long high;
+        long low;
         try {
-            long high = Long.parseUnsignedLong(text.substring(0, slash), 16);
-            long low = Long.parseUnsignedLong(text.substring(slash + 1), 16);
-            return (high << 32) | (low & 0xFFFFFFFFL);
+            high = Long.parseUnsignedLong(text.substring(0, slash), 16);
+            low = Long.parseUnsignedLong(text.substring(slash + 1), 16);
         } catch (NumberFormatException e) {
             throw new McpValidationException(ErrorCode.DATA_VALIDATION_FAILED,
                     "Malformed PostgreSQL WAL LSN '%s': both halves must be hexadecimal".formatted(text), e);
+        }
+        // 打包只有 64 位可用，每半各 32 位。任一半的高位非零时，`high << 32` 会把它移出边界、
+        // `low & 0xFFFFFFFF` 会把它截掉，得到的数值仍然「看起来是个合法位点」，却可能小于上一次的
+        // 位点——保序被破坏后，增量读会跳过或重放变更，而且无从察觉。所以这里按本类「绝不猜」的
+        // 惯例直接报错，而不是静默回绕。
+        requireFitsIn32Bits(high, "high", text);
+        requireFitsIn32Bits(low, "low", text);
+        return (high << 32) | low;
+    }
+
+    /** Rejects a WAL LSN half that does not fit into the 32 bits reserved for it. */
+    private static void requireFitsIn32Bits(long half, String halfName, String lsnText) {
+        if ((half >>> 32) != 0) {
+            throw new McpValidationException(ErrorCode.DATA_VALIDATION_FAILED,
+                    ("PostgreSQL WAL LSN '%s' does not fit the 64-bit packing: the %s half is %s, "
+                            + "which exceeds 32 bits. Truncating it would break watermark ordering.")
+                            .formatted(lsnText, halfName, Long.toHexString(half).toUpperCase()));
         }
     }
 
@@ -175,34 +199,6 @@ public final class DialectUtils {
      */
     public static String formatPostgresLsn(long lsn) {
         return Long.toHexString(lsn >>> 32).toUpperCase() + "/" + Long.toHexString(lsn & 0xFFFFFFFFL).toUpperCase();
-    }
-
-    /**
-     * Packs a MySQL binlog coordinate ({@code File} + {@code Position}, as returned by
-     * {@code SHOW MASTER STATUS}) into a single monotonically increasing long: the binlog file
-     * sequence number occupies the high 32 bits, the in-file offset the low 32 bits.
-     *
-     * @throws McpValidationException when the coordinate cannot be parsed
-     */
-    public static long parseMySqlBinlogLsn(Object file, Object position) {
-        Long offset = toLong(position);
-        if (offset == null) {
-            throw new McpValidationException(ErrorCode.DATA_VALIDATION_FAILED,
-                    "Cannot parse MySQL binlog position '%s'; expected a number".formatted(position));
-        }
-        long fileSequence = 0L;
-        if (file != null) {
-            String name = file.toString();
-            int dot = name.lastIndexOf('.');
-            String suffix = dot >= 0 ? name.substring(dot + 1) : name;
-            if (!suffix.matches("\\d+")) {
-                throw new McpValidationException(ErrorCode.DATA_VALIDATION_FAILED,
-                        ("Cannot parse MySQL binlog file name '%s'; expected a numeric suffix "
-                                + "such as mysql-bin.000042").formatted(name));
-            }
-            fileSequence = Long.parseLong(suffix);
-        }
-        return (fileSequence << 32) | (offset & 0xFFFFFFFFL);
     }
 
     /** Numeric coercion used by the watermark parsers: {@code Number} or an all-digit string. */

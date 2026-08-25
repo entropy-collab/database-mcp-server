@@ -121,30 +121,27 @@ public class OracleDialect extends AbstractDatabaseDialect {
 
     @Override
     public String tablesQuery(String schema) {
-        var owner = schema != null ? schema.toUpperCase() : "USER";
         return """
             SELECT table_name, num_rows AS row_count
             FROM all_tables
-            WHERE owner = ?
+            WHERE owner = %s
             ORDER BY table_name
-            """;
+            """.formatted(ownerExpression(schema));
     }
 
     @Override
     public String columnsQuery(String table, String schema) {
-        var owner = schema != null ? schema.toUpperCase() : "USER";
         return """
             SELECT column_name, data_type, data_length, nullable
             FROM all_tab_columns
-            WHERE owner = ?
+            WHERE owner = %s
               AND table_name = ?
             ORDER BY column_id
-            """;
+            """.formatted(ownerExpression(schema));
     }
 
     @Override
     public String indexesQuery(String table, String schema) {
-        var owner = schema != null ? schema.toUpperCase() : "USER";
         return """
             SELECT i.index_name,
                    i.uniqueness,
@@ -154,10 +151,10 @@ public class OracleDialect extends AbstractDatabaseDialect {
             JOIN all_ind_columns ic
               ON i.index_name = ic.index_name
               AND i.owner = ic.index_owner
-            WHERE i.table_owner = ?
+            WHERE i.table_owner = %s
               AND i.table_name = ?
             ORDER BY i.index_name, ic.column_position
-            """;
+            """.formatted(ownerExpression(schema));
     }
 
     @Override
@@ -658,13 +655,18 @@ public class OracleDialect extends AbstractDatabaseDialect {
 
     @Override
     public String cdcCheckSupportSql() {
-        // Check if FLASHBACK QUERY is available
+        // 判据对应真实读取机制：readChanges 走 Flashback Version Query，它依赖的是 undo 保留期
+        // （undo_retention）与目标表上的 SELECT 权限，而 recyclebin（回收站，只影响 DROP 的对象）和
+        // v$flashback_database_log（整库闪回日志，只有 FLASHBACK DATABASE 才需要）都不是必要条件，
+        // 按它们判断会把「闪回版本查询完全可用」的库判成不支持。
+        // 表级 SELECT 权限是 per-table 的，只能在 readChanges 时暴露，这里只能覆盖实例级条件。
+        // 单行单值：原先两段 UNION ALL 在两个分支都命中时返回 2 行，queryForObject 抛
+        // IncorrectResultSizeDataAccessException 后被 isCdcSupported 吞成「不支持」。聚合函数不带
+        // GROUP BY 保证恰好一行，即使 undo_retention 这条参数记录不存在也是一行 0。
         return """
-            SELECT 1 FROM v$parameter
-            WHERE name = 'recyclebin' AND value != 'OFF'
-            UNION ALL
-            SELECT 1 FROM v$flashback_database_log
-            WHERE ROWNUM = 1
+            SELECT CASE WHEN NVL(MAX(TO_NUMBER(value)), 0) > 0 THEN 1 ELSE 0 END AS supported
+            FROM v$parameter
+            WHERE name = 'undo_retention'
             """;
     }
 

@@ -43,14 +43,13 @@ public class H2Dialect extends AbstractDatabaseDialect {
 
     @Override
     public String tablesQuery(String schema) {
-        var schemaFilter = schema != null ? "AND TABLE_SCHEMA = ?" : "";
         return """
             SELECT TABLE_NAME, 0 AS ROW_COUNT
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_TYPE = 'BASE TABLE'
-            %s
+              AND TABLE_SCHEMA = %s
             ORDER BY TABLE_NAME
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -83,25 +82,15 @@ public class H2Dialect extends AbstractDatabaseDialect {
         return DialectUtils.schemaExpression(schema, "CURRENT_SCHEMA");
     }
 
-    /**
-     * Schema predicate for the two methods whose placeholder layout is fixed by existing callers:
-     * a bound {@code ?} when a schema was given (so {@code (schema, tableName)} keeps working), and
-     * {@code CURRENT_SCHEMA} when it was not - never {@code IS NULL}, which matched nothing and is
-     * what made backup and {@code diffSchema} report "Table not found" on H2.
-     */
-    private static String boundSchemaPredicate(String schema, String column) {
-        return schema != null ? column + " = ?" : column + " = CURRENT_SCHEMA";
-    }
-
     @Override
     public String columnsQuery(String table, String schema) {
         return """
             SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
             FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE %s
+            WHERE TABLE_SCHEMA = %s
               AND TABLE_NAME = ?
             ORDER BY ORDINAL_POSITION
-            """.formatted(boundSchemaPredicate(schema, "TABLE_SCHEMA"));
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -112,10 +101,10 @@ public class H2Dialect extends AbstractDatabaseDialect {
                    INDEX_NAME AS column_name,
                    0 AS seq_in_index
             FROM INFORMATION_SCHEMA.INDEXES
-            WHERE %s
+            WHERE TABLE_SCHEMA = %s
               AND TABLE_NAME = ?
             ORDER BY INDEX_NAME
-            """.formatted(boundSchemaPredicate(schema, "TABLE_SCHEMA"));
+            """.formatted(schemaExpression(schema));
     }
 
     // ─── Comments ────────────────────────────────────────────────────────

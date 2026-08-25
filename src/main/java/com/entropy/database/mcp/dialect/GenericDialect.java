@@ -26,15 +26,23 @@ public class GenericDialect extends AbstractDatabaseDialect {
         return "`" + name.replace("`", "``") + "`";
     }
 
+    /**
+     * Resolves the schema side of a metadata predicate without spending a placeholder on it.
+     * {@code CURRENT_SCHEMA} is the SQL-standard spelling, which is all a fallback dialect can assume.
+     */
+    private String schemaExpression(String schema) {
+        return DialectUtils.schemaExpression(schema, "CURRENT_SCHEMA");
+    }
+
     @Override
     public String tablesQuery(String schema) {
         return """
             SELECT table_name, 0 AS row_count
             FROM information_schema.tables
-            WHERE table_schema = ?
-              AND table_type = 'BASE TABLE'
+            WHERE table_type = 'BASE TABLE'
+              AND table_schema = %s
             ORDER BY table_name
-            """;
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -42,10 +50,10 @@ public class GenericDialect extends AbstractDatabaseDialect {
         return """
             SELECT column_name, data_type, is_nullable
             FROM information_schema.columns
-            WHERE table_schema = ?
-              AND table_name = ?
+            WHERE table_name = ?
+              AND table_schema = %s
             ORDER BY ordinal_position
-            """;
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -53,10 +61,10 @@ public class GenericDialect extends AbstractDatabaseDialect {
         return """
             SELECT index_name, uniqueness, column_name, ordinal_position
             FROM information_schema.statistics
-            WHERE table_schema = ?
-              AND table_name = ?
+            WHERE table_name = ?
+              AND table_schema = %s
             ORDER BY index_name, ordinal_position
-            """;
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -130,21 +138,18 @@ public class GenericDialect extends AbstractDatabaseDialect {
     }
 
     /**
-     * The generic dialect has no portable size source, so it echoes a zero-sized row with the shape
-     * the callers expect.
+     * No portable size source exists, so the generic dialect reports that it cannot answer.
      *
-     * <p>Deviates from the one-placeholder contract of
-     * {@link DatabaseDialect#estimateTableSizeSql(String, String)}: there is nothing to filter, so
-     * the row is a constant and declares no bind parameter. The name is still checked with
-     * {@link DialectUtils#isPlainIdentifier(String)} before being concatenated - it used to be
-     * spliced into a string literal unchecked, where a single quote in the table name escaped the
-     * literal.
+     * <p>It used to render a constant zero-sized row instead. That was indistinguishable from a real
+     * measurement of an empty table, and because the row carried no bind parameter it was also the
+     * single exception to the one-placeholder contract of
+     * {@link DatabaseDialect#estimateTableSizeSql(String, String)} - which forced every caller to
+     * inspect the SQL for a {@code ?} before deciding what to bind. {@code null} is the answer the
+     * callers already handle: the size is reported as unknown.
      */
     @Override
     public String estimateTableSizeSql(String tableName, String schema) {
-        String name = DialectUtils.isPlainIdentifier(tableName) ? tableName.trim() : "unknown";
-        return "SELECT '" + name + "' AS segment_name, 'TABLE' AS segment_type, "
-                + "0 AS size_mb, 0 AS extents";
+        return null;
     }
 
     @Override

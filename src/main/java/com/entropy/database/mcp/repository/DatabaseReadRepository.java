@@ -22,7 +22,6 @@ import com.entropy.database.mcp.repository.QueryLimits;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.session.McpToolContext;
-import com.entropy.database.mcp.stream.SseStreamManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -59,29 +58,16 @@ public class DatabaseReadRepository {
     private final int maxResultRows;
     private final int fetchSize;
     private final int queryTimeoutSeconds;
-    private final SseStreamManager sseStreamManager;
 
     public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
                                   DatabaseDialect dialect,
                                   SqlValidator sqlValidator,
                                   DatabaseCache cache,
                                   DataMaskingService maskingService,
-                                  SseStreamManager sseStreamManager) {
-        this(jdbcTemplate, dialect, sqlValidator, cache, maskingService,
-             DEFAULT_MAX_ROWS, DEFAULT_MAX_RESULT_ROWS, DEFAULT_FETCH_SIZE,
-             DEFAULT_QUERY_TIMEOUT_SECONDS, sseStreamManager);
-    }
-
-    public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
-                                  DatabaseDialect dialect,
-                                  SqlValidator sqlValidator,
-                                  DatabaseCache cache,
-                                  DataMaskingService maskingService,
-                                  QueryLimits limits,
-                                  SseStreamManager sseStreamManager) {
+                                  QueryLimits limits) {
         this(jdbcTemplate, dialect, sqlValidator, cache, maskingService,
              limits.maxRows(), limits.maxResultRows(), DEFAULT_FETCH_SIZE,
-             DEFAULT_QUERY_TIMEOUT_SECONDS, sseStreamManager);
+             DEFAULT_QUERY_TIMEOUT_SECONDS);
     }
 
     public DatabaseReadRepository(JdbcTemplate jdbcTemplate,
@@ -92,8 +78,7 @@ public class DatabaseReadRepository {
                                   int maxRows,
                                   int maxResultRows,
                                   int fetchSize,
-                                  int queryTimeoutSeconds,
-                                  SseStreamManager sseStreamManager) {
+                                  int queryTimeoutSeconds) {
         this.jdbcTemplate = jdbcTemplate;
         this.dialect = dialect;
         this.sqlValidator = sqlValidator;
@@ -103,7 +88,6 @@ public class DatabaseReadRepository {
         this.maxResultRows = maxResultRows;
         this.fetchSize = fetchSize;
         this.queryTimeoutSeconds = queryTimeoutSeconds;
-        this.sseStreamManager = sseStreamManager;
     }
 
     // ─── Metadata Queries (cached via metadataCache) ──────────────────────
@@ -115,8 +99,10 @@ public class DatabaseReadRepository {
         if (cached != null) {
             return checkType(cached, cacheKey, "List<Map<String, Object>>");
         }
+        // tablesQuery resolves the schema itself and declares no placeholder (see the bind-parameter
+        // contract on DatabaseDialect), so there is nothing to bind here.
         String sql = dialect.tablesQuery(schema);
-        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema);
+        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql);
         cache.putMetadata(cacheKey, result);
         return result;
     }
@@ -167,8 +153,11 @@ public class DatabaseReadRepository {
         if (cached != null) {
             return checkType(cached, cacheKey, "Map<String, Object>");
         }
+        // One placeholder, the dialect-normalized table name; the schema is resolved inside the
+        // dialect. It used to be bound as a second argument, which broke on every dialect that
+        // resolves the schema itself.
         String sql = dialect.columnsQuery(table, schema);
-        List<Map<String, Object>> columns = jdbcTemplate.queryForList(sql, schema, normalizeTableName(table));
+        List<Map<String, Object>> columns = jdbcTemplate.queryForList(sql, normalizeTableName(table));
         Map<String, Object> result = Map.of(
             "table", table,
             "schema", schema,
@@ -186,8 +175,9 @@ public class DatabaseReadRepository {
         if (cached != null) {
             return checkType(cached, cacheKey, "List<Map<String, Object>>");
         }
+        // One placeholder, the dialect-normalized table name; the schema is resolved inside the dialect.
         String sql = dialect.indexesQuery(table, schema);
-        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, schema, normalizeTableName(table));
+        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, normalizeTableName(table));
         cache.putMetadata(cacheKey, result);
         return result;
     }
@@ -222,21 +212,7 @@ public class DatabaseReadRepository {
 
     @SuppressWarnings("unchecked")
     public PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken) {
-        return executeQueryWithSse(sql, maxRows, continuationToken, null);
-    }
-
-    /**
-     * Execute query with optional SSE progress callback.
-     */
-    @SuppressWarnings("unchecked")
-    public PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
-                                                    SseStreamManager.QueryExecutor<PaginatedQueryResult> executor) {
-        if (sseStreamManager == null) {
-            return executeQueryDirect(sql, maxRows, continuationToken);
-        }
-        return sseStreamManager.executeWithProgress(progress -> {
-            // SSE event handling can be added here if needed
-        }, () -> executeQueryDirect(sql, maxRows, continuationToken));
+        return executeQueryDirect(sql, maxRows, continuationToken);
     }
 
     @SuppressWarnings("unchecked")
@@ -259,7 +235,7 @@ public class DatabaseReadRepository {
         // Cache first-page queries only (no continuation token)
         if (continuationToken == null || continuationToken.isBlank()) {
             // Bloom filter pre-check: if definitely not present, skip cache lookup
-            boolean possiblyCached = cache.getQueryBloomFilter().mightContain(schema + "." + sql);
+            boolean possiblyCached = cache.mightContainQuery(schema + "." + sql);
             if (possiblyCached) {
                 Object cached = cache.getQuery(cacheKey);
                 if (cached != null) {
@@ -323,7 +299,7 @@ public class DatabaseReadRepository {
         // from: a separate ":masked" key was never looked up, so masked pages never hit the cache.
         if (continuationToken == null || continuationToken.isBlank()) {
             cache.putQuery(cacheKey, result);
-            cache.getQueryBloomFilter().put(schema + "." + sql);
+            cache.recordQueryKey(schema + "." + sql);
         }
 
         return result;

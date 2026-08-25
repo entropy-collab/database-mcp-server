@@ -26,6 +26,7 @@ public class SqliteDialect extends AbstractDatabaseDialect {
         return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
+    /** SQLite has no schemas, so the {@code schema} argument has nothing to resolve. */
     @Override
     public String tablesQuery(String schema) {
         return """
@@ -37,18 +38,34 @@ public class SqliteDialect extends AbstractDatabaseDialect {
             """;
     }
 
+    /**
+     * The table-valued {@code pragma_table_info} form rather than {@code PRAGMA table_info(...)}: a
+     * PRAGMA statement cannot take a bind parameter, so the table name had to be concatenated and the
+     * query carried no placeholder at all - the one shape callers cannot bind for. The column labels
+     * are aliased to the names the other dialects use, since callers read them by name.
+     */
     @Override
     public String columnsQuery(String table, String schema) {
         return """
-            PRAGMA table_info(%s)
-            """.formatted(quote(table));
+            SELECT name AS column_name,
+                   type AS data_type,
+                   CASE WHEN "notnull" = 1 THEN 'NO' ELSE 'YES' END AS is_nullable
+            FROM pragma_table_info(?)
+            ORDER BY cid
+            """;
     }
 
+    /** Same reasoning as {@link #columnsQuery(String, String)}: the bindable table-valued form. */
     @Override
     public String indexesQuery(String table, String schema) {
         return """
-            PRAGMA index_list(%s)
-            """.formatted(quote(table));
+            SELECT name AS index_name,
+                   CASE WHEN "unique" = 1 THEN 0 ELSE 1 END AS non_unique,
+                   NULL AS column_name,
+                   seq AS seq_in_index
+            FROM pragma_index_list(?)
+            ORDER BY name
+            """;
     }
 
     @Override

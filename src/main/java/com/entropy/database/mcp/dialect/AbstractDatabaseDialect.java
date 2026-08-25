@@ -20,14 +20,6 @@ import com.zaxxer.hikari.HikariConfig;
 
 public abstract class AbstractDatabaseDialect implements DatabaseDialect {
 
-    protected String schemaFilter(String schema, String columnName) {
-        return schema != null ? "AND " + columnName + " = ?" : "";
-    }
-
-    protected String informationSchemaSchemaFilter(String schema) {
-        return schema != null ? "AND table_schema = ?" : "";
-    }
-
     @Override
     public String schemasQuery() {
         return "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name";

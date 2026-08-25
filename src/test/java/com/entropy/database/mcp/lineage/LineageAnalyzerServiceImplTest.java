@@ -18,6 +18,7 @@ package com.entropy.database.mcp.lineage;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.ByokInfrastructure;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.byok.StatementTemplates;
 import com.entropy.database.mcp.dialect.H2Dialect;
 import com.entropy.database.mcp.properties.LineageProperties;
 import org.junit.jupiter.api.BeforeAll;
@@ -51,6 +52,12 @@ class LineageAnalyzerServiceImplTest {
 
     private static JdbcTemplate jdbcTemplate;
 
+    /**
+     * Cyclic fixtures live in their own database: a self-reference and a mutual foreign key would
+     * otherwise show up in the whole-schema edge list the acyclic tests assert on exactly.
+     */
+    private static JdbcTemplate cyclicJdbcTemplate;
+
     @BeforeAll
     static void createSchema() {
         org.h2.jdbcx.JdbcDataSource ds = new org.h2.jdbcx.JdbcDataSource();
@@ -77,6 +84,33 @@ class LineageAnalyzerServiceImplTest {
                     CONSTRAINT FK_GC_CHILD FOREIGN KEY (CHILD_ID) REFERENCES CHILD(ID)
                 )
                 """);
+
+        org.h2.jdbcx.JdbcDataSource cyclicDs = new org.h2.jdbcx.JdbcDataSource();
+        cyclicDs.setURL("jdbc:h2:mem:lineagecycle;DB_CLOSE_DELAY=-1");
+        cyclicDs.setUser("sa");
+        cyclicDs.setPassword("");
+        cyclicJdbcTemplate = new JdbcTemplate(cyclicDs);
+
+        cyclicJdbcTemplate.execute("DROP TABLE IF EXISTS LOOP_A");
+        cyclicJdbcTemplate.execute("DROP TABLE IF EXISTS LOOP_B");
+        cyclicJdbcTemplate.execute("DROP TABLE IF EXISTS SELF_REF");
+        cyclicJdbcTemplate.execute("""
+                CREATE TABLE SELF_REF (
+                    ID INT PRIMARY KEY,
+                    PARENT_ID INT,
+                    CONSTRAINT FK_SELF FOREIGN KEY (PARENT_ID) REFERENCES SELF_REF(ID)
+                )
+                """);
+        cyclicJdbcTemplate.execute("CREATE TABLE LOOP_A (ID INT PRIMARY KEY, B_ID INT)");
+        cyclicJdbcTemplate.execute("""
+                CREATE TABLE LOOP_B (
+                    ID INT PRIMARY KEY,
+                    A_ID INT,
+                    CONSTRAINT FK_B_A FOREIGN KEY (A_ID) REFERENCES LOOP_A(ID)
+                )
+                """);
+        cyclicJdbcTemplate.execute(
+                "ALTER TABLE LOOP_A ADD CONSTRAINT FK_A_B FOREIGN KEY (B_ID) REFERENCES LOOP_B(ID)");
     }
 
     // ─── Fixtures ─────────────────────────────────────────────────────────
@@ -86,8 +120,18 @@ class LineageAnalyzerServiceImplTest {
     }
 
     private LineageAnalyzerServiceImpl service(H2Dialect dialect, LineageProperties properties) {
+        return service(dialect, properties, jdbcTemplate);
+    }
+
+    private LineageAnalyzerServiceImpl cyclicService() {
+        return service(new H2Dialect(), new LineageProperties(), cyclicJdbcTemplate);
+    }
+
+    private LineageAnalyzerServiceImpl service(H2Dialect dialect, LineageProperties properties,
+                                               JdbcTemplate jdbc) {
         ByokDataSourceContext ctx = new ByokDataSourceContext(CONNECTION,
-                jdbcTemplate.getDataSource(), dialect, jdbcTemplate,
+                jdbc.getDataSource(), dialect,
+                StatementTemplates.over(jdbc.getDataSource(), jdbc, null),
                 new ByokInfrastructure(null, null, null, null, null, null));
         DynamicDataSourceManager manager = mock(DynamicDataSourceManager.class);
         when(manager.acquire(anyString())).thenReturn(ctx);
@@ -191,6 +235,41 @@ class LineageAnalyzerServiceImplTest {
 
         LineageAnalysis first = service.analyze("PARENT", CONNECTION, 5);
         assertSame(first, service.analyze("PARENT", CONNECTION, 5));
+    }
+
+    // ─── Cycles ───────────────────────────────────────────────────────────
+
+    /**
+     * The CYCLE anomaly used to be looked for in {@code allDownstream}, which the traversal builds
+     * with the root excluded by construction - so the condition could never hold and the assertion
+     * that no cycle was reported was true of every schema, cyclic or not.
+     */
+    @Test
+    @DisplayName("a self-referencing foreign key is reported as a cycle")
+    void selfReferenceIsACycle() {
+        LineageAnalysis analysis = cyclicService().analyze("SELF_REF", CONNECTION, 5);
+
+        assertThat(analysis.anomalies()).extracting(LineageAnomaly::type).contains("CYCLE");
+        // The edge itself is still reported; only the traversal excludes the root.
+        assertThat(analysis.directUpstream()).extracting(LineageEdge::sourceTable)
+                .containsExactly("SELF_REF");
+        assertThat(analysis.allUpstream()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a mutual foreign key A -> B -> A is reported as a cycle")
+    void mutualForeignKeysAreACycle() {
+        LineageAnalysis analysis = cyclicService().analyze("LOOP_A", CONNECTION, 5);
+
+        assertThat(analysis.anomalies()).extracting(LineageAnomaly::type).contains("CYCLE");
+        assertThat(analysis.allDownstream()).containsExactly("LOOP_B");
+    }
+
+    @Test
+    @DisplayName("an acyclic graph reports no cycle, so the anomaly is not simply always raised")
+    void acyclicGraphHasNoCycle() {
+        assertThat(service().analyze("GRANDCHILD", CONNECTION, 5).anomalies())
+                .extracting(LineageAnomaly::type).doesNotContain("CYCLE");
     }
 
     // ─── Export ───────────────────────────────────────────────────────────

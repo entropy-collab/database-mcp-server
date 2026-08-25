@@ -124,7 +124,8 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         Traversal down = traverse(connection, tableName, directDownstream, false, depth, nodeCap);
 
         List<LineageAnomaly> anomalies = new ArrayList<>(
-                detectAnomalies(tableName, connection, up.tables(), down.tables()));
+                detectAnomalies(tableName, connection, up.tables(),
+                        up.revisitedRoot() || down.revisitedRoot()));
         if (up.truncated()) {
             anomalies.add(truncationAnomaly(tableName, "upstream", nodeCap));
         }
@@ -148,6 +149,11 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
      * schema fans out to a query per discovered table per level, which is the fastest way to
      * exhaust the connection pool. Hitting the cap is reported as a {@code TRUNCATED} anomaly
      * rather than silently returning a partial graph.
+     *
+     * <p>Coming back to the root is recorded separately rather than being read off the result: the
+     * root is seeded into {@code visited} so the walk terminates, which also means it can never
+     * appear among the collected tables - and a self-referencing foreign key is skipped by the very
+     * same check. Both are cycles, and both used to be invisible.
      */
     private Traversal traverse(String connection, String rootTable, List<LineageEdge> seedEdges,
                                boolean upstream, int maxDepth, int nodeCap) {
@@ -158,10 +164,15 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         Set<String> collected = new LinkedHashSet<>();
         Deque<String> queue = new ArrayDeque<>();
         boolean truncated = false;
+        boolean revisitedRoot = false;
         int depthReached = 0;
 
         for (LineageEdge edge : seedEdges) {
             String neighbour = normalize(neighbourOf(edge, upstream));
+            if (neighbour.equals(root)) {
+                revisitedRoot = true;   // self-referencing foreign key
+                continue;
+            }
             if (neighbour.isEmpty() || !visited.add(neighbour)) {
                 continue;
             }
@@ -185,6 +196,10 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
                         : getDownstream(current, connection);
                 for (LineageEdge edge : edges) {
                     String neighbour = normalize(neighbourOf(edge, upstream));
+                    if (neighbour.equals(root)) {
+                        revisitedRoot = true;   // the walk led back to the analyzed table
+                        continue;
+                    }
                     if (neighbour.isEmpty() || !visited.add(neighbour)) {
                         continue;
                     }
@@ -202,7 +217,7 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
                 depthReached = currentDepth;
             }
         }
-        return new Traversal(new ArrayList<>(collected), depthReached, truncated);
+        return new Traversal(new ArrayList<>(collected), depthReached, truncated, revisitedRoot);
     }
 
     /** With the orientation contract in place the neighbour is simply the far end of the edge. */
@@ -437,6 +452,14 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         }
     }
 
+    /**
+     * The base tables of the connection's default schema.
+     *
+     * <p>Per the dialect contract {@code tablesQuery} resolves the schema itself and declares no
+     * placeholder, so nothing is bound. Oracle's variant used to carry an {@code owner = ?} the
+     * caller never filled, and the resulting failure was swallowed here - which silently disabled
+     * both the per-table {@code listAllEdges} fallback and the ORPHAN detection below.
+     */
     private List<Map<String, Object>> listBaseTables(String connection) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
@@ -450,13 +473,17 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         }
     }
 
+    /**
+     * @param cycleThroughRoot whether a traversal came back to the analyzed table, reported by
+     *                         {@link #traverse}. It cannot be derived from the collected tables: the
+     *                         walk excludes the root from its result by construction, so looking for
+     *                         the root in its own downstream was a condition that could never hold.
+     */
     private List<LineageAnomaly> detectAnomalies(String tableName, String connection,
                                                    Collection<String> allUpstream,
-                                                   Collection<String> allDownstream) {
+                                                   boolean cycleThroughRoot) {
         List<LineageAnomaly> anomalies = new ArrayList<>();
-        String self = normalize(tableName);
-        // Check for cycle: if the analyzed table appears in its own downstream
-        if (allDownstream.stream().anyMatch(t -> normalize(t).equals(self))) {
+        if (cycleThroughRoot) {
             anomalies.add(new LineageAnomaly("CYCLE",
                     "Table " + tableName + " is both ancestor and descendant of itself",
                     List.of(tableName)));
@@ -524,10 +551,12 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
     /**
      * Outcome of one directional traversal.
      *
-     * @param tables       discovered tables, breadth-first order, root excluded
-     * @param depthReached depth of the deepest discovered table
-     * @param truncated    whether the node cap stopped the walk early
+     * @param tables        discovered tables, breadth-first order, root excluded
+     * @param depthReached  depth of the deepest discovered table
+     * @param truncated     whether the node cap stopped the walk early
+     * @param revisitedRoot whether an edge led back to the analyzed table, i.e. a cycle through it
      */
-    private record Traversal(List<String> tables, int depthReached, boolean truncated) {
+    private record Traversal(List<String> tables, int depthReached, boolean truncated,
+                             boolean revisitedRoot) {
     }
 }

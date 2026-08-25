@@ -17,15 +17,20 @@ package com.entropy.database.mcp.quality;
 
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.GenericDialect;
+import com.entropy.database.mcp.dialect.H2Dialect;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.domain.PlanAnalysis;
 import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.facade.DatabaseReadOperations;
-import com.entropy.database.mcp.stream.SseStreamManager;
+import com.entropy.database.mcp.security.SqlValidator;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -44,7 +49,39 @@ class QualityCheckServiceTest {
     private static final DatabaseDialect DIALECT = new GenericDialect();
     private static final String TABLE = "ORDERS";
 
+    /** Nine rows: NOTE is null in seven of them and one row is a verbatim duplicate. */
+    private static final String H2_TABLE = "Q_ORDERS";
+
+    /** Two columns, no nulls, no duplicates. */
+    private static final String CLEAN_TABLE = "Q_CLEAN";
+
+    private static JdbcTemplate jdbcTemplate;
+
     private RecordingReadOperations db;
+
+    @BeforeAll
+    static void createSchema() {
+        org.h2.jdbcx.JdbcDataSource ds = new org.h2.jdbcx.JdbcDataSource();
+        ds.setURL("jdbc:h2:mem:qualitysvc;DB_CLOSE_DELAY=-1");
+        ds.setUser("sa");
+        ds.setPassword("");
+        jdbcTemplate = new JdbcTemplate(ds);
+
+        jdbcTemplate.execute("DROP TABLE IF EXISTS Q_ORDERS");
+        jdbcTemplate.execute("DROP TABLE IF EXISTS Q_CLEAN");
+        jdbcTemplate.execute("CREATE TABLE Q_ORDERS (ID INT, STATUS VARCHAR(10), NOTE VARCHAR(50))");
+        jdbcTemplate.update("INSERT INTO Q_ORDERS VALUES (1, 'A', NULL)");
+        jdbcTemplate.update("INSERT INTO Q_ORDERS VALUES (1, 'A', NULL)");
+        for (int id = 2; id <= 6; id++) {
+            jdbcTemplate.update("INSERT INTO Q_ORDERS VALUES (?, 'A', NULL)", id);
+        }
+        jdbcTemplate.update("INSERT INTO Q_ORDERS VALUES (7, 'A', 'note-7')");
+        jdbcTemplate.update("INSERT INTO Q_ORDERS VALUES (8, 'A', 'note-8')");
+
+        jdbcTemplate.execute("CREATE TABLE Q_CLEAN (ID INT, LABEL VARCHAR(20))");
+        jdbcTemplate.update("INSERT INTO Q_CLEAN VALUES (1, 'one')");
+        jdbcTemplate.update("INSERT INTO Q_CLEAN VALUES (2, 'two')");
+    }
 
     @BeforeEach
     void setUp() {
@@ -53,6 +90,14 @@ class QualityCheckServiceTest {
 
     private static QualityCheckService service(boolean customSqlEnabled) {
         return new QualityCheckService(new QualityRuleRegistry(), null, null, customSqlEnabled);
+    }
+
+    private static QualityCheckService h2Service() {
+        return service(false);
+    }
+
+    private static DatabaseReadOperations h2Db() {
+        return new H2ReadOperations(jdbcTemplate);
     }
 
     @Test
@@ -134,6 +179,76 @@ class QualityCheckServiceTest {
                 .hasMessageContaining("allowed-tables");
     }
 
+    // ─── Against a real database ──────────────────────────────────────────
+
+    /**
+     * The checks that only exist if the column list does. {@code queryColumns} bound nothing to a
+     * {@code columnsQuery} that always names the table, so on every dialect it threw, the failure was
+     * absorbed, and the report carried no rules at all - which the score formula turns into a
+     * flawless 100 for any table whatsoever.
+     */
+    @Nested
+    @DisplayName("column discovery drives the per-column and duplicate checks")
+    class AgainstH2 {
+
+        @Test
+        @DisplayName("every column of the table is discovered")
+        void columnsAreDiscovered() {
+            QualityReport report = h2Service().check("primary", H2_TABLE, null, List.of(),
+                    new H2Dialect(), h2Db());
+
+            assertThat(report.rules()).extracting(QualityRule::column)
+                    .contains("ID", "STATUS", "NOTE");
+        }
+
+        @Test
+        @DisplayName("the per-column null-rate check runs and reports the column above the threshold")
+        void nullRateCheckRuns() {
+            QualityReport report = h2Service().check("primary", H2_TABLE, null, List.of(),
+                    new H2Dialect(), h2Db());
+
+            assertThat(report.issues()).extracting(QualityIssue::ruleId).contains("null-NOTE");
+            assertThat(report.issues()).extracting(QualityIssue::ruleId)
+                    .doesNotContain("null-ID", "null-STATUS");
+        }
+
+        @Test
+        @DisplayName("the duplicate-row check runs and finds the duplicated row")
+        void duplicateCheckRuns() {
+            QualityReport report = h2Service().check("primary", H2_TABLE, null, List.of(),
+                    new H2Dialect(), h2Db());
+
+            QualityIssue duplicates = report.issues().stream()
+                    .filter(issue -> "dup-all".equals(issue.ruleId()))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("no duplicate issue: " + report.issues()));
+            assertThat(duplicates.issueCount()).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("the score is no longer a constant 100")
+        void scoreReflectsTheIssuesFound() {
+            QualityReport report = h2Service().check("primary", H2_TABLE, null, List.of(),
+                    new H2Dialect(), h2Db());
+
+            // Three columns plus the duplicate rule; two of them report an issue.
+            assertThat(report.rulesChecked()).isEqualTo(4);
+            assertThat(report.issuesFound()).isEqualTo(2);
+            assertThat(report.overallScore()).isEqualTo(50.0);
+        }
+
+        @Test
+        @DisplayName("a clean table still scores 100, so the score is not merely always low")
+        void aCleanTableScoresPerfectly() {
+            QualityReport report = h2Service().check("primary", CLEAN_TABLE, null, List.of(),
+                    new H2Dialect(), h2Db());
+
+            assertThat(report.rulesChecked()).isEqualTo(2);
+            assertThat(report.issuesFound()).isZero();
+            assertThat(report.overallScore()).isEqualTo(100.0);
+        }
+    }
+
     /**
      * Minimal read facade that records every statement and answers the probes with fixed counts:
      * 10 rows in the table, no nulls and no duplicate groups.
@@ -160,9 +275,30 @@ class QualityCheckServiceTest {
         }
 
         @Override
-        public PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
-                                                        SseStreamManager.QueryExecutor<PaginatedQueryResult> executor,
-                                                        String connection) {
+        public List<Map<String, Object>> executeNamedQuery(String sql, Map<String, Object> params, String connection) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public PlanAnalysis explainPlan(String sql, String connection) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    /**
+     * Read facade over the real H2 database: unlike the recording double it passes the arguments on,
+     * so a statement whose placeholder count does not match the argument list fails here exactly as
+     * it would in production.
+     */
+    private record H2ReadOperations(JdbcTemplate jdbc) implements DatabaseReadOperations {
+
+        @Override
+        public List<Map<String, Object>> queryRows(String sql, String connection, Object... args) {
+            return jdbc.queryForList(sql, args);
+        }
+
+        @Override
+        public PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken, String connection) {
             throw new UnsupportedOperationException();
         }
 

@@ -23,26 +23,57 @@ class OracleDialectTest {
     private final OracleDialect dialect = new OracleDialect();
 
     @Test
-    void tablesQueryContainsAllTables() {
+    void tablesQueryInlinesTheOwnerAndBindsNothing() {
         var sql = dialect.tablesQuery("HR");
         Assertions.assertThat(sql).contains("all_tables");
-        Assertions.assertThat(sql).contains("owner = ?");
+        // The owner is resolved into the SQL: it used to be an `owner = ?` no caller ever filled,
+        // while the computed owner was dropped on the floor.
+        Assertions.assertThat(sql).contains("owner = 'HR'");
+        Assertions.assertThat(placeholders(sql)).isZero();
+    }
+
+    @Test
+    void tablesQueryWithoutSchemaFallsBackToTheCurrentUser() {
+        var sql = dialect.tablesQuery(null);
+        Assertions.assertThat(sql).contains("owner = USER");
+        Assertions.assertThat(placeholders(sql)).isZero();
     }
 
     @Test
     void columnsQueryContainsAllTabColumns() {
         var sql = dialect.columnsQuery("EMPLOYEES", "HR");
         Assertions.assertThat(sql).contains("all_tab_columns");
-        Assertions.assertThat(sql).contains("owner = ?");
+        Assertions.assertThat(sql).contains("owner = 'HR'");
         Assertions.assertThat(sql).contains("table_name = ?");
+        Assertions.assertThat(placeholders(sql)).isEqualTo(1);
+    }
+
+    @Test
+    void columnsQueryWithoutSchemaFallsBackToTheCurrentUser() {
+        var sql = dialect.columnsQuery("EMPLOYEES", null);
+        Assertions.assertThat(sql).contains("owner = USER");
+        Assertions.assertThat(placeholders(sql)).isEqualTo(1);
     }
 
     @Test
     void indexesQueryContainsAllIndColumns() {
         var sql = dialect.indexesQuery("EMPLOYEES", "HR");
         Assertions.assertThat(sql).contains("all_indexes");
-        Assertions.assertThat(sql).contains("table_owner = ?");
-        Assertions.assertThat(sql).contains("table_name = ?");
+        Assertions.assertThat(sql).contains("i.table_owner = 'HR'");
+        Assertions.assertThat(sql).contains("i.table_name = ?");
+        Assertions.assertThat(placeholders(sql)).isEqualTo(1);
+    }
+
+    /** A schema that is not a plain identifier degrades to the current user, it is never concatenated. */
+    @Test
+    void aNonIdentifierSchemaIsNotSplicedIntoTheSql() {
+        var sql = dialect.tablesQuery("HR' OR '1'='1");
+        Assertions.assertThat(sql).contains("owner = USER");
+        Assertions.assertThat(sql).doesNotContain("OR '1'");
+    }
+
+    private static long placeholders(String sql) {
+        return sql.chars().filter(c -> c == '?').count();
     }
 
     @Test

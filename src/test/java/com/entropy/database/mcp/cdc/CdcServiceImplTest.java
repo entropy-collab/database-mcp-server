@@ -168,14 +168,47 @@ class CdcServiceImplTest {
     @Test
     void getLastLsnNormalizesTheDialectWatermark() {
         when(ctx.getDialect()).thenReturn(new MySqlDialect());
-        when(jdbc.queryForMap(anyString())).thenReturn(Map.<String, Object>of("File", "mysql-bin.000007", "Position", 512L));
+        // MySQL 的 watermark 是 SELECT UNIX_TIMESTAMP() AS current_lsn 的秒值，与审计表
+        // event_time > FROM_UNIXTIME(?) 同一单位。
+        when(jdbc.queryForMap(anyString())).thenReturn(Map.<String, Object>of("current_lsn", 1_735_689_600L));
 
-        assertThat(service.getLastLsn(CONNECTION)).isEqualTo((7L << 32) | 512L);
+        assertThat(service.getLastLsn(CONNECTION)).isEqualTo(1_735_689_600L);
+    }
+
+    // ─── isCdcSupported: a probe row count is not a capability signal ───────
+
+    /**
+     * The probe used to be read with {@code queryForObject}, which demands exactly one row: the
+     * multi-branch {@code UNION ALL} probes returned one row per matching branch, so the most
+     * capable database threw and was reported as "not supported".
+     */
+    @Test
+    void cdcSupportSurvivesAProbeThatReturnsMoreThanOneRow() {
+        when(jdbc.queryForList(anyString())).thenReturn(List.of(
+                Map.<String, Object>of("supported", 1),
+                Map.<String, Object>of("supported", 1)));
+
+        assertThat(service.isCdcSupported(CONNECTION)).isTrue();
+    }
+
+    @Test
+    void cdcSupportIsFalseWhenTheProbeReportsZero() {
+        when(jdbc.queryForList(anyString())).thenReturn(List.of(Map.<String, Object>of("supported", 0)));
+
+        assertThat(service.isCdcSupported(CONNECTION)).isFalse();
+    }
+
+    @Test
+    void cdcSupportIsFalseWhenTheDialectHasNoProbe() {
+        when(ctx.getDialect()).thenReturn(new com.entropy.database.mcp.dialect.H2Dialect());
+
+        assertThat(service.isCdcSupported(CONNECTION)).isFalse();
+        verify(jdbc, never()).queryForList(anyString());
     }
 
     @Test
     void statusReportsAnUnavailableWatermarkRatherThanZero() {
-        when(jdbc.queryForObject(anyString(), any(Class.class))).thenReturn(1);
+        when(jdbc.queryForList(anyString())).thenReturn(List.of(Map.<String, Object>of("supported", 1)));
         when(jdbc.queryForMap(anyString()))
                 .thenThrow(new DataAccessResourceFailureException("v$database not readable"));
 

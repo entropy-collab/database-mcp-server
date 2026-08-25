@@ -105,38 +105,35 @@ public class MySqlDialect extends AbstractDatabaseDialect {
 
     @Override
     public String tablesQuery(String schema) {
-        var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
             SELECT table_name, table_rows AS row_count
             FROM information_schema.tables
             WHERE table_type = 'BASE TABLE'
-            %s
+              AND table_schema = %s
             ORDER BY table_name
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
     public String columnsQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
             SELECT column_name, column_type, is_nullable
             FROM information_schema.columns
             WHERE table_name = ?
-            %s
+              AND table_schema = %s
             ORDER BY ordinal_position
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
     public String indexesQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
             SELECT index_name, non_unique, column_name, seq_in_index
             FROM information_schema.statistics
             WHERE table_name = ?
-            %s
+              AND table_schema = %s
             ORDER BY index_name, seq_in_index
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -435,10 +432,17 @@ public class MySqlDialect extends AbstractDatabaseDialect {
         // carries no operation column, so the operation type genuinely cannot be derived here.
         // It is therefore reported as the explicit CdcChangeType.TRIGGER_AUDIT code rather than a
         // value no enum knows about.
+        //
+        // 位点单位定为「Unix 秒」，与 cdcGetLastLsnSql 的 UNIX_TIMESTAMP() 严格同一单位。
+        // 之所以不改成「审计表增加 event_position BIGINT 存打包后的 binlog 位点、谓词写
+        // event_position > ?」那种与 PostgreSQL 的 event_lsn 完全对称的方案：MySQL 没有任何函数能在
+        // 触发器里取到当前 binlog 坐标（File/Position 只有 SHOW MASTER STATUS 拿得到，且不能在触发器
+        // 中执行），那一列没有可实现的写入方，约定出来必然恒为 NULL——谓词又会恒不成立。
+        // PostgreSQL 能走 event_lsn 是因为 pg_current_wal_lsn() 可以在触发器里调用，这是两者的本质差别。
         return """
             SELECT 'TRIGGER_AUDIT' AS change_type,
                    MAX(event_time) AS change_time,
-                   CONCAT(primary_key_col) AS primary_keys,
+                   primary_key_col AS primary_keys,
                    NULL AS before_json,
                    NULL AS after_json,
                    NULL AS transaction_id
@@ -448,34 +452,31 @@ public class MySqlDialect extends AbstractDatabaseDialect {
             """.formatted(auditTableName(schema, table));
     }
 
-    @Override
-    public String cdcGetLastLsnSql() {
-        return "SHOW MASTER STATUS";
-    }
-
     /**
-     * {@code SHOW MASTER STATUS} returns a binlog coordinate ({@code File}, {@code Position}) and no
-     * single number, so the two are packed into one monotonic long: file sequence in the high 32
-     * bits, in-file offset in the low 32 bits.
+     * MySQL 的 CDC watermark 就是 Unix 秒，正是 {@link #cdcReadChangesSql} 里 {@code FROM_UNIXTIME(?)}
+     * 期望的单位，因此 {@code parseLsn} 走默认的数值解析即可（{@code current_lsn} 在
+     * {@code DialectUtils} 的数值位点列白名单里）。
+     *
+     * <p>不再用 {@code SHOW MASTER STATUS}：它给出的是 binlog 坐标，打包成
+     * {@code (file << 32) | offset} 后落到 {@code FROM_UNIXTIME} 会被当成公元 2922 年那种荒谬时刻
+     * （MySQL 8.0.28 之前更是超出 32 位上限直接返回 {@code NULL}，谓词恒为 {@code NULL}），
+     * 无论哪种情况 readChanges 都恒返回 0 行，且与「这张表真的没有变更」不可区分。
+     * 它还额外要求 REPLICATION CLIENT 权限，而审计表读取路径根本不需要该权限。
      */
     @Override
-    public long parseLsn(java.util.Map<String, Object> row) {
-        Object file = firstNonNull(row, "File", "file", "FILE");
-        Object position = firstNonNull(row, "Position", "position", "POSITION");
-        if (file == null && position == null) {
-            return DialectUtils.requireNumericLsn(row, getDialectName());
-        }
-        return DialectUtils.parseMySqlBinlogLsn(file, position);
+    public String cdcGetLastLsnSql() {
+        return "SELECT UNIX_TIMESTAMP() AS current_lsn";
     }
 
     @Override
     public String cdcCheckSupportSql() {
-        return """
-            SELECT 1 FROM information_schema.GLOBAL_VARIABLES
-            WHERE VARIABLE_NAME IN ('log_bin', 'binlog_format')
-              AND VARIABLE_VALUE != ''
-            LIMIT 1
-            """;
+        // 判据必须与真实读取机制对应：读变更走触发器审计表、位点走 UNIX_TIMESTAMP()，两者都不依赖
+        // binlog 是否开启，所以不再探测 log_bin / binlog_format——information_schema.GLOBAL_VARIABLES
+        // 在 MySQL 8.0 已被移除，那条判据在 8.x 上直接抛错并被 isCdcSupported 吞成「不支持」。
+        // 剩下的真实前置条件是 per-table 的 `<table>_audit` 是否存在，无法在连接级别探测，只能由
+        // readChanges 明确报错。
+        // 单行单值：isCdcSupported 只取首行首值，多段 UNION ALL 会撞上「恰好一行」的假设。
+        return "SELECT CASE WHEN UNIX_TIMESTAMP() > 0 THEN 1 ELSE 0 END AS supported";
     }
 
     @Override
@@ -490,18 +491,5 @@ public class MySqlDialect extends AbstractDatabaseDialect {
     private String auditTableName(String schema, String table) {
         String audit = quote(table + "_audit");
         return schema == null || schema.isBlank() ? audit : quote(schema) + "." + audit;
-    }
-
-    private static Object firstNonNull(java.util.Map<String, Object> row, String... keys) {
-        if (row == null) {
-            return null;
-        }
-        for (String key : keys) {
-            Object value = row.get(key);
-            if (value != null) {
-                return value;
-            }
-        }
-        return null;
     }
 }

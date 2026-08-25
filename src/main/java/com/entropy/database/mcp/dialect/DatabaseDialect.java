@@ -30,6 +30,8 @@ import com.zaxxer.hikari.HikariConfig;
  * dialect-normalized table name</strong>:
  *
  * <ul>
+ *   <li>{@link #columnsQuery(String, String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #indexesQuery(String, String)} - 1 placeholder: {@code (tableName)}</li>
  *   <li>{@link #columnCommentsQuery(String, String)} - 1 placeholder: {@code (tableName)}</li>
  *   <li>{@link #candidateColumnsForIndexSql(String)} - 1 placeholder: {@code (tableName)}</li>
  *   <li>{@link #listTableIndexesSql(String)} - 1 placeholder: {@code (tableName)}</li>
@@ -40,11 +42,13 @@ import com.zaxxer.hikari.HikariConfig;
  *   <li>{@link #tableCommentQuery(String, String)} - 1 placeholder: {@code (tableName)}</li>
  * </ul>
  *
- * These carry <strong>no placeholder at all</strong>, because the table name appears as an
- * identifier in a {@code FROM} clause, where SQL does not allow a bind parameter; implementations
- * must run it through {@link #qualifiedTableName(String, String)}:
+ * These carry <strong>no placeholder at all</strong>, because they name no single table: either the
+ * table appears as an identifier in a {@code FROM} clause, where SQL does not allow a bind parameter
+ * (implementations must then run it through {@link #qualifiedTableName(String, String)}), or the
+ * query is scoped to a whole schema and the schema is never bound:
  *
  * <ul>
+ *   <li>{@link #tablesQuery(String)} - 0 placeholders</li>
  *   <li>{@link #getTableRowCountSql(String, String)} - 0 placeholders</li>
  *   <li>{@link #tableCommentsQuery()} / {@link #tableCommentsQuery(String)} - 0 placeholders</li>
  *   <li>{@link #foreignKeyAllEdgesQuery(String)} - 0 placeholders</li>
@@ -53,14 +57,43 @@ import com.zaxxer.hikari.HikariConfig;
  * <p>A {@code schema} argument is never a placeholder: the dialect resolves it internally, falling
  * back to the session's current schema when it is {@code null}. Generating an {@code IS NULL}
  * comparison instead is what made H2 metadata lookups match nothing, since
- * {@code INFORMATION_SCHEMA.COLUMNS.TABLE_SCHEMA} is never null. Non-null schema names are
- * validated with {@link #isValidIdentifier(String)} before being rendered, so they cannot carry SQL.
+ * {@code INFORMATION_SCHEMA.COLUMNS.TABLE_SCHEMA} is never null; making it a conditional {@code ?}
+ * is what forced callers to guess an argument list from the SQL text, which they got wrong in both
+ * directions - the catalog scan bound a schema to Oracle's schema-less {@code tablesQuery}, and the
+ * quality checks bound nothing to a {@code columnsQuery} that always names the table. Non-null
+ * schema names are validated with {@link DialectUtils#isPlainIdentifier(String)} before being
+ * rendered, so they cannot carry SQL.
  */
 public interface DatabaseDialect {
     String quote(String name);
+
+    /**
+     * SQL listing the base tables of one schema.
+     *
+     * <p>Contract: no {@code ?} placeholder; the schema is resolved inside the dialect, the current
+     * one when {@code null}. Result columns: {@code table_name}, {@code row_count}.
+     */
     String tablesQuery(String schema);
+
+    /**
+     * SQL describing the columns of one table.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name; the schema is
+     * resolved inside the dialect, the current one when {@code null}. Result columns:
+     * {@code column_name}, {@code data_type}, {@code is_nullable}.
+     */
     String columnsQuery(String table, String schema);
+
+    /**
+     * SQL describing the indexes of one table.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name; the schema is
+     * resolved inside the dialect, the current one when {@code null}. Result columns:
+     * {@code index_name} plus whatever of {@code non_unique} / {@code uniqueness},
+     * {@code column_name} and {@code seq_in_index} the catalog exposes.
+     */
     String indexesQuery(String table, String schema);
+
     String applyLimit(String sql, int limit, int offset);
     boolean supportsLimit();
     boolean supportsSchema();
@@ -323,8 +356,10 @@ public interface DatabaseDialect {
      * {@code segment_type}, {@code size_mb}, {@code extents}, with {@code size_mb} first among the
      * numeric ones the callers read.
      *
-     * <p>Single documented deviation: {@link GenericDialect} has no size source at all and returns a
-     * constant row with no placeholder.
+     * <p>No deviation: a dialect with no size source returns {@code null} rather than a constant
+     * zero-sized row. {@link GenericDialect} used to fabricate one, which is indistinguishable from a
+     * genuinely empty table and was the only reason callers had to inspect the SQL for a {@code ?}
+     * before binding.
      *
      * @return the SQL, or {@code null} when the dialect exposes no size information
      */
@@ -547,6 +582,12 @@ public interface DatabaseDialect {
      * <p>The returned SQL must contain exactly one {@code ?} placeholder, bound with
      * {@link #cdcLsnParameter(long)}. Values in {@code change_type} must be codes that
      * {@code CdcChangeType.fromCode} recognizes.
+     *
+     * <p>单位契约：该谓词消费的必须正是 {@link #cdcLsnParameter(long)} 产出的单位，而
+     * {@code cdcLsnParameter} 的入参又必须是 {@link #parseLsn(java.util.Map)} 从
+     * {@link #cdcGetLastLsnSql()} 的结果里解析出的值。三者只要有一处单位不一致（例如 watermark 是
+     * binlog 坐标、谓词却按 Unix 秒解释），谓词就会恒不成立，readChanges 恒返回 0 行且与「真的没有
+     * 变更」不可区分——占位符个数正确并不能保证这一点。
      */
     default String cdcReadChangesSql(String schema, String table, long fromLsn) {
         return null;
@@ -555,14 +596,21 @@ public interface DatabaseDialect {
     /**
      * SQL to get the current LSN / SCN / binlog position for a table.
      * Returns null if not supported.
+     *
+     * <p>结果行交给 {@link #parseLsn(java.util.Map)} 归一化，得到的数值单位必须与
+     * {@link #cdcReadChangesSql(String, String, long)} 的谓词一致。
      */
     default String cdcGetLastLsnSql() {
         return null;
     }
 
     /**
-     * SQL to detect whether the database supports native CDC (e.g., Oracle Flashback, MySQL binlog, PG pgoutput).
-     * Returns a query that yields a row if CDC-capable, empty otherwise.
+     * SQL to detect whether the database supports the change-reading mechanism this dialect
+     * actually implements. Returns null when the dialect implements no CDC read path.
+     *
+     * <p>契约：必须返回恰好一行一列，值为 {@code 1}（支持）或 {@code 0}（不支持），因此不能用多段
+     * {@code UNION ALL}——多个分支同时命中时会返回多行，调用方按「单值」读取就会抛错并把最健全的库
+     * 判成不支持。判据也必须对应真实读取机制，而不是罗列同类特性。
      */
     default String cdcCheckSupportSql() {
         return null;

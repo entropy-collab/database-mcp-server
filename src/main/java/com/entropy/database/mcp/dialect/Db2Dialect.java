@@ -26,34 +26,44 @@ public class Db2Dialect extends AbstractDatabaseDialect {
         return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
+    /**
+     * Resolves the schema side of a metadata predicate without spending a placeholder on it.
+     * DB2 folds unquoted identifiers to upper case, so a requested schema is upper-cased first.
+     */
+    private String schemaExpression(String schema) {
+        return DialectUtils.schemaExpression(
+                schema == null ? null : schema.toUpperCase(), "CURRENT SCHEMA");
+    }
+
+    /**
+     * {@code SYSCAT.TABLES} names its columns {@code TABSCHEMA} / {@code TABNAME}; the
+     * {@code TABLE_SCHEMA} / {@code TABLE_NAME} spelling this used to emit is the information-schema
+     * one and fails with SQL0206N on DB2.
+     */
     @Override
     public String tablesQuery(String schema) {
-        var schemaFilter = schema != null ? "AND TABLE_SCHEMA = ?" : "";
         return """
-            SELECT TABLE_NAME AS table_name, 0 AS row_count
+            SELECT TABNAME AS table_name, 0 AS row_count
             FROM SYSCAT.TABLES
             WHERE TYPE = 'T'
-              AND TABLE_SCHEMA <> 'SYSIBM'
-              %s
-            ORDER BY TABLE_NAME
-            """.formatted(schemaFilter);
+              AND TABSCHEMA = %s
+            ORDER BY TABNAME
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
     public String columnsQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND TABLE_SCHEMA = ?" : "";
         return """
             SELECT COLNAME AS column_name, TYPENAME AS data_type, NULLS AS is_nullable
             FROM SYSCAT.COLUMNS
             WHERE TABNAME = ?
-              %s
+              AND TABSCHEMA = %s
             ORDER BY COLNO
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
     public String indexesQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND i.TABSCHEMA = ?" : "";
         return """
             SELECT i.INDNAME AS index_name,
                    CASE WHEN i.UNIQUERULE = 'U' THEN 0 ELSE 1 END AS non_unique,
@@ -62,9 +72,9 @@ public class Db2Dialect extends AbstractDatabaseDialect {
             FROM SYSCAT.INDEXES i
             JOIN SYSCAT.INDEXCOLS c ON i.INDNAME = c.INDNAME AND i.TABSCHEMA = c.TABSCHEMA AND i.TABNAME = c.TABNAME
             WHERE i.TABNAME = ?
-              %s
+              AND i.TABSCHEMA = %s
             ORDER BY i.INDNAME, c.COLSEQ
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override

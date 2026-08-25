@@ -117,39 +117,37 @@ public class PostgresDialect extends AbstractDatabaseDialect {
 
     @Override
     public String tablesQuery(String schema) {
-        var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
             SELECT table_name, 0 AS row_count
             FROM information_schema.tables
             WHERE table_type = 'BASE TABLE'
-            %s
+              AND table_schema = %s
             ORDER BY table_name
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
     public String columnsQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
             SELECT column_name, data_type, is_nullable
             FROM information_schema.columns
             WHERE table_name = ?
-            %s
+              AND table_schema = %s
             ORDER BY ordinal_position
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
+    /** {@code pg_indexes} names the schema {@code schemaname}, not {@code table_schema}. */
     @Override
     public String indexesQuery(String table, String schema) {
-        var schemaFilter = schema != null ? "AND table_schema = ?" : "";
         return """
             SELECT indexname AS index_name,
                    indexdef AS definition
             FROM pg_indexes
             WHERE tablename = ?
-            %s
+              AND schemaname = %s
             ORDER BY indexname
-            """.formatted(schemaFilter);
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -540,12 +538,18 @@ public class PostgresDialect extends AbstractDatabaseDialect {
 
     @Override
     public String cdcCheckSupportSql() {
+        // 判据与实际读取机制对齐：readChanges 读的是触发器审计表（event_lsn 由触发器里的
+        // pg_current_wal_lsn() 写入），watermark 也来自 pg_current_wal_lsn()——两者都不需要
+        // pglogical 扩展、逻辑订阅或发布，所以不再探测 pg_extension / pg_subscription /
+        // pg_publication（那些判据在只建了审计表的库上会误报「不支持」）。
+        // 真正的硬前置条件是本实例不能处于恢复状态：备库上 pg_current_wal_lsn() 直接报错。
+        // 单行单值：原先的三段 UNION ALL 在多个分支同时命中时返回多行，queryForObject 会抛
+        // IncorrectResultSizeDataAccessException 并被 isCdcSupported 吞成「不支持」；LIMIT 1 也只
+        // 作用于最后一段。CASE 表达式保证恰好一行一列，且 pg_current_wal_lsn() 只在非恢复分支求值。
         return """
-            SELECT 1 FROM pg_extension WHERE extname = 'pglogical'
-            UNION ALL
-            SELECT 1 FROM pg_subscription WHERE subenabled
-            UNION ALL
-            SELECT 1 FROM pg_publication LIMIT 1
+            SELECT CASE WHEN pg_is_in_recovery() THEN 0
+                        WHEN pg_current_wal_lsn() IS NOT NULL THEN 1
+                        ELSE 0 END AS supported
             """;
     }
 
