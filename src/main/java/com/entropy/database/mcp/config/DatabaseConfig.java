@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.config;
 
 import com.entropy.database.mcp.audit.SqlAuditService;
+import com.entropy.database.mcp.backup.DatabaseBackupService;
 import com.entropy.database.mcp.byok.ByokDataSourceFactory;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.DynamicDataSourceManagerImpl;
@@ -33,7 +34,6 @@ import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.security.SqlValidatorImpl;
-import com.entropy.database.mcp.service.DatabaseBackupService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.lang.Nullable;
@@ -106,8 +106,10 @@ public class DatabaseConfig {
 
     @Bean
     @ConditionalOnMissingBean
-    public RoutingDatabaseFacade routingDatabaseFacade(DynamicDataSourceManager dynamicDataSourceManager) {
-        return new RoutingDatabaseFacade(dynamicDataSourceManager);
+    public RoutingDatabaseFacade routingDatabaseFacade(
+            DynamicDataSourceManager dynamicDataSourceManager,
+            @org.springframework.context.annotation.Lazy DatabaseBackupService backupService) {
+        return new RoutingDatabaseFacade(dynamicDataSourceManager, backupService);
     }
 
     // ─── Unified BYOK Factory ──────────────────────────────────────────────

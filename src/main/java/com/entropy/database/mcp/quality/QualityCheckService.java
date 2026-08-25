@@ -16,15 +16,16 @@
 package com.entropy.database.mcp.quality;
 
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.properties.QualityProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -52,10 +53,16 @@ public class QualityCheckService {
 
     /**
      * Run quality checks on a table with the given rules.
+     *
+     * @param connectionKey the connection every probe below is issued against; it is also the
+     *                      connection name reported in the {@link QualityReport}
+     * @param db            read access to that connection, so the checks stay subject to the
+     *                      facade's advice instead of borrowing a raw {@code JdbcTemplate}
      */
     public QualityReport check(String connectionKey, String tableName, String schema,
-                               List<QualityRule> rules, DatabaseDialect dialect, JdbcTemplate jdbc) {
-        long totalRows = queryRowCount(jdbc, tableName, dialect);
+                               List<QualityRule> rules, DatabaseDialect dialect,
+                               DatabaseReadOperations db) {
+        long totalRows = queryRowCount(db, connectionKey, tableName, dialect);
         if (totalRows == 0) {
             return emptyReport(tableName, schema, connectionKey);
         }
@@ -64,11 +71,11 @@ public class QualityCheckService {
         List<QualityRule> executedRules = new ArrayList<>();
 
         // Discover columns
-        List<String> columns = queryColumns(jdbc, tableName, dialect);
+        List<String> columns = queryColumns(db, connectionKey, tableName, dialect);
 
         // NULL rate per column
         for (String col : columns) {
-            long nullCount = queryNullCount(jdbc, tableName, col, dialect);
+            long nullCount = queryNullCount(db, connectionKey, tableName, col, dialect);
             double nullRatePct = totalRows > 0 ? (nullCount * 100.0 / totalRows) : 0;
             double thresholdPct = properties.defaultNullRateThreshold() * 100;
             QualityRule.Severity severity = nullRatePct > thresholdPct * 2
@@ -87,7 +94,7 @@ public class QualityCheckService {
         // Duplicate check on all columns
         if (!columns.isEmpty()) {
             String columnList = columns.stream().map(dialect::quote).reduce((a, b) -> a + ", " + b).orElse("");
-            Long dupCount = queryDuplicateGroups(jdbc, tableName, columnList, dialect);
+            Long dupCount = queryDuplicateGroups(db, connectionKey, tableName, columnList, dialect);
             if (dupCount != null && dupCount > 0) {
                 double dupRatePct = totalRows > 0 ? (dupCount * 100.0 / totalRows) : 0;
                 double thresholdPct = properties.defaultDuplicateRateThreshold() * 100;
@@ -105,7 +112,7 @@ public class QualityCheckService {
             if (!rule.enabled()) continue;
             executedRules.add(rule);
             try {
-                QualityIssue issue = evaluateRule(jdbc, tableName, rule, dialect, totalRows);
+                QualityIssue issue = evaluateRule(db, connectionKey, tableName, rule, dialect, totalRows);
                 if (issue != null) {
                     issues.add(issue);
                 }
@@ -132,26 +139,25 @@ public class QualityCheckService {
 
     // ─── Private Evaluation ──────────────────────────────────────────────
 
-    private QualityIssue evaluateRule(JdbcTemplate jdbc, String tableName,
+    private QualityIssue evaluateRule(DatabaseReadOperations db, String connection, String tableName,
                                       QualityRule rule, DatabaseDialect dialect, long totalRows) {
         return switch (rule.type()) {
-            case FORMAT -> evaluateFormat(jdbc, tableName, rule, dialect, totalRows);
-            case ENUM_VALUES -> evaluateEnum(jdbc, tableName, rule, dialect, totalRows);
-            case RANGE -> evaluateRange(jdbc, tableName, rule, dialect, totalRows);
-            case CUSTOM_SQL -> evaluateCustomSql(jdbc, tableName, rule, totalRows);
+            case FORMAT -> evaluateFormat(rule);
+            case ENUM_VALUES -> evaluateEnum(db, connection, tableName, rule, dialect, totalRows);
+            case RANGE -> evaluateRange(db, connection, tableName, rule, dialect, totalRows);
+            case CUSTOM_SQL -> evaluateCustomSql(db, connection, rule, totalRows);
             default -> null;
         };
     }
 
-    private QualityIssue evaluateFormat(JdbcTemplate jdbc, String tableName,
-                                        QualityRule rule, DatabaseDialect dialect, long totalRows) {
+    private QualityIssue evaluateFormat(QualityRule rule) {
         // Format validation requires client-side regex matching on fetched data.
         // For now, return null (skip) — full format check would need row-level scanning.
         log.debug("Format rule '{}' skipped: requires row-level scanning", rule.id());
         return null;
     }
 
-    private QualityIssue evaluateEnum(JdbcTemplate jdbc, String tableName,
+    private QualityIssue evaluateEnum(DatabaseReadOperations db, String connection, String tableName,
                                       QualityRule rule, DatabaseDialect dialect, long totalRows) {
         String col = rule.column();
         if (col == null) return null;
@@ -162,11 +168,11 @@ public class QualityCheckService {
             String placeholders = allowed.stream().map(x -> "?").reduce((a, b) -> a + ", " + b).orElse("");
             String sql = "SELECT COUNT(*) FROM " + dialect.quote(tableName)
                     + " WHERE " + dialect.quote(col) + " NOT IN (" + placeholders + ")";
-            Integer violationCount = jdbc.queryForObject(sql, Integer.class, allowed.toArray());
+            long violationCount = queryCount(db, connection, sql, allowed.toArray());
             double violationRate = totalRows > 0 ? (violationCount * 100.0 / totalRows) : 0;
             return new QualityIssue(rule.id(), rule.name(), rule.type(), col,
                     rule.severity().name(), violationRate, 0.0,
-                    totalRows, violationCount != null ? violationCount : 0,
+                    totalRows, violationCount,
                     String.format("Enum violation rate: %.2f%% (allowed: %s)", violationRate, allowed));
         } catch (Exception e) {
             log.warn("Enum check failed for column '{}': {}", col, e.getMessage());
@@ -174,7 +180,7 @@ public class QualityCheckService {
         }
     }
 
-    private QualityIssue evaluateRange(JdbcTemplate jdbc, String tableName,
+    private QualityIssue evaluateRange(DatabaseReadOperations db, String connection, String tableName,
                                        QualityRule rule, DatabaseDialect dialect, long totalRows) {
         String col = rule.column();
         if (col == null) return null;
@@ -196,11 +202,11 @@ public class QualityCheckService {
                 sql.append(" AND ").append(dialect.quote(col)).append(" > ?");
                 params = appendParam(params, max);
             }
-            Integer violationCount = jdbc.queryForObject(sql.toString(), params, Integer.class);
+            long violationCount = queryCount(db, connection, sql.toString(), params);
             double violationRate = totalRows > 0 ? (violationCount * 100.0 / totalRows) : 0;
             return new QualityIssue(rule.id(), rule.name(), rule.type(), col,
                     rule.severity().name(), violationRate, 0.0,
-                    totalRows, violationCount != null ? violationCount : 0,
+                    totalRows, violationCount,
                     String.format("Range violation rate: %.2f%% (min=%s, max=%s)",
                             violationRate, min != null ? min : "null", max != null ? max : "null"));
         } catch (Exception e) {
@@ -209,12 +215,15 @@ public class QualityCheckService {
         }
     }
 
-    private QualityIssue evaluateCustomSql(JdbcTemplate jdbc, String tableName,
+    private QualityIssue evaluateCustomSql(DatabaseReadOperations db, String connection,
                                            QualityRule rule, long totalRows) {
         String sql = (String) rule.params().get("sql");
         if (sql == null) return null;
         try {
-            Object result = jdbc.queryForObject(sql, Object.class);
+            List<Map<String, Object>> rows = db.queryRows(sql, connection);
+            // A rule whose query yields nothing is reported as no issue, the same as one that fails.
+            if (rows.isEmpty()) return null;
+            Object result = firstValue(rows);
             double value = result instanceof Number n ? n.doubleValue() : 0;
             return new QualityIssue(rule.id(), rule.name(), rule.type(), null,
                     rule.severity().name(), value, rule.threshold(), totalRows, 0,
@@ -227,21 +236,21 @@ public class QualityCheckService {
 
     // ─── Helper Queries ──────────────────────────────────────────────────
 
-    private long queryRowCount(JdbcTemplate jdbc, String tableName, DatabaseDialect dialect) {
+    private long queryRowCount(DatabaseReadOperations db, String connection, String tableName,
+                               DatabaseDialect dialect) {
         try {
-            Integer count = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM " + dialect.quote(tableName), Integer.class);
-            return count != null ? count : 0;
+            return queryCount(db, connection, "SELECT COUNT(*) FROM " + dialect.quote(tableName));
         } catch (Exception e) {
             log.warn("Failed to count rows in table '{}': {}", tableName, e.getMessage(), e);
             return 0;
         }
     }
 
-    private List<String> queryColumns(JdbcTemplate jdbc, String tableName, DatabaseDialect dialect) {
+    private List<String> queryColumns(DatabaseReadOperations db, String connection, String tableName,
+                                      DatabaseDialect dialect) {
         try {
             String colQuery = dialect.columnsQuery(tableName, null);
-            return jdbc.queryForList(colQuery).stream()
+            return db.queryRows(colQuery, connection).stream()
                     .map(row -> (String) row.get("column_name"))
                     .toList();
         } catch (Exception e) {
@@ -250,30 +259,46 @@ public class QualityCheckService {
         }
     }
 
-    private long queryNullCount(JdbcTemplate jdbc, String tableName, String column,
-                                DatabaseDialect dialect) {
+    private long queryNullCount(DatabaseReadOperations db, String connection, String tableName,
+                                String column, DatabaseDialect dialect) {
         try {
-            Integer count = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM " + dialect.quote(tableName)
-                            + " WHERE " + dialect.quote(column) + " IS NULL",
-                    Integer.class);
-            return count != null ? count : 0;
+            return queryCount(db, connection, "SELECT COUNT(*) FROM " + dialect.quote(tableName)
+                    + " WHERE " + dialect.quote(column) + " IS NULL");
         } catch (Exception e) {
             log.warn("Null check failed for column '{}': {}", column, e.getMessage(), e);
             return 0;
         }
     }
 
-    private Long queryDuplicateGroups(JdbcTemplate jdbc, String tableName, String columnList, DatabaseDialect dialect) {
+    private Long queryDuplicateGroups(DatabaseReadOperations db, String connection, String tableName,
+                                      String columnList, DatabaseDialect dialect) {
         try {
-            return jdbc.queryForObject(
+            return queryCount(db, connection,
                     "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + dialect.quote(tableName)
-                            + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)",
-                    Long.class);
+                            + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)");
         } catch (Exception e) {
             log.warn("Duplicate check failed for table '{}'", tableName);
             return 0L;
         }
+    }
+
+    /**
+     * Run an aggregate query and read its single value.
+     *
+     * <p>Replaces {@code JdbcTemplate.queryForObject}: the facade only hands back rows, so the
+     * scalar has to be picked out here. A missing row or a non-numeric value counts as zero, which
+     * is what the callers' {@code catch} blocks already did for a failed probe.
+     */
+    private long queryCount(DatabaseReadOperations db, String connection, String sql, Object... args) {
+        Object value = firstValue(db.queryRows(sql, connection, args));
+        return value instanceof Number number ? number.longValue() : 0L;
+    }
+
+    /** First column of the first row, or null when there is no row or the value is null. */
+    private Object firstValue(List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return null;
+        Collection<Object> values = rows.get(0).values();
+        return values.isEmpty() ? null : values.iterator().next();
     }
 
     private Object[] appendParam(Object[] existing, Number value) {

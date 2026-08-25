@@ -17,16 +17,13 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
-import com.entropy.database.mcp.dialect.DialectResolver;
+import com.entropy.database.mcp.facade.DatabaseAdminOperations;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -38,9 +35,10 @@ import java.util.Map;
 @Component
 public class QueryAnalysisTools extends McpToolBase {
 
-    private final DynamicDataSourceManager dataSourceManager;
-    private final DialectResolver dialectResolver;
-    
+    /** Split by capability: this tool only reads rows and inspects the dialect, never writes. */
+    private final DatabaseReadOperations readOperations;
+    private final DatabaseAdminOperations adminOperations;
+
     // 表行数缓存，避免重复查询（10 分钟过期）
     private final Map<String, Long> rowCountCache = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<String, Long> cacheTimestamps = new java.util.concurrent.ConcurrentHashMap<>();
@@ -50,12 +48,11 @@ public class QueryAnalysisTools extends McpToolBase {
     private static final long ROW_COUNT_HIGH_SCORE = 10_000_000L;
     private static final long ROW_COUNT_MED_SCORE = 1_000_000L;
     private static final long ROW_COUNT_LOW_SCORE = 100_000L;
-    private static final int EXPLAIN_TIMEOUT_SECONDS = 30;
 
-    public QueryAnalysisTools(DynamicDataSourceManager dataSourceManager,
-                              DialectResolver dialectResolver) {
-        this.dataSourceManager = dataSourceManager;
-        this.dialectResolver = dialectResolver;
+    public QueryAnalysisTools(DatabaseReadOperations readOperations,
+                              DatabaseAdminOperations adminOperations) {
+        this.readOperations = readOperations;
+        this.adminOperations = adminOperations;
     }
 
     @McpTool(description = "获取 SQL 执行计划，分析性能并返回优化建议（先计划后执行方案）",
@@ -117,11 +114,9 @@ public class QueryAnalysisTools extends McpToolBase {
 
             List<String> tableNames = extractTableNames(trimmedSql);
             Map<String, Long> tableSizes = new java.util.LinkedHashMap<>();
-            try (Connection conn = dataSourceManager.acquire(connection).getConnection()) {
-                for (String tableName : tableNames) {
-                    Long rowCount = getTableRowCount(conn, dialect, tableName);
-                    if (rowCount != null) tableSizes.put(tableName, rowCount);
-                }
+            for (String tableName : tableNames) {
+                Long rowCount = getTableRowCount(connection, dialect, tableName);
+                if (rowCount != null) tableSizes.put(tableName, rowCount);
             }
 
             int riskScore = calculateRiskScore(trimmedSql, tableSizes);
@@ -142,9 +137,13 @@ public class QueryAnalysisTools extends McpToolBase {
     }
 
     private DatabaseDialect resolveDialect(String connection) {
-        return dialectResolver.resolve(
-                DialectQueryUtils.getDialectName(dataSourceManager, connection),
-                dataSourceManager.acquire(connection).getDataSource());
+        // Ask the connection for its dialect instead of re-deriving it by name. The previous route
+        // went through DialectQueryUtils.getDialectName(), which returns the dialect class's simple
+        // name ("OracleDialect"), and handed that to DialectResolver, which matches short names
+        // ("oracle"). Nothing ever matched, so every real connection silently degraded to
+        // GenericDialect and explainPlan answered EXPLAIN_NOT_SUPPORTED on databases that do
+        // support it. Tests missed it because the test connections register GenericDialect anyway.
+        return adminOperations.getDialect(connection);
     }
 
     private String buildExplainSql(DatabaseDialect dialect, String sql) {
@@ -159,27 +158,18 @@ public class QueryAnalysisTools extends McpToolBase {
         };
     }
 
-    private List<Map<String, String>> executeExplainPlan(String connection, String explainSql) throws Exception {
+    private List<Map<String, String>> executeExplainPlan(String connection, String explainSql) {
+        if (explainSql.contains("SET SHOWPLAN")) {
+            // SQL Server emits the plan as session output rather than as a result set, so whatever
+            // the batch returns is discarded.
+            readOperations.queryRows(explainSql, connection);
+            return List.of(Map.of("note", "SQL Server execution plan captured in output"));
+        }
         List<Map<String, String>> planRows = new ArrayList<>();
-        try (Connection conn = dataSourceManager.acquire(connection).getConnection()) {
-            if (explainSql.contains("SET SHOWPLAN")) {
-                conn.setAutoCommit(false);
-                try (PreparedStatement pstmt = conn.prepareStatement(explainSql)) {
-                    pstmt.executeQuery();
-                }
-                return List.of(Map.of("note", "SQL Server execution plan captured in output"));
-            }
-            try (PreparedStatement pstmt = conn.prepareStatement(explainSql);
-                 ResultSet rs = pstmt.executeQuery()) {
-                int columns = rs.getMetaData().getColumnCount();
-                String[] columnNames = new String[columns];
-                for (int i = 0; i < columns; i++) columnNames[i] = rs.getMetaData().getColumnName(i + 1);
-                while (rs.next()) {
-                    Map<String, String> row = new java.util.LinkedHashMap<>();
-                    for (int i = 0; i < columns; i++) row.put(columnNames[i], rs.getString(i + 1));
-                    planRows.add(row);
-                }
-            }
+        for (Map<String, Object> row : readOperations.queryRows(explainSql, connection)) {
+            Map<String, String> planRow = new java.util.LinkedHashMap<>();
+            row.forEach((column, value) -> planRow.put(column, value == null ? null : value.toString()));
+            planRows.add(planRow);
         }
         return planRows;
     }
@@ -203,7 +193,7 @@ public class QueryAnalysisTools extends McpToolBase {
         return warnings.isEmpty() ? List.of("执行计划正常，无明显性能问题") : warnings;
     }
 
-    private Long getTableRowCount(Connection conn, DatabaseDialect dialect, String tableName) {
+    private Long getTableRowCount(String connection, DatabaseDialect dialect, String tableName) {
         // 检查缓存
         String cacheKey = tableName.toLowerCase();
         Long cached = rowCountCache.get(cacheKey);
@@ -216,19 +206,23 @@ public class QueryAnalysisTools extends McpToolBase {
         try {
             String sql = dialect.getTableRowCountSql(tableName);
             if (sql == null) return null;
-            try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
-                try (ResultSet rs = pstmt.executeQuery()) {
-                    if (rs.next()) {
-                        long rowCount = rs.getLong(1);
-                        // 更新缓存
-                        rowCountCache.put(cacheKey, rowCount);
-                        cacheTimestamps.put(cacheKey, System.currentTimeMillis());
-                        return rowCount;
-                    }
+            List<Map<String, Object>> rows = readOperations.queryRows(sql, connection);
+            if (!rows.isEmpty()) {
+                var values = rows.get(0).values();
+                Object value = values.isEmpty() ? null : values.iterator().next();
+                if (value instanceof Number number) {
+                    long rowCount = number.longValue();
+                    // 更新缓存
+                    rowCountCache.put(cacheKey, rowCount);
+                    cacheTimestamps.put(cacheKey, System.currentTimeMillis());
+                    return rowCount;
                 }
             }
-        } catch (Exception e) {
-            log.debug("Failed to get row count for table '{}': {}", tableName, e.getMessage());
+        } catch (RuntimeException e) {
+            // Row count is an optional hint used to annotate a plan; the analysis is still useful
+            // without it, so a dialect that cannot report it must not fail the whole tool.
+            log.debug("Failed to get row count for table '{}' on connection '{}': {}",
+                    tableName, connection, e.getMessage());
         }
         return null;
     }

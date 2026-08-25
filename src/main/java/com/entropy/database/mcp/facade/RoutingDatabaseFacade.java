@@ -15,17 +15,22 @@
  */
 package com.entropy.database.mcp.facade;
 
+import com.entropy.database.mcp.backup.DatabaseBackupService;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.stream.SseStreamManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -38,9 +43,29 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     private static final Logger log = LoggerFactory.getLogger(RoutingDatabaseFacade.class);
 
     private final DynamicDataSourceManager dynamicDataSourceManager;
+    private final DatabaseBackupService backupService;
 
-    public RoutingDatabaseFacade(DynamicDataSourceManager dynamicDataSourceManager) {
+    /**
+     * Per-connection facades, keyed by the resolved connection key.
+     *
+     * <p>A facade is a thin, immutable wrapper around a context, but it used to be re-allocated on
+     * every single delegated call. Entries are replaced as soon as {@code acquire} hands back a
+     * different context object, so a rebuilt pool is never served by a facade pointing at the old
+     * one, and the map never grows beyond the number of registered connection names. Pool lifetime
+     * is unaffected: pools are closed by the manager's lease-eviction listener, not by
+     * reachability from here.
+     */
+    private final ConcurrentHashMap<String, ByokDatabaseFacade> facades = new ConcurrentHashMap<>();
+
+    /**
+     * @param backupService injected lazily because it resolves connections through the same
+     *                      {@link DynamicDataSourceManager} this facade uses; the proxy keeps the
+     *                      two service beans from constraining each other's initialisation order.
+     */
+    public RoutingDatabaseFacade(DynamicDataSourceManager dynamicDataSourceManager,
+                                 @Lazy DatabaseBackupService backupService) {
         this.dynamicDataSourceManager = dynamicDataSourceManager;
+        this.backupService = backupService;
     }
 
     // ─── Helper ────────────────────────────────────────────────────────────
@@ -114,7 +139,9 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     }
 
     private ByokDatabaseFacade resolveFacade(String connection) {
-        return new ByokDatabaseFacade(resolveContext(connection));
+        ByokDataSourceContext context = resolveContext(connection);
+        return facades.compute(context.getKey(), (key, cached) ->
+                cached != null && cached.wraps(context) ? cached : new ByokDatabaseFacade(context));
     }
 
     // ─── Read Operations ───────────────────────────────────────────────────
@@ -173,6 +200,11 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     }
 
     @Override
+    public List<Map<String, Object>> queryRows(String sql, String connection, Object... args) {
+        return resolveFacade(connection).queryRows(sql, connection, args);
+    }
+
+    @Override
     public Map<String, Object> getDatabaseInfo(String connection) {
         return resolveFacade(connection).getDatabaseInfo(connection);
     }
@@ -191,21 +223,75 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
         return resolveFacade(connection).executeDdl(sql, connection);
     }
 
-    // ─── Metadata Operations ────────────────────────────────────────────────
+    @Override
+    public int executeUpdate(String sql, String connection, Object... args) {
+        return resolveFacade(connection).executeUpdate(sql, connection, args);
+    }
+
+    @Override
+    public long batchInsert(String table, List<String> columns, List<List<Object>> rows,
+                            int batchSize, String connection) {
+        return resolveFacade(connection).batchInsert(table, columns, rows, batchSize, connection);
+    }
+
+    @Override
+    public long batchUpsert(String table, List<String> keyColumns, List<String> columns,
+                            List<List<Object>> rows, int batchSize, String connection) {
+        return resolveFacade(connection).batchUpsert(table, keyColumns, columns, rows, batchSize, connection);
+    }
+
+    @Override
+    public <T> T inTransaction(String connection, TransactionalWork<T> work) {
+        return resolveFacade(connection).inTransaction(connection, work);
+    }
+
+    // ─── Backup Operations ─────────────────────────────────────────────────
 
     @Override
     public Map<String, Object> backupSchema(String tableName, String connection) {
-        return resolveFacade(connection).backupSchema(tableName, connection);
+        return backupService.backupSchema(tableName, connection);
     }
 
     @Override
     public Map<String, Object> backupData(String tableName, int maxRows, String connection) {
-        return resolveFacade(connection).backupData(tableName, maxRows, connection);
+        return backupService.backupData(tableName, maxRows, connection);
     }
 
     @Override
     public Map<String, Object> diffSchema(String sourceTable, String targetTable, String connection) {
-        return resolveFacade(connection).diffSchema(sourceTable, targetTable, connection);
+        return backupService.diffSchema(sourceTable, targetTable, connection);
+    }
+
+    // ─── Cross-connection Operations ───────────────────────────────────────
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The source result is read in full into memory before the first row is written: the read
+     * side goes through {@link #queryRows}, which applies no pagination. {@code batchSize} therefore
+     * only controls the write side. Callers moving large tables must bound {@code sourceSql}
+     * themselves.
+     */
+    @Override
+    public long copyRows(String sourceSql, String sourceConnection,
+                         String targetTable, List<String> targetColumns,
+                         int batchSize, String targetConnection) {
+        List<Map<String, Object>> sourceRows = queryRows(sourceSql, sourceConnection);
+        if (sourceRows.isEmpty()) {
+            return 0L;
+        }
+        List<String> columns = targetColumns != null && !targetColumns.isEmpty()
+                ? targetColumns
+                : List.copyOf(sourceRows.get(0).keySet());
+        List<List<Object>> rows = new ArrayList<>(sourceRows.size());
+        for (Map<String, Object> sourceRow : sourceRows) {
+            List<Object> values = new ArrayList<>(columns.size());
+            for (String column : columns) {
+                values.add(sourceRow.get(column));
+            }
+            rows.add(values);
+        }
+        return batchInsert(targetTable, columns, rows, batchSize, targetConnection);
     }
 
     @Override
@@ -218,5 +304,15 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     @Override
     public Map<String, Object> getStatistics(String connection) {
         return resolveFacade(connection).getStatistics(connection);
+    }
+
+    @Override
+    public DatabaseDialect getDialect(String connection) {
+        return resolveFacade(connection).getDialect(connection);
+    }
+
+    @Override
+    public <T> T withMetaData(String connection, MetaDataCallback<T> callback) {
+        return resolveFacade(connection).withMetaData(connection, callback);
     }
 }

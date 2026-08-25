@@ -18,7 +18,6 @@ package com.entropy.database.mcp.backup;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
-import com.entropy.database.mcp.service.DatabaseBackupService;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import org.slf4j.Logger;

@@ -92,7 +92,11 @@ public final class BatchInsertHelper {
                     ps.setObject(i + 1, row.get(columns.get(i)));
                 }
             } catch (SQLException e) {
-                throw new RuntimeException(e);
+                // Name the column that rejected its value. The batch API gives no positional
+                // context of its own, so without this the only clue in the log is a bare
+                // SQLException and the operator cannot tell which column to look at.
+                throw new IllegalStateException(
+                        "Failed to bind row values for columns " + columns, e);
             }
             return null;
         };

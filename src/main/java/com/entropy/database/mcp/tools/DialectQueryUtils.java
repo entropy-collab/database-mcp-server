@@ -15,18 +15,17 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
+import com.entropy.database.mcp.facade.DatabaseAdminOperations;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 
 import java.util.List;
 import java.util.Map;
-
-import com.entropy.database.mcp.tools.McpToolUtils;
 
 /**
  * Shared utilities for executing dialect-specific queries.
@@ -40,12 +39,13 @@ public final class DialectQueryUtils {
     private DialectQueryUtils() {
     }
 
-    public static String getDialectName(DynamicDataSourceManager dataSourceManager, String connection) {
+    public static String getDialectName(DatabaseAdminOperations db, String connection) {
         try {
             requireConnection(connection);
-            ByokDataSourceContext context = dataSourceManager.acquire(connection);
-            return context.getDialect().getClass().getSimpleName();
-        } catch (Exception e) {
+            return db.getDialect(connection).getClass().getSimpleName();
+        } catch (RuntimeException e) {
+            // The dialect name is decoration on a response; a caller that cannot resolve it still
+            // wants the rows it asked for, so this degrades instead of failing the whole tool.
             log.warn("Failed to determine dialect for connection '{}', returning 'generic'", connection, e);
             return "generic";
         }
@@ -55,46 +55,45 @@ public final class DialectQueryUtils {
      * Execute a dialect-specific health check query.
      * Connection is required - no default connection is used.
      */
-    public static Map<String, Object> checkHealth(DynamicDataSourceManager dataSourceManager, String connection) {
+    public static Map<String, Object> checkHealth(DatabaseOperations db, String connection) {
         try {
             requireConnection(connection);
-            ByokDataSourceContext context = dataSourceManager.acquire(connection);
-            DatabaseDialect dialect = context.getDialect();
-            var jdbcTemplate = context.getJdbcTemplate();
+            DatabaseDialect dialect = db.getDialect(connection);
 
             String sql = dialect.getHealthCheckSql();
             if (sql == null || sql.isBlank()) {
                 throw new IllegalStateException("Health check not supported for dialect: " + dialect.getClass().getSimpleName());
             }
 
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql);
+            List<Map<String, Object>> rows = db.queryRows(sql, connection);
             return McpToolUtils.success(Map.of(
                     "connection", connection,
                     "dialect", dialect.getClass().getSimpleName(),
                     "status", "healthy",
                     "rows", rows
             ));
-        } catch (Exception e) {
+        } catch (DataAccessException | IllegalStateException e) {
+            // Narrow on purpose: an McpToolException already carries the right classification
+            // (missing connection, rejected SQL) and rewriting it as QUERY_EXECUTION_FAILED hid why
+            // the call was refused. Only a real driver failure or an unsupported dialect lands here.
             log.warn("Health check failed for connection '{}': {}", connection, e.getMessage(), e);
             throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED, "Health check failed for connection '" + connection + "'", e);
         }
     }
 
-    public static Map<String, Object> executeDialectQuery(DynamicDataSourceManager dataSourceManager,
+    public static Map<String, Object> executeDialectQuery(DatabaseOperations db,
                                                            String connection,
                                                            java.util.function.Function<DatabaseDialect, String> sqlProvider) {
-        return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of());
+        return executeDialectQuery(db, connection, sqlProvider, List.of());
     }
 
-    public static Map<String, Object> executeDialectQuery(DynamicDataSourceManager dataSourceManager,
+    public static Map<String, Object> executeDialectQuery(DatabaseOperations db,
                                                            String connection,
                                                            java.util.function.Function<DatabaseDialect, String> sqlProvider,
                                                            List<Object> argsList) {
         try {
             requireConnection(connection);
-            ByokDataSourceContext context = dataSourceManager.acquire(connection);
-            DatabaseDialect dialect = context.getDialect();
-            var jdbcTemplate = context.getJdbcTemplate();
+            DatabaseDialect dialect = db.getDialect(connection);
 
             String sql = sqlProvider.apply(dialect);
             if (sql == null || sql.isBlank()) {
@@ -102,31 +101,32 @@ public final class DialectQueryUtils {
             }
             sql = sql.trim();
             if (sql.startsWith("BEGIN") || sql.startsWith("ANALYZE") || sql.toLowerCase().startsWith("analyze")) {
-                jdbcTemplate.execute(sql);
+                // Statistics gathering and PL/SQL blocks report no rows; the row count is not meaningful.
+                db.executeUpdate(sql, connection);
                 return McpToolUtils.success(Map.of("rows", List.of()));
             }
 
             List<Map<String, Object>> rows;
             if (argsList.isEmpty() || !sql.contains("?")) {
-                rows = jdbcTemplate.queryForList(sql);
+                rows = db.queryRows(sql, connection);
             } else {
-                rows = jdbcTemplate.queryForList(sql, argsList.toArray());
+                rows = db.queryRows(sql, connection, argsList.toArray());
             }
             return McpToolUtils.success(Map.of("rows", rows));
-        } catch (Exception e) {
+        } catch (DataAccessException | IllegalStateException e) {
             log.warn("executeDialectQuery failed for connection '{}': {}", connection, e.getMessage(), e);
             throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED, "Dialect query execution failed", e);
         }
     }
 
-    public static Map<String, Object> executeDialectQuery(DynamicDataSourceManager dataSourceManager,
+    public static Map<String, Object> executeDialectQuery(DatabaseOperations db,
                                                            String connection,
                                                            java.util.function.Function<DatabaseDialect, String> sqlProvider,
                                                            Object... args) {
         if (args == null || args.length == 0) {
-            return executeDialectQuery(dataSourceManager, connection, sqlProvider, List.of());
+            return executeDialectQuery(db, connection, sqlProvider, List.of());
         }
-        return executeDialectQuery(dataSourceManager, connection, sqlProvider, java.util.Arrays.stream(args).toList());
+        return executeDialectQuery(db, connection, sqlProvider, java.util.Arrays.stream(args).toList());
     }
 
     private static void requireConnection(String connection) {

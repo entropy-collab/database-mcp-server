@@ -125,7 +125,6 @@ src/main/java/com/entropy/database/mcp/
 ├── quality/                       # Data quality checks
 ├── repository/                    # Data access layer
 ├── security/                      # Security features
-├── service/                       # Business services
 ├── session/                       # Multi-session management
 ├── stream/                        # SSE streaming
 ├── tools/                         # MCP tool implementations

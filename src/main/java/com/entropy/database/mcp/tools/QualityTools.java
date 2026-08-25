@@ -17,9 +17,9 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.facade.DatabaseAdminOperations;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.quality.QualityAlertService;
 import com.entropy.database.mcp.quality.QualityCheckService;
 import com.entropy.database.mcp.quality.QualityReport;
@@ -28,7 +28,6 @@ import com.entropy.database.mcp.quality.QualityRule;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
@@ -39,16 +38,20 @@ import java.util.Map;
 @Component
 public class QualityTools extends McpToolBase {
 
-    private final DynamicDataSourceManager dataSourceManager;
+    /** Quality checks only count and sample rows, so no write capability is injected. */
+    private final DatabaseReadOperations readOperations;
+    private final DatabaseAdminOperations adminOperations;
     private final QualityCheckService qualityCheckService;
     private final QualityReportService qualityReportService;
     private final QualityAlertService qualityAlertService;
 
-    public QualityTools(DynamicDataSourceManager dataSourceManager,
+    public QualityTools(DatabaseReadOperations readOperations,
+                        DatabaseAdminOperations adminOperations,
                         QualityCheckService qualityCheckService,
                         QualityReportService qualityReportService,
                         QualityAlertService qualityAlertService) {
-        this.dataSourceManager = dataSourceManager;
+        this.readOperations = readOperations;
+        this.adminOperations = adminOperations;
         this.qualityCheckService = qualityCheckService;
         this.qualityReportService = qualityReportService;
         this.qualityAlertService = qualityAlertService;
@@ -63,9 +66,7 @@ public class QualityTools extends McpToolBase {
             @McpToolParam(description = "Custom quality rules as JSON list (optional)", required = false) List<Map<String, Object>> customRules,
             @McpToolParam(description = "Report format: json, csv, or text (default json)", required = false) String format) {
         return safeExecute(() -> {
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbc = context.getJdbcTemplate();
-            DatabaseDialect dialect = context.getDialect();
+            DatabaseDialect dialect = adminOperations.getDialect(connectionName);
 
             if (!dialect.isValidIdentifier(tableName)) {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid table name: " + tableName + " (tableName=" + tableName + ")");
@@ -73,7 +74,7 @@ public class QualityTools extends McpToolBase {
             String normalizedTable = dialect.normalizeTableName(tableName);
             List<QualityRule> rules = buildRules(customRules);
 
-            QualityReport report = qualityCheckService.check(connectionName, normalizedTable, schema, rules, dialect, jdbc);
+            QualityReport report = qualityCheckService.check(connectionName, normalizedTable, schema, rules, dialect, readOperations);
 
             String reportStr = switch (format != null ? format.toLowerCase() : "json") {
                 case "csv" -> qualityReportService.exportCsv(report);
@@ -148,7 +149,10 @@ public class QualityTools extends McpToolBase {
             params.remove("enabled");
 
             return new QualityRule(id, name, type, column, params, threshold, severity, enabled);
-        } catch (Exception e) {
+        } catch (ClassCastException | NullPointerException e) {
+            // A malformed custom rule is skipped rather than failing the whole check run, but it is
+            // logged: silently dropping a rule the caller asked for looked like the rule passed.
+            log.warn("Skipping malformed quality rule {}: {}", map != null ? map.get("id") : null, e.toString());
             return null;
         }
     }

@@ -456,7 +456,6 @@ public class OracleDialect extends AbstractDatabaseDialect {
 
     public String buildUpsertSql(String tableName, List<String> allColumns, List<String> keyColumns) {
         String columnList = String.join(", ", allColumns);
-        String placeholderList = String.join(", ", allColumns.stream().map(c -> "?").toList());
         String keyCondition = keyColumns.stream()
                 .map(k -> "target." + k + " = source." + k)
                 .reduce((a, b) -> a + " AND " + b).orElse("1=1");
@@ -464,11 +463,20 @@ public class OracleDialect extends AbstractDatabaseDialect {
         String updateSet = nonKeyColumns.stream()
                 .map(col -> "target." + col + " = source." + col)
                 .reduce((a, b) -> a + ", " + b).orElse("");
-        // Oracle MERGE requires a select from DUAL for the source
-        String selectFromDual = allColumns.stream().map(c -> c + " AS " + c).reduce((a, b) -> a + ", " + b).orElse("");
+        // Oracle MERGE takes its incoming row from a subquery, so the bind parameters belong in
+        // that SELECT — one per column, aliased to the column name. The INSERT branch then reads
+        // them back as source.<col> rather than binding a second time. Emitting bare column names
+        // here (`SELECT COL AS COL FROM DUAL`) fails with ORA-00904, since DUAL has no such
+        // column; the placeholder count happened to match, so the breakage only showed at runtime.
+        String selectFromDual = allColumns.stream()
+                .map(c -> "? AS " + c)
+                .reduce((a, b) -> a + ", " + b).orElse("");
+        String insertValues = allColumns.stream()
+                .map(c -> "source." + c)
+                .reduce((a, b) -> a + ", " + b).orElse("");
         return String.format(
                 "MERGE INTO %s target USING (SELECT %s FROM DUAL) source ON (%s) WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s)",
-                tableName, selectFromDual, keyCondition, updateSet, columnList, placeholderList);
+                tableName, selectFromDual, keyCondition, updateSet, columnList, insertValues);
     }
 
     @Override

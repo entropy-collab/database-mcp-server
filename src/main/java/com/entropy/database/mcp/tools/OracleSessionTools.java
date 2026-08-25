@@ -17,8 +17,8 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.facade.DatabaseAdminOperations;
+import com.entropy.database.mcp.facade.DatabaseWriteOperations;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.beans.factory.annotation.Value;
@@ -34,12 +34,15 @@ import static com.entropy.database.mcp.util.ValidationUtils.requireNotBlank;
 @Component
 public class OracleSessionTools extends McpToolBase {
 
-    private final DynamicDataSourceManager dataSourceManager;
+    private final DatabaseWriteOperations writeOperations;
+    private final DatabaseAdminOperations adminOperations;
     private final boolean ddlAllowed;
 
-    public OracleSessionTools(DynamicDataSourceManager dataSourceManager,
+    public OracleSessionTools(DatabaseWriteOperations writeOperations,
+                              DatabaseAdminOperations adminOperations,
                               @Value("${entropy.mcp.database.ddl.allowed:false}") boolean ddlAllowed) {
-        this.dataSourceManager = dataSourceManager;
+        this.writeOperations = writeOperations;
+        this.adminOperations = adminOperations;
         this.ddlAllowed = ddlAllowed;
     }
 
@@ -66,9 +69,7 @@ public class OracleSessionTools extends McpToolBase {
                 throw new McpToolException(ErrorCode.SQL_OPERATION_NOT_ALLOWED, "DDL execution is disabled. Set entropy.mcp.database.ddl.allowed=true to enable. (sessionId=" + trimmed + ", connection=" + connection + ")");
             }
 
-            ByokDataSourceContext context = dataSourceManager.acquire(connection);
-            var dialect = context.getDialect();
-            var jdbcTemplate = context.getJdbcTemplate();
+            var dialect = adminOperations.getDialect(connection);
 
             String sql = dialect.killSessionSql(trimmed, killMode);
             if (sql == null) {
@@ -76,7 +77,7 @@ public class OracleSessionTools extends McpToolBase {
             }
 
             long startTime = System.currentTimeMillis();
-            int affected = jdbcTemplate.update(sql);
+            int affected = writeOperations.executeUpdate(sql, connection);
             return success(Map.of(
                     "sql", sql, "sessionId", trimmed, "mode", killMode,
                     "affectedRows", affected, "durationMs", System.currentTimeMillis() - startTime,

@@ -36,7 +36,6 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -123,33 +122,6 @@ class ByokDatabaseFacadeTest {
 
         assertThat(result).isSameAs(expected);
         verify(writeRepository).executeDdl("CREATE TABLE test (id INT)");
-    }
-
-    @Test
-    void backupSchemaThrowsUnsupportedOperation() {
-        ByokDatabaseFacade facade = createFacade();
-
-        assertThatThrownBy(() -> facade.backupSchema("users", "test-connection"))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("backupSchema is not supported for BYOK connections");
-    }
-
-    @Test
-    void backupDataThrowsUnsupportedOperation() {
-        ByokDatabaseFacade facade = createFacade();
-
-        assertThatThrownBy(() -> facade.backupData("users", 100, "test-connection"))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("backupData is not supported for BYOK connections");
-    }
-
-    @Test
-    void diffSchemaThrowsUnsupportedOperation() {
-        ByokDatabaseFacade facade = createFacade();
-
-        assertThatThrownBy(() -> facade.diffSchema("users", "orders", "test-connection"))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessage("diffSchema is not supported for BYOK connections");
     }
 
     @Test

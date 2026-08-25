@@ -59,4 +59,24 @@ class OracleDialectTest {
         Assertions.assertThat(sql).contains("15");
         Assertions.assertThat(sql).contains("5");
     }
+
+    @Test
+    void buildUpsertSqlBindsParametersInTheMergeSource() {
+        var sql = dialect.buildUpsertSql("EMPLOYEES", java.util.List.of("ID", "NAME"), java.util.List.of("ID"));
+
+        // Placeholders must sit in the USING subquery: `SELECT ID AS ID FROM DUAL` fails with
+        // ORA-00904 because DUAL has no such column.
+        Assertions.assertThat(sql).contains("USING (SELECT ? AS ID, ? AS NAME FROM DUAL) source");
+        Assertions.assertThat(sql).contains("ON (target.ID = source.ID)");
+        Assertions.assertThat(sql).contains("UPDATE SET target.NAME = source.NAME");
+        // The INSERT branch reads the already-bound source row rather than binding a second time.
+        Assertions.assertThat(sql).contains("INSERT (ID, NAME) VALUES (source.ID, source.NAME)");
+    }
+
+    @Test
+    void buildUpsertSqlBindsOneParameterPerColumn() {
+        var sql = dialect.buildUpsertSql("T", java.util.List.of("A", "B", "C"), java.util.List.of("A"));
+
+        Assertions.assertThat(sql.chars().filter(c -> c == '?').count()).isEqualTo(3);
+    }
 }

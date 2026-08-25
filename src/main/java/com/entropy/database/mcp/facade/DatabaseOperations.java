@@ -15,65 +15,22 @@
  */
 package com.entropy.database.mcp.facade;
 
-import com.entropy.database.mcp.domain.PaginatedQueryResult;
-import com.entropy.database.mcp.domain.PlanAnalysis;
-import com.entropy.database.mcp.stream.SseStreamManager;
-
-import java.util.List;
-import java.util.Map;
-
 /**
- * Common interface for database facade operations.
- * All operations require an explicit connection name; there is no default connection.
+ * The full database contract, for callers that genuinely need every capability.
+ *
+ * <p>This type exists for convenience only. Prefer depending on the narrowest capability
+ * interface a class actually uses — {@link DatabaseMetadataOperations} for introspection tools,
+ * {@link DatabaseReadOperations} for query tools, and so on. Depending on the narrow interface is
+ * what makes it visible in a constructor signature that, say, a health-check tool has no business
+ * writing to the database.
+ *
+ * <p>All operations take an explicit connection name; there is no default connection.
  */
-public interface DatabaseOperations {
-
-    // ─── Read Operations ──────────────────────────────────────────────────
-
-    List<Map<String, Object>> listTables(String schema, String connection);
-
-    List<Map<String, Object>> searchTables(String keyword, String connection);
-
-    List<String> listSchemas(String connection);
-
-    Map<String, Object> describeTable(String table, String schema, String connection);
-
-    List<Map<String, Object>> listIndexes(String table, String schema, String connection);
-
-    List<Map<String, Object>> listViews(String schema, String connection);
-
-    List<Map<String, Object>> listSequences(String schema, String connection);
-
-    PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken, String connection);
-
-    PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
-                                             SseStreamManager.QueryExecutor<PaginatedQueryResult> executor, String connection);
-
-    List<Map<String, Object>> executeNamedQuery(String sql, Map<String, Object> params, String connection);
-
-    Map<String, Object> getDatabaseInfo(String connection);
-
-    // ─── Execution Plan ────────────────────────────────────────────────────
-
-    PlanAnalysis explainPlan(String sql, String connection);
-
-    // ─── Write Operations ──────────────────────────────────────────────────
-
-    Map<String, Object> executeDdl(String sql, String connection);
-
-    // ─── Metadata Operations ────────────────────────────────────────────────
-
-    Map<String, Object> backupSchema(String tableName, String connection);
-
-    Map<String, Object> backupData(String tableName, int maxRows, String connection);
-
-    Map<String, Object> diffSchema(String sourceTable, String targetTable, String connection);
-
-    // ─── Cache Operations ──────────────────────────────────────────────────
-
-    void clearCache(String connection);
-
-    // ─── Statistics ────────────────────────────────────────────────────────
-
-    Map<String, Object> getStatistics(String connection);
+public interface DatabaseOperations extends
+        DatabaseMetadataOperations,
+        DatabaseReadOperations,
+        DatabaseWriteOperations,
+        DatabaseAdminOperations,
+        DatabaseBackupOperations,
+        CrossConnectionOperations {
 }

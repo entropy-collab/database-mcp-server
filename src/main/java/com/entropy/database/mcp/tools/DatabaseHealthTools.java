@@ -15,9 +15,8 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
@@ -33,16 +32,21 @@ import static com.entropy.database.mcp.util.ValidationUtils.requireNotBlank;
 @Component
 public class DatabaseHealthTools extends McpToolBase {
 
-    private final DynamicDataSourceManager dataSourceManager;
+    /**
+     * The full contract rather than a narrower capability: these tools read, resolve dialects, and
+     * (for {@code gatherTableStats} on Oracle) issue a DBMS_STATS block, and no single capability
+     * interface spans that combination.
+     */
+    private final DatabaseOperations routingFacade;
 
-    public DatabaseHealthTools(DynamicDataSourceManager dataSourceManager) {
-        this.dataSourceManager = dataSourceManager;
+    public DatabaseHealthTools(DatabaseOperations routingFacade) {
+        this.routingFacade = routingFacade;
     }
 
     @McpTool(description = "Check database health using dialect-specific query",
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> checkHealth(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        return DialectQueryUtils.checkHealth(dataSourceManager, connection);
+        return DialectQueryUtils.checkHealth(routingFacade, connection);
     }
 
     @McpTool(description = "List active database sessions",
@@ -158,18 +162,16 @@ public class DatabaseHealthTools extends McpToolBase {
         return safeExecute(() -> {
             requireNotBlank(tableName, "tableName");
             requireNotBlank(timestamp, "timestamp");
-            ByokDataSourceContext context = dataSourceManager.acquire(connection);
-            DatabaseDialect dialect = context.getDialect();
-            var jdbcTemplate = context.getJdbcTemplate();
+            DatabaseDialect dialect = routingFacade.getDialect(connection);
             String sqlTemplate = dialect.flashbackQuerySql(tableName);
             if (sqlTemplate == null) {
                 sqlTemplate = "SELECT 'SELECT * FROM %s -- Flashback not supported for this dialect' AS sql_template".formatted(dialect.quote(tableName));
             }
             List<Map<String, Object>> rows = sqlTemplate.contains("?")
-                    ? jdbcTemplate.queryForList(sqlTemplate, timestamp)
-                    : jdbcTemplate.queryForList(sqlTemplate);
+                    ? routingFacade.queryRows(sqlTemplate, connection, timestamp)
+                    : routingFacade.queryRows(sqlTemplate, connection);
             return success(Map.of(
-                    "dialect", DialectQueryUtils.getDialectName(dataSourceManager, connection),
+                    "dialect", DialectQueryUtils.getDialectName(routingFacade, connection),
                     "tableName", tableName, "timestamp", timestamp,
                     "rows", rows));
         });
@@ -208,9 +210,9 @@ public class DatabaseHealthTools extends McpToolBase {
 
     private Map<String, Object> executeWithDialect(String connection, java.util.function.Function<DatabaseDialect, String> sqlProvider, Object... params) {
         return safeExecute(() -> {
-            Map<String, Object> result = DialectQueryUtils.executeDialectQuery(dataSourceManager, connection, sqlProvider, params);
+            Map<String, Object> result = DialectQueryUtils.executeDialectQuery(routingFacade, connection, sqlProvider, params);
             return success(Map.of(
-                    "dialect", DialectQueryUtils.getDialectName(dataSourceManager, connection),
+                    "dialect", DialectQueryUtils.getDialectName(routingFacade, connection),
                     "rows", result.get("rows")));
         });
     }

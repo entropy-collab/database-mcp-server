@@ -17,17 +17,12 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
-import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,18 +36,15 @@ import static com.entropy.database.mcp.util.ValidationUtils.requireNotEmpty;
 @Component
 public class DdlExecutionTools extends McpToolBase {
 
-    private final RoutingDatabaseFacade routingFacade;
-    private final DynamicDataSourceManager dataSourceManager;
+    private final DatabaseOperations routingFacade;
     private final SqlValidator sqlValidator;
     private final boolean ddlAllowed;
     private final boolean gatewayEnabled;
 
-    public DdlExecutionTools(RoutingDatabaseFacade routingFacade,
-                             DynamicDataSourceManager dataSourceManager,
+    public DdlExecutionTools(DatabaseOperations routingFacade,
                              SqlValidator sqlValidator,
                              org.springframework.core.env.Environment environment) {
         this.routingFacade = routingFacade;
-        this.dataSourceManager = dataSourceManager;
         this.sqlValidator = sqlValidator;
         this.ddlAllowed = Boolean.parseBoolean(environment.getProperty("entropy.mcp.database.ddl.allowed", "false"));
         this.gatewayEnabled = Boolean.parseBoolean(environment.getProperty("entropy.mcp.gateway.enabled", "false"));
@@ -109,10 +101,8 @@ public class DdlExecutionTools extends McpToolBase {
         validateRequired(connectionName, "connectionName");
         return safeExecute(() -> {
             sqlValidator.validateDdl(ddl);
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             long startTime = System.currentTimeMillis();
-            int affected = jdbcTemplate.update(ddl);
+            int affected = routingFacade.executeUpdate(ddl, connectionName);
             long duration = System.currentTimeMillis() - startTime;
             return success(Map.of(
                     "connectionName", connectionName,
@@ -139,79 +129,93 @@ public class DdlExecutionTools extends McpToolBase {
         }
         requireNotEmpty(statements, "statements");
         return safeExecute(() -> {
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            Connection connection = null;
             try {
-                connection = context.getDataSource().getConnection();
+                return routingFacade.inTransaction(connectionName, tx -> {
+                    // Whether wrapping DDL in a transaction means anything on this target. Oracle and
+                    // MySQL commit DDL implicitly, so a rollback after a mid-batch failure is a
+                    // no-op and earlier statements are already permanent. Reporting "rolled back" in
+                    // that case would be false.
+                    boolean transactional = tx.ddlIsTransactional();
 
-                // Whether wrapping DDL in a transaction means anything on this target. Oracle and
-                // MySQL commit DDL implicitly, so a rollback() after a mid-batch failure is a
-                // no-op and earlier statements are already permanent. Reporting "rolled back" in
-                // that case would be false.
-                boolean transactional = !connection.getMetaData().dataDefinitionCausesTransactionCommit();
-                if (transactional) {
-                    connection.setAutoCommit(false);
-                }
+                    long startTime = System.currentTimeMillis();
+                    List<Map<String, Object>> results = new ArrayList<>();
+                    List<String> applied = new ArrayList<>();
+                    boolean allSuccess = true;
 
-                long startTime = System.currentTimeMillis();
-                List<Map<String, Object>> results = new ArrayList<>();
-                List<String> applied = new ArrayList<>();
-                boolean allSuccess = true;
-
-                for (String ddl : statements) {
-                    try {
-                        sqlValidator.validateDdl(ddl);
-                        long stmtStart = System.currentTimeMillis();
-                        try (var stmt = connection.createStatement()) {
-                            stmt.execute(ddl);
+                    for (String ddl : statements) {
+                        try {
+                            sqlValidator.validateDdl(ddl);
+                            long stmtStart = System.currentTimeMillis();
+                            tx.execute(ddl);
+                            long stmtDuration = System.currentTimeMillis() - stmtStart;
+                            applied.add(ddl);
+                            results.add(Map.of("ddl", ddl, "success", true, "durationMs", stmtDuration));
+                        } catch (RuntimeException e) {
+                            allSuccess = false;
+                            log.warn("DDL statement failed in batch on connection {}: {}",
+                                    connectionName, ddl, e);
+                            results.add(Map.of("ddl", ddl, "success", false,
+                                    "error", "DDL execution failed: " + e.getMessage()));
+                            // Stop on first failure — no point applying the rest of a broken batch
+                            break;
                         }
-                        long stmtDuration = System.currentTimeMillis() - stmtStart;
-                        applied.add(ddl);
-                        results.add(Map.of("ddl", ddl, "success", true, "durationMs", stmtDuration));
-                    } catch (Exception e) {
-                        allSuccess = false;
-                        log.warn("DDL statement failed in batch on connection {}", connectionName, e);
-                        results.add(Map.of("ddl", ddl, "success", false,
-                                "error", "DDL execution failed: " + e.getMessage()));
-                        // Stop on first failure — no point applying the rest of a broken batch
-                        break;
                     }
-                }
 
-                boolean rolledBack = false;
-                if (transactional) {
-                    if (allSuccess) {
-                        connection.commit();
-                    } else {
-                        connection.rollback();
-                        rolledBack = true;
+                    if (!allSuccess && transactional) {
+                        // The rollback belongs to the facade and only happens if this work throws,
+                        // so the report rides out on the exception instead of being returned.
                         applied.clear();
+                        throw new DdlBatchRolledBack(buildBatchPayload(connectionName, statements.size(),
+                                applied, results, false, true, true,
+                                System.currentTimeMillis() - startTime));
                     }
-                }
-
-                long totalDuration = System.currentTimeMillis() - startTime;
-                Map<String, Object> payload = new LinkedHashMap<>();
-                payload.put("connectionName", connectionName);
-                payload.put("totalStatements", statements.size());
-                payload.put("succeeded", applied.size());
-                payload.put("failed", allSuccess ? 0 : 1);
-                payload.put("results", results);
-                payload.put("durationMs", totalDuration);
-                payload.put("transactional", transactional);
-                payload.put("rolledBack", rolledBack);
-                if (!allSuccess && !transactional) {
-                    payload.put("appliedBeforeFailure", applied);
-                }
-                payload.put("message", buildBatchMessage(allSuccess, transactional, applied.size()));
-                return success(payload);
-            } finally {
-                // Close the borrowed physical connection to return it to the pool.
-                // Do NOT call closePool() — that would destroy the entire HikariCP pool.
-                if (connection != null) {
-                    try { connection.close(); } catch (Exception e) { log.warn("Failed to close connection", e); }
-                }
+                    return success(buildBatchPayload(connectionName, statements.size(), applied, results,
+                            allSuccess, transactional, false, System.currentTimeMillis() - startTime));
+                });
+            } catch (DdlBatchRolledBack e) {
+                return success(e.payload());
             }
         });
+    }
+
+    /**
+     * Carries the per-statement report out of a transaction that must roll back.
+     *
+     * <p>Extends {@link McpToolException} so the facade re-throws it unchanged rather than wrapping
+     * it, keeping the payload reachable at the catch site.
+     */
+    private static final class DdlBatchRolledBack extends McpToolException {
+
+        private final transient Map<String, Object> payload;
+
+        private DdlBatchRolledBack(Map<String, Object> payload) {
+            super(ErrorCode.QUERY_EXECUTION_FAILED, "DDL batch rolled back");
+            this.payload = payload;
+        }
+
+        private Map<String, Object> payload() {
+            return payload;
+        }
+    }
+
+    private static Map<String, Object> buildBatchPayload(String connectionName, int totalStatements,
+                                                         List<String> applied, List<Map<String, Object>> results,
+                                                         boolean allSuccess, boolean transactional,
+                                                         boolean rolledBack, long totalDuration) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("connectionName", connectionName);
+        payload.put("totalStatements", totalStatements);
+        payload.put("succeeded", applied.size());
+        payload.put("failed", allSuccess ? 0 : 1);
+        payload.put("results", results);
+        payload.put("durationMs", totalDuration);
+        payload.put("transactional", transactional);
+        payload.put("rolledBack", rolledBack);
+        if (!allSuccess && !transactional) {
+            payload.put("appliedBeforeFailure", applied);
+        }
+        payload.put("message", buildBatchMessage(allSuccess, transactional, applied.size()));
+        return payload;
     }
 
     private static String buildBatchMessage(boolean allSuccess, boolean transactional, int appliedCount) {
@@ -241,8 +245,12 @@ public class DdlExecutionTools extends McpToolBase {
                 try {
                     sqlValidator.validateDdl(ddl);
                     results.add(Map.of("ddl", ddl, "valid", true));
-                } catch (Exception e) {
+                } catch (RuntimeException e) {
+                    // A dry run reports every statement's verdict, so a rejected statement is a
+                    // result rather than a failure. The reason stays in the log because the response
+                    // deliberately does not echo validator internals back to the caller.
                     allValid = false;
+                    log.debug("DDL validation rejected statement: {}", e.getMessage());
                     results.add(Map.of("ddl", ddl, "valid", false, "error", "Validation failed"));
                 }
             }

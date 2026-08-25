@@ -17,19 +17,17 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.config.QueryConfig;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.gateway.FederatedQueryGateway;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.stream.SseStreamManager;
 import com.entropy.database.mcp.util.ValidationUtils;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Component;
 import org.springframework.core.env.Environment;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
@@ -46,26 +44,23 @@ public class CrossDatabaseTools extends McpToolBase {
     private static final int MAX_CTE_ROWS = 50000;
     private static final Pattern IDENTIFIER_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]{0,127}$");
 
-    private final RoutingDatabaseFacade routingFacade;
+    private final DatabaseOperations routingFacade;
     private final SqlValidator sqlValidator;
     private final SseStreamManager sseStreamManager;
     private final FederatedQueryGateway gateway;
-    private final DynamicDataSourceManager dataSourceManager;
     private final boolean gatewayEnabled;
     private final int maxExportRows;
 
-    public CrossDatabaseTools(RoutingDatabaseFacade routingFacade,
+    public CrossDatabaseTools(DatabaseOperations routingFacade,
                               SqlValidator sqlValidator,
                               SseStreamManager sseStreamManager,
                               FederatedQueryGateway gateway,
-                              DynamicDataSourceManager dataSourceManager,
                               QueryConfig queryConfig,
                               Environment environment) {
         this.routingFacade = routingFacade;
         this.sqlValidator = sqlValidator;
         this.sseStreamManager = sseStreamManager;
         this.gateway = gateway;
-        this.dataSourceManager = dataSourceManager;
         this.gatewayEnabled = Boolean.parseBoolean(environment.getProperty("entropy.mcp.gateway.enabled", "false"));
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
@@ -92,8 +87,7 @@ public class CrossDatabaseTools extends McpToolBase {
             sqlValidator.validateSelect(sql);
             int limit = maxRows != null ? maxRows : DEFAULT_CROSS_DB_MAX_ROWS;
             String limitedSql = "SELECT * FROM (" + sql.trim() + ") WHERE ROWNUM <= " + limit;
-            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-            List<Map<String, Object>> rows = ctx.getJdbcTemplate().queryForList(limitedSql);
+            List<Map<String, Object>> rows = routingFacade.queryRows(limitedSql, connection);
             return success(Map.of("sql", sql.trim(), "rowCount", rows.size(), "data", rows));
         });
     }
@@ -118,15 +112,16 @@ public class CrossDatabaseTools extends McpToolBase {
             ValidationUtils.validateIdentifier(owner, "owner");
         }
         try {
-            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
             List<Map<String, Object>> rows = "USER".equalsIgnoreCase(owner)
-                    ? jdbc.queryForList(String.format("SELECT table_name FROM all_tables@%s WHERE owner = USER", dbLinkName))
-                    : jdbc.queryForList(String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName), owner.toUpperCase());
+                    ? routingFacade.queryRows(String.format("SELECT table_name FROM all_tables@%s WHERE owner = USER", dbLinkName), connection)
+                    : routingFacade.queryRows(String.format("SELECT table_name FROM all_tables@%s WHERE owner = UPPER(?)", dbLinkName), connection, owner.toUpperCase());
             return rows;
-        } catch (Exception e) {
+        } catch (DataAccessException e) {
+            // Only a genuine failure on the far side of the link is a federated failure. Validation
+            // and connection-resolution errors carry a code the caller can act on and are left alone.
+            log.warn("Federated query failed: dbLink={}, owner={}, connection={}", dbLinkName, owner, connection, e);
             throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED,
-                    "Federated query failed for dbLink: " + dbLinkName);
+                    "Federated query failed for dbLink: " + dbLinkName, e);
         }
     }
 
@@ -143,10 +138,12 @@ public class CrossDatabaseTools extends McpToolBase {
             String sql = String.format(
                     "SELECT column_name, data_type, data_length, nullable FROM all_tab_columns@%s WHERE table_name = UPPER(?) ORDER BY column_id",
                     dbLinkName);
-            return dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(sql, remoteTable.toUpperCase());
-        } catch (Exception e) {
+            return routingFacade.queryRows(sql, connection, remoteTable.toUpperCase());
+        } catch (DataAccessException e) {
+            log.warn("Federated describe failed: dbLink={}, remoteTable={}, connection={}",
+                    dbLinkName, remoteTable, connection, e);
             throw new McpToolException(ErrorCode.FEDERATED_QUERY_FAILED,
-                    "Federated query failed for dbLink: " + dbLinkName);
+                    "Federated query failed for dbLink: " + dbLinkName, e);
         }
     }
 
@@ -168,7 +165,7 @@ public class CrossDatabaseTools extends McpToolBase {
         String sql = buildComplexAnalyticsSql(localTable, dbLinkName, startDate, endDate, limit);
         return safeExecute(() -> {
             long startTime = System.currentTimeMillis();
-            List<Map<String, Object>> rows = dataSourceManager.acquire(connection).getJdbcTemplate().queryForList(sql);
+            List<Map<String, Object>> rows = routingFacade.queryRows(sql, connection);
             return success(Map.of(
                     "template", "complex_cross_database_analytics", "localTable", localTable,
                     "remoteTables", "REMOTE_QUALITY_TABLE@" + dbLinkName + ", DIM_STATION@" + dbLinkName,
@@ -252,8 +249,7 @@ public class CrossDatabaseTools extends McpToolBase {
                 dbLinkName, username, escapedPassword, host, port, serviceName);
         sqlValidator.validateDdl(dblinkSql);
         return safeExecute(() -> {
-            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-            ctx.getJdbcTemplate().execute(dblinkSql);
+            routingFacade.executeUpdate(dblinkSql, connection);
             return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' created successfully", dbLinkName)));
         });
     }
@@ -268,8 +264,7 @@ public class CrossDatabaseTools extends McpToolBase {
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
         sqlValidator.validateDdl(dropSql);
         return safeExecute(() -> {
-            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-            ctx.getJdbcTemplate().execute(dropSql);
+            routingFacade.executeUpdate(dropSql, connection);
             return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
         });
     }
@@ -285,7 +280,13 @@ public class CrossDatabaseTools extends McpToolBase {
         ValidationUtils.validateIdentifier(remoteTable, "remoteTable");
         String sql = String.format("SELECT COUNT(*) as cnt FROM %s@%s", remoteTable, dbLinkName);
         return safeExecute(() -> {
-            Integer count = dataSourceManager.acquire(connection).getJdbcTemplate().queryForObject(sql, Integer.class);
+            List<Map<String, Object>> rows = routingFacade.queryRows(sql, connection);
+            // COUNT(*) comes back as whatever numeric type the driver chose (Oracle: BigDecimal),
+            // and the column label case is driver-dependent, so read the first cell positionally.
+            Object cell = rows.isEmpty() || rows.get(0).isEmpty()
+                    ? null
+                    : rows.get(0).values().iterator().next();
+            long count = cell instanceof Number number ? number.longValue() : 0L;
             return success(Map.of(
                     "dbLink", dbLinkName, "remoteTable", remoteTable, "rowCount", count,
                     "message", String.format("Successfully queried %s@%s, found %d rows", remoteTable, dbLinkName, count)));

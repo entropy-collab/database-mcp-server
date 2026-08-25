@@ -30,12 +30,12 @@ import com.entropy.database.mcp.etl.JobExecution;
 import com.entropy.database.mcp.etl.MigrationJob;
 import com.entropy.database.mcp.etl.Step;
 import com.entropy.database.mcp.etl.StepType;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.*;
 
@@ -52,15 +52,23 @@ public class EtlTools extends McpToolBase {
     private static final int DEFAULT_BATCH_INSERT_SIZE = 1000;
 
     private final DynamicDataSourceManager dataSourceManager;
+    private final DatabaseOperations routingFacade;
     private final JobExecutionEngine executionEngine;
     private final EtlConfig etlConfig;
     private final SqlValidator sqlValidator;
 
+    /**
+     * @param dataSourceManager only for {@link #createNamedConnection}: registering a connection is
+     *                          connection-management, not a database operation, so it has no seam
+     *                          on the facade.
+     */
     public EtlTools(DynamicDataSourceManager dataSourceManager,
+                    DatabaseOperations routingFacade,
                     JobExecutionEngine executionEngine,
                     EtlConfig etlConfig,
                     SqlValidator sqlValidator) {
         this.dataSourceManager = dataSourceManager;
+        this.routingFacade = routingFacade;
         this.executionEngine = executionEngine;
         this.etlConfig = etlConfig;
         this.sqlValidator = sqlValidator;
@@ -108,14 +116,11 @@ public class EtlTools extends McpToolBase {
             requireNotBlank(tableName, "tableName");
             validateIdentifier(tableName, "tableName");
             requireNotEmpty(rows, "rows");
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             List<String> columns = rows.get(0).keySet().stream().toList();
-            String sql = BatchInsertHelper.buildInsertSql(tableName, columns);
             int size = batchSize != null ? batchSize : etlConfig.batchSize();
             if (size <= 0) throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
-            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, sql, rows, size, BatchInsertHelper.setRowColumns(columns));
+            long totalRows = routingFacade.batchInsert(tableName, columns, toPositionalRows(columns, rows), size, connectionName);
             return success(Map.of(
                     "connectionName", connectionName, "tableName", tableName,
                     "rowCount", totalRows, "batchSize", size,
@@ -136,17 +141,13 @@ public class EtlTools extends McpToolBase {
         return safeExecute(() -> {
             validateIdentifier(targetTable, "targetTable");
             if (sqlValidator != null) sqlValidator.validateSelect(sourceSql);
-            ByokDataSourceContext sourceContext = dataSourceManager.acquire(sourceConnectionName);
-            List<Map<String, Object>> rows = sourceContext.getJdbcTemplate().queryForList(sourceSql);
-            if (rows.isEmpty()) return emptyResult();
-            ByokDataSourceContext targetContext = dataSourceManager.acquire(targetConnectionName);
-            JdbcTemplate targetJdbc = targetContext.getJdbcTemplate();
-            List<String> columns = rows.get(0).keySet().stream().toList();
-            String insertSql = BatchInsertHelper.buildInsertSql(targetTable, columns);
             int size = batchSize != null ? batchSize : DatabaseConstants.DEFAULT_BATCH_SIZE;
             if (size <= 0) throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
-            int totalRows = BatchInsertHelper.batchInsert(targetJdbc, insertSql, rows, size, BatchInsertHelper.setRowColumns(columns));
+            long totalRows = routingFacade.copyRows(sourceSql, sourceConnectionName, targetTable, null, size, targetConnectionName);
+            // An empty source is the only way nothing lands: a successful insert reports at least
+            // one row per submitted row. Keep the dedicated response the caller had before.
+            if (totalRows == 0) return emptyResult();
             return success(Map.of(
                     "sourceConnection", sourceConnectionName, "targetConnection", targetConnectionName,
                     "targetTable", targetTable, "rowCount", totalRows, "batchSize", size,
@@ -167,8 +168,6 @@ public class EtlTools extends McpToolBase {
             @McpToolParam(description = "Batch size for insertion", required = false) Integer batchSize) throws Exception {
         return safeExecute(() -> {
             validateTransformParams(connectionName, sourceTable, targetTable, columnMapping);
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
             List<String> sourceColumns = new ArrayList<>();
             List<String> targetColumns = new ArrayList<>();
             List<String> transforms = new ArrayList<>();
@@ -184,23 +183,14 @@ public class EtlTools extends McpToolBase {
             }
 
             String selectSql = buildTransformSelect(sourceColumns, transforms, targetColumns, sourceTable, whereClause);
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql);
+            List<Map<String, Object>> rows = routingFacade.queryRows(selectSql, connectionName);
             if (rows.isEmpty()) return emptyResult();
 
-            String insertSql = BatchInsertHelper.buildInsertSql(targetTable, targetColumns);
             int size = batchSize != null ? batchSize : DatabaseConstants.DEFAULT_BATCH_SIZE;
             if (size <= 0) throw new IllegalArgumentException("batchSize must be positive, got: " + size);
             long startTime = System.currentTimeMillis();
-            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, insertSql, rows, size, (ps, row) -> {
-                try {
-                    for (int i = 0; i < targetColumns.size(); i++) {
-                        ps.setObject(i + 1, row.get(targetColumns.get(i)));
-                    }
-                } catch (java.sql.SQLException e) {
-                    throw new RuntimeException(e);
-                }
-                return null;
-            });
+            long totalRows = routingFacade.batchInsert(targetTable, targetColumns,
+                    toPositionalRows(targetColumns, rows), size, connectionName);
             return success(Map.of(
                     "connectionName", connectionName, "sourceTable", sourceTable, "targetTable", targetTable,
                     "rowCount", totalRows, "durationMs", System.currentTimeMillis() - startTime,
@@ -222,16 +212,10 @@ public class EtlTools extends McpToolBase {
             validateIdentifier(tableName, "tableName");
             requireNotEmpty(rows, "rows");
             requireNotEmpty(keyColumns, "keyColumns");
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
-            DatabaseDialect dialect = context.getDialect();
             List<String> allColumns = rows.get(0).keySet().stream().toList();
-            String upsertSql = dialect.buildUpsertSql(tableName, allColumns, keyColumns);
-            if (upsertSql == null) {
-                throw new McpToolException(ErrorCode.UPSERT_NOT_SUPPORTED, "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName() + " (connectionName=" + connectionName + ", tableName=" + tableName + ")");
-            }
             long startTime = System.currentTimeMillis();
-            int totalRows = BatchInsertHelper.batchInsert(jdbcTemplate, upsertSql, rows, DEFAULT_BATCH_INSERT_SIZE, BatchInsertHelper.setRowColumns(allColumns));
+            long totalRows = routingFacade.batchUpsert(tableName, keyColumns, allColumns,
+                    toPositionalRows(allColumns, rows), DEFAULT_BATCH_INSERT_SIZE, connectionName);
             return success(Map.of(
                     "connectionName", connectionName, "tableName", tableName,
                     "keyColumns", keyColumns, "rowCount", totalRows, "durationMs", System.currentTimeMillis() - startTime,
@@ -247,15 +231,13 @@ public class EtlTools extends McpToolBase {
             @McpToolParam(description = "Table name to validate") String tableName,
             @McpToolParam(description = "Columns to check (null for all)", required = false) List<String> columns) {
         return safeExecute(() -> {
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
-            DatabaseDialect dialect = context.getDialect();
+            DatabaseDialect dialect = routingFacade.getDialect(connectionName);
             if (!dialect.isValidIdentifier(tableName)) {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid table name: " + tableName + " (connectionName=" + connectionName + ", tableName=" + tableName + ")");
             }
             String validatedTable = dialect.normalizeTableName(tableName);
             List<String> colList = (columns == null || columns.isEmpty())
-                    ? jdbcTemplate.queryForList("SELECT column_name FROM user_tab_columns WHERE table_name = ?", validatedTable)
+                    ? routingFacade.queryRows("SELECT column_name FROM user_tab_columns WHERE table_name = ?", connectionName, validatedTable)
                             .stream().map(row -> (String) row.get("column_name")).toList()
                     : columns;
             for (String column : colList) {
@@ -268,15 +250,15 @@ public class EtlTools extends McpToolBase {
             int totalChecks = 0;
             for (String column : colList) {
                 totalChecks++;
-                Long nullCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + validatedTable + " WHERE " + dialect.quote(column) + " IS NULL", Long.class);
+                Long nullCount = queryCount("SELECT COUNT(*) FROM " + validatedTable + " WHERE " + dialect.quote(column) + " IS NULL", connectionName);
                 if (nullCount != null && nullCount > 0) issues.add(Map.of("type", "NULL_VALUES", "column", column, "count", nullCount, "severity", "WARNING"));
             }
             totalChecks++;
-            Long duplicateCount = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + validatedTable + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)", Long.class);
+            Long duplicateCount = queryCount(
+                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + validatedTable + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)", connectionName);
             if (duplicateCount != null && duplicateCount > 0) issues.add(Map.of("type", "DUPLICATES", "columns", colList, "count", duplicateCount, "severity", "ERROR"));
             totalChecks++;
-            Long rowCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + validatedTable, Long.class);
+            Long rowCount = queryCount("SELECT COUNT(*) FROM " + validatedTable, connectionName);
             double score = totalChecks > 0 ? (double) (totalChecks - issues.size()) / totalChecks * 100 : 100.0;
             return success(Map.of(
                     "summary", Map.of("table", validatedTable, "totalRows", rowCount != null ? rowCount : 0,
@@ -297,9 +279,7 @@ public class EtlTools extends McpToolBase {
             @McpToolParam(description = "Target table name") String targetTable,
             @McpToolParam(description = "Batch size for processing", required = false) Integer batchSize) throws Exception {
         return safeExecute(() -> {
-            ByokDataSourceContext context = dataSourceManager.acquire(connectionName);
-            JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
-            DatabaseDialect dialect = context.getDialect();
+            DatabaseDialect dialect = routingFacade.getDialect(connectionName);
             if (!dialect.isValidIdentifier(targetTable)) {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid target table name: " + targetTable + " (connectionName=" + connectionName + ")");
             }
@@ -307,17 +287,15 @@ public class EtlTools extends McpToolBase {
             int size = batchSize != null ? batchSize : DatabaseConstants.DEFAULT_BATCH_SIZE;
             long startTime = System.currentTimeMillis();
             int totalRows = 0;
-            var repo = context.getReadRepository();
             String continuationToken = null;
             int maxPages = DatabaseConstants.DEFAULT_BATCH_SIZE; // safety limit: max DEFAULT_BATCH_SIZE pages × batchSize rows
             int pageCount = 0;
             do {
-                PaginatedQueryResult result = repo.executeQuery(sourceSql, size, continuationToken);
+                PaginatedQueryResult result = routingFacade.executeQuery(sourceSql, size, continuationToken, connectionName);
                 if (result.rows().isEmpty()) break;
                 List<Map<String, Object>> rows = result.rows();
                 List<String> columns = rows.get(0).keySet().stream().toList();
-                String insertSql = BatchInsertHelper.buildInsertSql(validatedTargetTable, columns);
-                BatchInsertHelper.batchInsert(jdbcTemplate, insertSql, rows, size, BatchInsertHelper.setRowColumns(columns));
+                routingFacade.batchInsert(validatedTargetTable, columns, toPositionalRows(columns, rows), size, connectionName);
                 totalRows += rows.size();
                 continuationToken = result.continuationToken();
                 if (++pageCount >= maxPages) {
@@ -465,6 +443,37 @@ public class EtlTools extends McpToolBase {
             sql += " WHERE " + whereClause;
         }
         return sql;
+    }
+
+    /**
+     * Adapt the column-keyed rows the MCP contract accepts to the positional shape the write
+     * facade takes, so column order is fixed once here instead of by a PreparedStatement setter.
+     */
+    private static List<List<Object>> toPositionalRows(List<String> columns, List<Map<String, Object>> rows) {
+        List<List<Object>> positional = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            List<Object> values = new ArrayList<>(columns.size());
+            for (String column : columns) {
+                values.add(row.get(column));
+            }
+            positional.add(values);
+        }
+        return positional;
+    }
+
+    /**
+     * Read a single-row, single-column aggregate.
+     *
+     * <p>The value arrives as whatever numeric type the driver picked (Oracle answers COUNT(*) as
+     * BigDecimal), so it is narrowed here rather than relying on a typed {@code queryForObject}.
+     */
+    private Long queryCount(String sql, String connectionName) {
+        List<Map<String, Object>> rows = routingFacade.queryRows(sql, connectionName);
+        if (rows.isEmpty() || rows.get(0).isEmpty()) {
+            return null;
+        }
+        Object value = rows.get(0).values().iterator().next();
+        return value instanceof Number number ? number.longValue() : null;
     }
 
     private void validateTransformParams(String connectionName, String sourceTable,
