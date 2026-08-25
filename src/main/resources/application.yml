@@ -32,7 +32,7 @@ spring:
     mcp:
       server:
         name: database-mcp-server
-        version: 0.1.1
+        version: 0.1.2
         protocol: STATELESS
         tool-callback:
           auto-detect: true
