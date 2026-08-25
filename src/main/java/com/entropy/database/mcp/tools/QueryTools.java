@@ -50,17 +50,18 @@ public class QueryTools extends McpToolBase {
     }
 
     @McpTool(description = """
-            Execute a read-only SQL SELECT query with automatic pagination.
-            Prerequisite: call createNamedConnection first to register the database connection, then pass the connection name.
-            Returns columns, rows, rowCount, hasMore, and continuationToken for pagination.
-            Use executeQueryWithFilter for parameterized queries to prevent SQL injection.
-            Tags: [read, query, select, paginated]
+            【执行只读查询】执行只读 SQL SELECT 查询，自动分页。
+            前置条件：先调用 createNamedConnection 注册数据库连接，再把连接名传入 connection。
+            使用场景：SQL 中不含外部输入值，可直接执行的查询。
+            返回字段：columns、rows、rowCount、hasMore、continuationToken（用于翻页）。
+            不要用于：SQL 中需要拼接用户输入值的场景，请改用 executeQueryWithFilter 做参数化查询以防注入。
+            标签：[read, query, select, paginated]
             """,
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> executeQuery(
-            @McpToolParam(description = "SQL query to execute") String sql,
-            @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
-            @McpToolParam(description = "Continuation token for pagination. Omit or pass empty string for first page.", required = false) String continuationToken,
+            @McpToolParam(description = "要执行的 SQL SELECT 语句") String sql,
+            @McpToolParam(description = "返回行数上限，省略时默认 100", required = false) Integer maxRows,
+            @McpToolParam(description = "分页续传令牌。首页请省略或传空字符串；后续页传上一次返回的 continuationToken", required = false) String continuationToken,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
             // Sanitise log output to avoid leaking SQL or sensitive tokens into debug logs.
@@ -82,7 +83,12 @@ public class QueryTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get database connection information including product name and version",
+    @McpTool(description = """
+            【查看数据库信息】获取当前连接的数据库信息，包括产品名称与版本号。
+            使用场景：需要先确认数据库类型（Oracle / MySQL / PostgreSQL 等）以便写出兼容的 SQL 方言。
+            返回字段：databaseProductName、databaseProductVersion、driverName 等连接元数据。
+            标签：[read, metadata, connection]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getDatabaseInfo(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
@@ -90,14 +96,17 @@ public class QueryTools extends McpToolBase {
     }
 
     @McpTool(description = """
-            Execute up to 5 SQL SELECT queries concurrently. Each result includes columns, rows, and rowCount.
-            Use for batch analysis across multiple queries without sequential waiting.
-            Tags: [read, query, batch, select]
+            【批量并发查询】并发执行最多 5 条只读 SQL SELECT 查询。
+            前置条件：先调用 createNamedConnection 注册数据库连接。
+            使用场景：多条互不依赖的查询需要一次取回，避免逐条串行等待。
+            返回字段：数组，每项含 sql 与 result（result 内含 columns、rows、rowCount、hasMore、continuationToken）。
+            不要用于：单条查询（用 executeQuery）；超过 5 条会直接报错。
+            标签：[read, query, batch, select]
             """,
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public List<Map<String, Object>> batchQuery(
-            @McpToolParam(description = "List of SQL queries (max 5)") List<String> sqls,
-            @McpToolParam(description = "Maximum rows per query", required = false) Integer maxRows,
+            @McpToolParam(description = "SQL SELECT 语句列表，最多 5 条") List<String> sqls,
+            @McpToolParam(description = "每条查询的返回行数上限", required = false) Integer maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) throws Exception {
         if (sqls == null || sqls.size() > 5) {
             throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "batchQuery accepts at most 5 queries");
@@ -123,25 +132,22 @@ public class QueryTools extends McpToolBase {
     }
 
     @McpTool(name = "executeSqlTemplate", description = """
-            【SQL 模板执行】安全执行预定义参数化 SQL 模板，防止 SQL 注入。
-            
+            【SQL 模板执行】按预定义模板生成并执行只读 SQL，避免手写 SQL 带来的注入风险。
+            前置条件：先调用 createNamedConnection 注册数据库连接。
             支持模板：
-            - query_by_id: 按主键查询单条记录
-            - list_by_page: 分页列表查询
-            - count_by_condition: 条件计数
-            
-            使用场景：
-            - 需要安全地构造参数化查询，避免手写 SQL 注入风险
-            - 快速查询单条记录或计数统计
-            
-            返回字段：rows、rowCount
+            - select_sql：按条件查询表数据，需在 params 中提供 condition、limit
+            - tables_sql：列出指定 schema 下的所有表（information_schema 语法，仅 MySQL/PostgreSQL 可用）
+            - table_detail_sql：列出指定表的列名、数据类型、是否可空
+            返回字段：rows、rowCount。
+            不要用于：模板覆盖不到的查询（用 executeQueryWithFilter）；跨方言的表结构查询请优先用 listTables / describeTable。
+            标签：[read, query, template, safe]
             """,
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> executeSqlTemplate(
-            @McpToolParam(description = "Template name: query_by_id, list_by_page, or count_by_condition") String templateName,
-            @McpToolParam(description = "Table name") String table,
-            @McpToolParam(description = "Optional schema name for qualifying table references", required = false) String schema,
-            @McpToolParam(description = "Parameters as key-value pairs", required = false) Map<String, Object> params,
+            @McpToolParam(description = "模板名，取值：select_sql、tables_sql、table_detail_sql") String templateName,
+            @McpToolParam(description = "表名") String table,
+            @McpToolParam(description = "schema 名，用于限定表引用，可省略", required = false) String schema,
+            @McpToolParam(description = "模板占位符的取值，键值对形式（如 {\"condition\": \"status = 'A'\", \"limit\": 100}）", required = false) Map<String, Object> params,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) throws Exception {
         return safeExecute(() -> {
             if (table == null || table.isBlank()) {
@@ -177,17 +183,19 @@ public class QueryTools extends McpToolBase {
     }
 
     @McpTool(description = """
-            Execute a parameterized SQL SELECT query with built-in SQL injection protection.
-            Use this instead of executeQuery when you need to pass user-supplied values safely.
-            Parameters are bound via named placeholders (:name) — never concatenate user input into SQL.
-            Prerequisite: call createNamedConnection first to register the database connection.
-            Tags: [read, query, parameterized, safe, select]
+            【参数化查询】执行参数化 SQL SELECT 查询，内置 SQL 注入防护。
+            前置条件：先调用 createNamedConnection 注册数据库连接。
+            使用场景：查询条件包含用户提供的值时，一律用本工具而非 executeQuery。
+            参数写法：SQL 中用命名占位符 :name，实参放入 params——严禁把用户输入拼接进 SQL 字符串。
+            返回字段：columns、rows、rowCount、totalRows、parametersUsed。
+            不要用于：需要分页续传的大结果集（用 executeQuery 的 continuationToken）。
+            标签：[read, query, parameterized, safe, select]
             """,
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> executeQueryWithFilter(
-            @McpToolParam(description = "SQL query with named parameters (e.g. WHERE name = :name)") String sql,
-            @McpToolParam(description = "Named parameters as key-value pairs (e.g. {\"name\": \"John\"})", required = false) Map<String, Object> params,
-            @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
+            @McpToolParam(description = "带命名占位符的 SQL SELECT 语句（如 WHERE name = :name）") String sql,
+            @McpToolParam(description = "命名参数的键值对（如 {\"name\": \"John\"}）", required = false) Map<String, Object> params,
+            @McpToolParam(description = "返回行数上限，省略时默认 100", required = false) Integer maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
             if (sql == null || sql.isBlank()) {

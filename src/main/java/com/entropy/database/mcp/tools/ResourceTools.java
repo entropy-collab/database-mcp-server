@@ -46,8 +46,8 @@ public class ResourceTools {
 
     @McpResource(
             uri = "query-templates://{templateName}",
-            name = "Query Template",
-            description = "Predefined SQL query templates",
+            name = "SQL 查询模板",
+            description = "预定义的 SQL 查询模板文本。templateName 取值：select_sql、tables_sql、table_detail_sql；模板中的 {table}、{schema}、{condition}、{limit} 为待替换占位符。",
             mimeType = "text/plain"
     )
     public McpSchema.ReadResourceResult getQueryTemplate(String templateName) {
@@ -58,7 +58,7 @@ public class ResourceTools {
                     new McpSchema.TextResourceContents(
                             "query-templates://" + templateName,
                             "text/plain",
-                            "Template not found. Available templates: " + available
+                            "模板不存在。可用模板：" + available
                     )
             ));
         }
@@ -73,8 +73,8 @@ public class ResourceTools {
 
     @McpResource(
             uri = "schema://tables/{connection}",
-            name = "Database Tables",
-            description = "List of tables in the database",
+            name = "数据库表清单",
+            description = "指定 BYOK 连接下的全部表清单，JSON 数组，每项含表名、表类型与行数估算。connection 为 createNamedConnection 注册的连接名。",
             mimeType = "application/json"
     )
     public McpSchema.ReadResourceResult getTables(String connection) {

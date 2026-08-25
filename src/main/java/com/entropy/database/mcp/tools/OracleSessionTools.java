@@ -46,11 +46,19 @@ public class OracleSessionTools extends McpToolBase {
         this.ddlAllowed = ddlAllowed;
     }
 
-    @McpTool(description = "Kill an Oracle database session (requires ALTER SYSTEM privilege)",
+    @McpTool(description = """
+            【强制中断数据库会话】对目标数据库执行 ALTER SYSTEM KILL SESSION，强制中断指定会话。
+            破坏性影响：不可恢复。被中断会话中未提交的事务会被回滚，该会话持有的锁被释放，客户端连接直接断开；如果杀错会话，正在运行的业务作业会失败。IMMEDIATE 模式立即中断并回滚，POST_TRANSACTION 模式等当前事务结束后再中断。执行前请务必先用 showLocks 或 showBlockingTree 确认 sid 与 serial# 对应的正是目标阻塞会话。
+            前置条件：必须开启 entropy.mcp.database.ddl.allowed=true，否则报操作不被允许；connection 在本工具中必填不可省略；当前连接账号需具备 ALTER SYSTEM 权限；数据库方言必须支持该操作（Oracle 支持，其他方言会报不支持）。
+            使用场景：会话长时间阻塞他人、连接被占死且无法从应用侧释放。
+            返回字段：sql（实际执行的语句）、sessionId、mode（实际使用的模式）、affectedRows、durationMs、connectionName、message。
+            不要用于：查看会话与阻塞关系（用 listActiveSessions、showLocks、showBlockingTree）；释放连接池中的空闲连接（这属于连接池管理，不是数据库会话）。
+            标签：[write, admin, session, destructive, oracle]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> killSession(
-            @McpToolParam(description = "Session identifier in format 'sid,serial#' (e.g. '123,4567')") String sessionId,
-            @McpToolParam(description = "Kill mode: IMMEDIATE (default) or POST_TRANSACTION", required = false) String mode,
+            @McpToolParam(description = "会话标识，格式必须为 'sid,serial#' 两个整数以逗号分隔（如 '123,4567'），必填；格式不符直接报参数校验失败") String sessionId,
+            @McpToolParam(description = "中断模式，取值 IMMEDIATE 或 POST_TRANSACTION（大小写不敏感）；省略或传空时默认 IMMEDIATE，其他取值报参数校验失败", required = false) String mode,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
             requireNotBlank(sessionId, "sessionId");

@@ -22,6 +22,18 @@ import java.util.Map;
  * <p>
  * Centralises {@code @McpToolParam} descriptions, user-facing error messages, and
  * exception cause names so they only need to be maintained in one place.
+ *
+ * <h2>{@code @McpTool} description 书写规范</h2>
+ * 所有工具描述统一使用中文，按固定段落顺序书写，缺失的段落直接省略（不要写空段落）：
+ * <pre>
+ * 【工具名】一句话说明这个工具做什么。
+ * 前置条件：调用本工具前必须先完成的事（如先 createNamedConnection 注册连接）。
+ * 使用场景：什么情况下该选它。
+ * 返回字段：字段名逐个列出，让模型无需试探即知返回结构。
+ * 不要用于：本工具不覆盖的场景，并指明该改用哪个工具（仅易混淆工具需要写）。
+ * 标签：[read, query, select]
+ * </pre>
+ * 标签值保持英文小写关键字，作为检索标识符而非描述文本。
  */
 public final class ToolParams {
 
@@ -34,12 +46,10 @@ public final class ToolParams {
      * when they know the connection; omit it when the AI can infer it.
      */
     public static final String CONNECTION_DESCRIPTION = """
-            BYOK connection name to target a specific database.\
-            REQUIRED when multiple connections are registered;\
-            OPTIONAL when only one connection exists (used automatically).\
-            Connection registration is asynchronous — after creating a connection with\
-            createNamedConnection, wait a moment before querying (use describeConnection first\
-            to confirm it is active).""";
+            BYOK 连接名，用于指定目标数据库。\
+            已注册多个连接时必填；只有一个连接时可省略（自动使用该连接）。\
+            注意：连接注册是异步的——调用 createNamedConnection 后请先用 describeConnection \
+            确认连接已就绪，再执行查询。""";
 
     /**
      * Standard SQL templates shared across tool classes.

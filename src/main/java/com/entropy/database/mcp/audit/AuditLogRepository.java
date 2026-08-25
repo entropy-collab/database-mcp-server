@@ -58,25 +58,26 @@ public class AuditLogRepository {
 
     /**
      * Insert a new audit log entry.
+     *
+     * <p>Propagates the failure on purpose. Swallowing it here made
+     * {@code QueryAuditLoggerImpl}'s {@code catch → dbAvailable = false} circuit breaker
+     * unreachable, so a permanently unwritable {@code audit_log} table produced one stack trace
+     * per query forever instead of degrading to file-only auditing after the first failure.
      */
     public void insert(AuditLogEntity entity) {
-        try {
-            jdbcTemplate.execute(CREATE_TABLE_SQL);
-            jdbcTemplate.update(
-                "INSERT INTO audit_log (tool, sql, rows, duration_ms, success, error, timestamp, connection_key) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                entity.tool(),
-                truncate(entity.sql(), 2000),
-                entity.rows(),
-                entity.durationMs(),
-                entity.success(),
-                truncate(entity.error(), 1000),
-                entity.timestamp(),
-                entity.connectionKey()
-            );
-        } catch (Exception e) {
-            log.warn("Failed to persist audit log entry", e);
-        }
+        jdbcTemplate.execute(CREATE_TABLE_SQL);
+        jdbcTemplate.update(
+            "INSERT INTO audit_log (tool, sql, rows, duration_ms, success, error, timestamp, connection_key) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            entity.tool(),
+            truncate(entity.sql(), 2000),
+            entity.rows(),
+            entity.durationMs(),
+            entity.success(),
+            truncate(entity.error(), 1000),
+            entity.timestamp(),
+            entity.connectionKey()
+        );
     }
 
     /**

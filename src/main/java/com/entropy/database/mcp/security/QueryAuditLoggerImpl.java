@@ -45,10 +45,42 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     // Bounded buffer: keeps last 100 audit entries for SSE/polling consumers
     private static final int MAX_BUFFER_SIZE = 100;
 
-    // Sensitive patterns to mask in audit SQL logs
-    private static final Pattern SENSITIVE_VALUE_PATTERN = Pattern.compile(
-            "(?i)('\\s*(password|passwd|pwd|secret|token|api_key|credential)\\s*'=\\s*)'[^']*'",
-            Pattern.CASE_INSENSITIVE);
+    /** Placeholder that replaces a secret while keeping the statement's shape readable. */
+    private static final String MASK = "'***'";
+
+    /** Field names whose value is a secret wherever they appear as {@code name = value}. */
+    private static final String SECRET_FIELDS =
+            "password|passwd|pwd|secret|token|api_key|apikey|credential|credentials";
+
+    /**
+     * Secret-bearing SQL and URL shapes, applied in order. A single "field = value" regex is not
+     * enough: Oracle's {@code IDENTIFIED BY} carries no {@code =}, JDBC URLs carry the password in
+     * the authority component, and {@code SET PASSWORD} puts a user reference between the keyword
+     * and the value.
+     */
+    private static final List<Masker> MASKERS = List.of(
+            // SET PASSWORD [FOR 'u'@'h'] = 'x'  →  the user reference is kept, the value is not
+            new Masker("(?i)(\\bSET\\s+PASSWORD\\b[^=;]{0,200}?=\\s*)(?:'[^']*'|\"[^\"]*\"|`[^`]*`|[^\\s;,)]+)", "$1" + MASK),
+            // IDENTIFIED BY "x" / IDENTIFIED BY x / IDENTIFIED BY VALUES 'hash'
+            new Masker("(?i)(\\bIDENTIFIED\\s+BY\\s+(?:VALUES\\s+)?)(?:'[^']*'|\"[^\"]*\"|`[^`]*`|[^\\s;,)]+)", "$1" + MASK),
+            // password = 'x' / "pwd"='x' / token: x  (optionally quoted field name, = or :=)
+            new Masker("(?i)(['\"`]?\\b(?:" + SECRET_FIELDS + ")\\b['\"`]?\\s*(?::=|=|:)\\s*)"
+                    + "(?:'[^']*'|\"[^\"]*\"|`[^`]*`|[^\\s;,)]+)", "$1" + MASK),
+            // jdbc:mysql://user:pass@host, and any other userinfo-carrying URL
+            new Masker("(//[^/@:\\s]{1,200}:)[^@/\\s]{1,200}(@)", "$1***$2"),
+            // Oracle easy-connect style user/pass@service
+            new Masker("(?i)(\\b[A-Za-z][A-Za-z0-9_$#]{0,127}/)[^\\s/@]{1,200}(@)", "$1***$2"));
+
+    /** A compiled secret shape and the replacement that keeps its structure. */
+    private record Masker(Pattern pattern, String replacement) {
+        Masker(String regex, String replacement) {
+            this(Pattern.compile(regex), replacement);
+        }
+
+        String apply(String sql) {
+            return pattern.matcher(sql).replaceAll(replacement);
+        }
+    }
 
     private final ConcurrentLinkedQueue<Map<String, Object>> buffer = new ConcurrentLinkedQueue<>();
 
@@ -65,22 +97,13 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
         this.persistenceEnabled = properties != null && properties.audit() != null && properties.audit().enabled();
         this.properties = properties;
         this.sqlAuditService = sqlAuditService;
-        // Check if default datasource (and thus audit_log table) is available
-        this.dbAvailable = auditLogRepository != null && canInsert(auditLogRepository);
+        // No probe insert: writing a synthetic "_probe_" row to test the table put a junk record in
+        // audit_log for every BYOK connection that was created. Availability is assumed here and
+        // revoked by the failure handling in log(), which only works because
+        // AuditLogRepository.insert propagates its failures instead of swallowing them.
+        this.dbAvailable = auditLogRepository != null;
         if (!dbAvailable) {
-            log.info("Default database not available or audit_log table missing; audit logs will be written to file only");
-        }
-    }
-
-    /**
-     * Light-weight probe: try a no-op insert to verify the audit_log table exists.
-     */
-    private boolean canInsert(AuditLogRepository repo) {
-        try {
-            repo.insert(new AuditLogEntity(null, "_probe_", "", 0, 0L, true, null, Instant.now(), null));
-            return true;
-        } catch (Exception e) {
-            return false;
+            log.info("No audit repository wired; audit logs will be written to file only");
         }
     }
 
@@ -178,10 +201,18 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     }
 
     /**
-     * Mask sensitive field values in SQL strings to prevent password/secret leakage in audit logs.
+     * Mask secrets in a SQL string before it reaches the audit log, the in-memory buffer or the
+     * {@code audit_log} table. Statement structure is preserved so the audit trail stays readable:
+     * only the value is replaced.
+     *
+     * <p>Package-private so the masking can be asserted directly.
      */
-    private static String maskSensitiveValues(String sql) {
+    static String maskSensitiveValues(String sql) {
         if (sql == null || sql.isEmpty()) return sql;
-        return SENSITIVE_VALUE_PATTERN.matcher(sql).replaceAll("$1***REDACTED***");
+        String masked = sql;
+        for (Masker masker : MASKERS) {
+            masked = masker.apply(masked);
+        }
+        return masked;
     }
 }

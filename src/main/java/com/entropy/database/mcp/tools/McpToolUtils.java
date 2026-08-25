@@ -15,7 +15,6 @@
  */
 package com.entropy.database.mcp.tools;
 
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -88,11 +87,19 @@ public final class McpToolUtils {
         return new LinkedHashMap<>();
     }
 
+    /**
+     * Builds a mutable response map from alternating key/value pairs.
+     * <p>
+     * Mutable by design: callers seed the common fields here and then add
+     * tool-specific entries with {@code put}. Values may be {@code null}
+     * (unlike {@link Map#of}), which matters for optional parameters such as
+     * an omitted connection name.
+     */
     public static Map<String, Object> context(Object... pairs) {
         Map<String, Object> ctx = new LinkedHashMap<>();
         for (int i = 0; i < pairs.length; i += 2) {
             ctx.put((String) pairs[i], pairs[i + 1]);
         }
-        return Collections.unmodifiableMap(ctx);
+        return ctx;
     }
 }

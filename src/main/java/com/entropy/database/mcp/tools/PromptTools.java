@@ -37,40 +37,40 @@ public class PromptTools {
 
     @McpPrompt(
             name = "database-quick-start",
-            title = "Database Quick Start",
-            description = "Step-by-step guide to connect to a database and run your first query. Use this when no database is configured yet."
+            title = "数据库快速上手",
+            description = "连接数据库并跑出第一条查询的分步指引。尚未配置任何数据库连接时使用。"
     )
     public McpSchema.GetPromptResult quickStart(
-            @McpArg(name = "databaseType", description = "Database type: h2, oracle, mysql, postgres, sqlserver, sqlite, db2", required = false) String databaseType) {
+            @McpArg(name = "databaseType", description = "数据库类型，取值：h2、oracle、mysql、postgres、sqlserver、sqlite、db2", required = false) String databaseType) {
 
         String type = (databaseType != null && !databaseType.isBlank()) ? databaseType.toLowerCase() : "your database";
 
         String guide = """
-                This MCP server has NO pre-configured database. You must create a connection first.
+                本 MCP 服务不预置任何数据库，必须先自行注册连接。
 
-                STEP 1: Create a named connection
-                Call createNamedConnection with:
-                  - name: a memorable name (e.g. "my-db")
-                  - jdbcUrl: the JDBC URL (e.g. "jdbc:postgresql://localhost:5432/mydb")
-                  - username: database username
-                  - password: database password
-                  - dialect: %s (or one of: h2, oracle, mysql, postgres, sqlserver, sqlite, db2)
+                第 1 步：注册命名连接
+                调用 createNamedConnection，参数如下：
+                  - name：自定义连接名，后续所有工具用它引用这个库（如 "my-db"）
+                  - jdbcUrl：JDBC 连接串（如 "jdbc:postgresql://localhost:5432/mydb"）
+                  - username：数据库用户名
+                  - password：数据库密码
+                  - dialect：%s（取值 h2、oracle、mysql、postgres、sqlserver、sqlite、db2、generic；留空则按 jdbcUrl 自动推断）
 
-                STEP 2: Use the connection
-                Pass the connection name directly to each tool.
-                Example: listTables("PUBLIC", "my-db")
+                第 2 步：确认连接已就绪
+                连接注册是异步的。调用 describeConnection 确认状态后再继续，否则查询可能报连接不存在。
 
-                STEP 3: Explore the database
-                Call listTables to see available tables, then describeTable to inspect columns.
+                第 3 步：探查库结构
+                先 listSchemas 拿 Schema 清单，再 listTables 看表，最后 describeTable 看字段类型。
+                表名拼写不确定时用 searchTables 跨 Schema 模糊搜索。
 
-                STEP 4: Run queries
-                Call executeQuery with your SQL. Use executeQueryWithFilter for parameterized queries.
+                第 4 步：执行查询
+                SQL 里不含外部输入值时用 executeQuery；条件里带用户提供的值时一律用 executeQueryWithFilter（命名占位符 :name，防注入）。
 
-                TIP: Always pass the connection name explicitly for clarity.
+                提示：已注册多个连接时，每个工具都要显式传 connection 参数。
                 """.formatted(type);
 
         return new McpSchema.GetPromptResult(
-                "Database Quick Start Guide",
+                "数据库快速上手指南",
                 List.of(new McpSchema.PromptMessage(
                         McpSchema.Role.ASSISTANT,
                         new McpSchema.TextContent(guide)
@@ -80,14 +80,14 @@ public class PromptTools {
 
     @McpPrompt(
             name = "connect-to-database",
-            title = "Connect to Database",
-            description = "Detailed instructions for creating a BYOK database connection with the correct JDBC URL format."
+            title = "注册数据库连接",
+            description = "按数据库类型给出正确的 JDBC 连接串格式，并说明 BYOK 连接的注册与校验步骤。"
     )
     public McpSchema.GetPromptResult connectToDatabase(
-            @McpArg(name = "databaseType", description = "Database type: h2, oracle, mysql, postgres, sqlserver, sqlite, db2", required = true) String databaseType) {
+            @McpArg(name = "databaseType", description = "数据库类型，取值：h2、oracle、mysql、postgres、sqlserver、sqlite、db2", required = true) String databaseType) {
 
         String urlTemplate = switch (databaseType.toLowerCase()) {
-            case "h2" -> "jdbc:h2:mem:testdb (in-memory) or jdbc:h2:file:/path/to/db (file-based)";
+            case "h2" -> "jdbc:h2:mem:testdb（内存库）或 jdbc:h2:file:/path/to/db（文件库）";
             case "oracle" -> "jdbc:oracle:thin:@//host:port/service_name";
             case "mysql" -> "jdbc:mysql://host:port/database?useSSL=false&serverTimezone=UTC";
             case "postgres", "postgresql" -> "jdbc:postgresql://host:port/database";
@@ -98,24 +98,24 @@ public class PromptTools {
         };
 
         String guide = """
-                To connect to a %s database:
+                连接 %s 数据库的步骤：
 
-                1. Prepare your JDBC URL:
+                1. 准备 JDBC 连接串：
                    %s
 
-                2. Call createNamedConnection with:
-                   - name: choose a name (e.g. "%s-prod")
-                   - jdbcUrl: the URL from step 1
-                   - username: your database username
-                   - password: your database password
-                   - dialect: %s
+                2. 调用 createNamedConnection，参数：
+                   - name：自定义连接名（如 "%s-prod"）
+                   - jdbcUrl：第 1 步得到的连接串
+                   - username：数据库用户名
+                   - password：数据库密码
+                   - dialect：%s
 
-                3. Verify the connection:
-                   Call describeConnection with the name you chose.
+                3. 校验连接：
+                   用第 2 步的连接名调用 describeConnection。注册是异步的，状态就绪后再执行查询。
                 """.formatted(databaseType.toLowerCase(), urlTemplate, databaseType.toLowerCase(), databaseType.toLowerCase());
 
         return new McpSchema.GetPromptResult(
-                "Connect to " + databaseType.toUpperCase() + " Database",
+                "注册 " + databaseType.toUpperCase() + " 数据库连接",
                 List.of(new McpSchema.PromptMessage(
                         McpSchema.Role.ASSISTANT,
                         new McpSchema.TextContent(guide)
@@ -125,45 +125,42 @@ public class PromptTools {
 
     @McpPrompt(
             name = "query-workflow",
-            title = "Query Workflow",
-            description = "Recommended workflow for exploring and querying a database. Shows how to use listTables, describeTable, executeQuery, and executeQueryWithFilter together."
+            title = "查询工作流",
+            description = "探查并查询数据库的推荐流程，说明 listSchemas、listTables、describeTable、executeQuery、executeQueryWithFilter 如何配合使用。"
     )
     public McpSchema.GetPromptResult queryWorkflow() {
 
         String guide = """
-                Recommended workflow for database exploration and querying:
+                数据库探查与查询的推荐流程：
 
-                1. Create a connection (if not already done):
-                   Call createNamedConnection with your database details.
+                1. 注册连接（若尚未注册）
+                   调用 createNamedConnection，再用 describeConnection 确认已就绪。
 
-                2. List available tables:
-                   Call listTables with the connection name, e.g. listTables("PUBLIC", "my-db").
-                   Returns table names and row counts.
+                2. 列出 Schema
+                   调用 listSchemas，拿到可用 Schema 名称。
 
-                3. Inspect a table's schema:
-                   Call describeTable with the table name and connection name.
-                   Returns column names, data types, and nullability.
+                3. 列出表
+                   调用 listTables，传入 Schema 名与连接名，返回表名、表类型与行数估算。
+                   表名拼写不确定时改用 searchTables 跨 Schema 模糊搜索。
 
-                4. Run a simple query:
-                   Call executeQuery with SQL like "SELECT * FROM table_name WHERE ROWNUM <= 10".
-                   Pass the connection name.
+                4. 查看表结构
+                   调用 describeTable，传入表名与连接名，返回列名、数据类型、是否可空。
 
-                5. Run a parameterized query (safer):
-                   Call executeQueryWithFilter with:
-                   - sql: "SELECT * FROM table_name WHERE id = :id"
-                   - params: {"id": 123}
-                   - connection: your connection name
-                   This prevents SQL injection.
+                5. 执行查询
+                   SQL 中不含外部输入值：调用 executeQuery。
+                   条件里带用户提供的值：调用 executeQueryWithFilter，sql 用命名占位符（"SELECT * FROM t WHERE id = :id"），params 传 {"id": 123}，可防 SQL 注入。
 
-                6. Paginate through large results:
-                   Call executeQuery with maxRows=100.
-                   If hasMore=true, use the continuationToken for the next page.
+                6. 分页取大结果集
+                   executeQuery 传 maxRows 控制单页行数；返回的 hasMore=true 时，把 continuationToken 传回去取下一页。
 
-                TIP: Always pass the connection name directly to each tool for clarity.
+                7. 多条独立查询
+                   用 batchQuery 一次并发执行（最多 5 条），避免串行等待。
+
+                提示：写 SQL 前先调用 getDatabaseInfo 确认数据库类型，再按对应方言写分页与函数语法。
                 """;
 
         return new McpSchema.GetPromptResult(
-                "Database Query Workflow",
+                "数据库查询工作流",
                 List.of(new McpSchema.PromptMessage(
                         McpSchema.Role.ASSISTANT,
                         new McpSchema.TextContent(guide)
@@ -173,46 +170,54 @@ public class PromptTools {
 
     @McpPrompt(
             name = "dba-guided-tasks",
-            title = "DBA Guided Tasks",
+            title = "DBA 运维任务导航",
             description = """
-                Interactive workflow for common DBA operations: health monitoring, performance tuning, backup/restore, and data quality checks.
-                Use this when the user asks about database maintenance, troubleshooting, or optimization.
+                常见 DBA 操作的分类导航：健康巡检、性能调优、备份恢复、数据质量。
+                用户询问数据库维护、故障排查或优化时使用。
                 """)
     public McpSchema.GetPromptResult dbaGuidedTasks() {
         String guide = """
-                ## Database Administration - Guided Tasks
+                ## 数据库运维任务导航
 
-                Select a category to get step-by-step guidance:
+                先调用 listConnections 看有哪些库可用，再选择下面的分类。
+                注意：本节大部分工具依赖 Oracle 数据字典（dba_* / v$ 视图），需要 DBA 权限；非 Oracle 库上多数会报「不支持该方言」。
 
-                ### 1. Health Monitoring
-                - Call describeConnection to check all registered connections
-                - Call showBlockingTree to identify blocking chains
-                - Call showLocks to find lock contention
-                - Call getPoolStats to review connection pool metrics
-                _What would you like to monitor?_
+                ### 1. 健康巡检
+                - checkHealth：连通性探活，全方言支持
+                - listActiveSessions：当前活动会话
+                - showLocks：锁竞争明细
+                - showBlockingTree：阻塞链（定位是谁堵住了谁）
+                - getPoolStats：连接池指标
+                排查顺序建议：showBlockingTree 找到阻塞源头 → showLocks 看具体锁对象 → listActiveSessions 确认会话身份 → 必要时 killSession（不可恢复，未提交事务会回滚）。
 
-                ### 2. Performance Tuning
-                - Call analyzeQuery with SQL to get execution plan
-                - Call recommendIndexes with table name to find missing indexes
-                - Call explainPlan to understand query execution
-                _Which query do you want to optimize?_
+                ### 2. 性能调优
+                - assessQueryRisk：先给 SQL 打风险分（不执行 SQL）
+                - explainPlan：取数据库原生执行计划（riskLevel=high 时必须先做这步）
+                - interpretPlan：把计划文本翻成可读解读
+                - recommendIndexes：按表名给索引建议
+                - suggestRewrites：按 SQL 给重写建议（纯静态分析，不连库）
+                - analyzeQuery：一站式跑完计划 + 索引 + 重写建议
+                想一次拿全结论用 analyzeQuery；只要原始计划用 explainPlan。
 
-                ### 3. Backup & Restore
-                - Call backupSchema to create a schema snapshot
-                - Call backupTable to export a specific table
-                - Call quickRestore to restore from a recent backup
-                _Which table or schema needs backing up?_
+                ### 3. 备份与恢复
+                - backupTable：导出单表数据
+                - backupSchema：导出单表 DDL（仅 Oracle 支持）
+                - listBackups / getBackup：查备份清单与详情
+                - restoreBackup / quickRestore：从备份恢复（清空目标表用 DELETE，单事务，失败可回滚）
+                - deleteBackup / cleanupBackups：删除备份，不可恢复
 
-                ### 4. Data Quality
-                - Call checkQuality on a table to run null/range/enum checks
-                - Call generateCatalog to build a data catalog for a table
-                _Which table needs quality checking?_
+                ### 4. 数据质量与资产
+                - checkTableQuality：跑空值率与重复行检查（内置检查始终执行，customRules 是追加）
+                - listQualityRuleTemplates：先看可用规则模板再执行检查
+                - getQualityAlertSummary：看告警汇总
+                - generateCatalog / scanSchema / searchAssets：生成数据目录、扫描入库、检索已有资产
+                - classifyColumn / listSensitiveColumns：敏感字段识别
 
-                TIP: Start by calling describeConnection to see what databases are available.
+                需要哪一类？告诉我目标库和表名，我来执行。
                 """;
 
         return new McpSchema.GetPromptResult(
-                "DBA Guided Tasks",
+                "DBA 运维任务导航",
                 List.of(new McpSchema.PromptMessage(
                         McpSchema.Role.ASSISTANT,
                         new McpSchema.TextContent(guide)
@@ -222,41 +227,42 @@ public class PromptTools {
 
     @McpPrompt(
             name = "sql-best-practices",
-            title = "SQL Best Practices Review",
+            title = "SQL 编写规范检查",
             description = """
-                Get guidance on writing safe, efficient SQL. Covers parameterization, pagination, index usage, and avoiding common anti-patterns.
-                Use this when drafting queries or reviewing SQL for security/performance issues.
+                如何写出安全、高效的 SQL：参数化、分页、索引利用、方言兼容与常见反模式。
+                起草查询或复核 SQL 的安全性与性能时使用。
                 """)
     public McpSchema.GetPromptResult sqlBestPractices() {
         String guide = """
-                ## SQL Best Practices Checklist
+                ## SQL 编写规范检查清单
 
-                ### Security
-                1. **Always use parameterized queries** — prefer executeQueryWithFilter over raw SQL with string concatenation
-                2. **Never concatenate user input into SQL** — use :param placeholders
-                3. **Validate identifiers** — table/column names should pass [a-zA-Z0-9_]+ (check via validateIdentifier)
-                4. **Limit result sets** — always set maxRows to avoid memory issues
+                ### 安全
+                1. 一律用参数化查询——条件里带外部输入值时用 executeQueryWithFilter，不要用 executeQuery 拼字符串
+                2. 严禁把用户输入拼进 SQL——用 :name 命名占位符，实参放 params
+                3. 表名、列名必须是合法标识符（字母、数字、下划线），本服务会做校验，非法标识符直接拒绝
+                4. 始终设置 maxRows，避免大结果集拖垮内存
 
-                ### Performance
-                5. **Check execution plan first** — call explainPlan before running expensive queries
-                6. **Use pagination** — set maxRows and use continuationToken for large results
-                7. **Select specific columns** — avoid SELECT * in production
-                8. **Add WHERE clauses** — never run full-table scans without filters
-                9. **Avoid N+1 queries** — use batchQuery (max 5 concurrent) instead of looping
+                ### 性能
+                5. 先评估再执行——assessQueryRisk 打分，riskLevel=high 必须先 explainPlan
+                6. 大结果集走分页——executeQuery 的 maxRows + continuationToken
+                7. 只查需要的列，避免 SELECT *
+                8. 不要无 WHERE 全表扫描
+                9. 避免 N+1——多条独立查询用 batchQuery 并发（最多 5 条），不要循环调用
 
-                ### Compatibility
-                10. **Dialect-specific syntax** — ROW_NUMBER() is not supported in Oracle; use ROWNUM instead
-                11. **Pagination differs** — MySQL uses LIMIT/OFFSET, Oracle uses ROWNUM, PostgreSQL uses LIMIT/OFFSET
+                ### 方言兼容
+                10. 先 getDatabaseInfo 确认数据库类型，再按对应方言写语法
+                11. 分页语法不同：MySQL / PostgreSQL 用 LIMIT OFFSET，Oracle 用 ROWNUM 或 FETCH FIRST n ROWS ONLY，SQL Server 用 TOP 或 OFFSET FETCH
+                12. information_schema 只有 MySQL / PostgreSQL / SQL Server 有；Oracle 要查 user_tables / all_tab_columns。跨方言取元数据请直接用 listTables / describeTable，不要自己写 SQL
 
-                ### Workflow
-                Would you like me to:
-                - Review a specific SQL query for best practices?
-                - Show the execution plan for a query?
-                - Recommend indexes for a slow table?
+                ### 下一步
+                需要我做哪一项：
+                - 复核某条 SQL 是否符合上述规范
+                - 取某条 SQL 的执行计划并解读
+                - 给某张慢表推荐索引
                 """;
 
         return new McpSchema.GetPromptResult(
-                "SQL Best Practices",
+                "SQL 编写规范",
                 List.of(new McpSchema.PromptMessage(
                         McpSchema.Role.ASSISTANT,
                         new McpSchema.TextContent(guide)
@@ -266,46 +272,55 @@ public class PromptTools {
 
     @McpPrompt(
             name = "etl-pipeline-guide",
-            title = "ETL Pipeline Guide",
+            title = "ETL 数据管道指南",
             description = """
-                Step-by-step guide for building ETL pipelines: transform-and-insert, query-to-table, and batch upsert workflows.
-                Use this when importing data or building data transformation pipelines.
+                搭建 ETL 管道的分步指引：表到表转换写入、查询结果落表、批量幂等写入、跨库搬数与异步作业。
+                导入数据或构建数据加工流程时使用。
                 """)
     public McpSchema.GetPromptResult etlPipelineGuide() {
         String guide = """
-                ## ETL Pipeline Workflow
+                ## ETL 数据管道工作流
 
-                ### Option A: Transform and Insert (recommended)
-                Call transformAndInsert with:
-                - sourceSql: SELECT query to read source data
-                - targetTable: destination table name (will be created if not exists)
-                - batchSize: rows per batch (default 1000)
-                Example: transformAndInsert("SELECT * FROM src_table", "dest_table", 500)
+                前置条件：ETL 系列工具需要开启 entropy.mcp.gateway.enabled=true，否则这些工具不会注册。
+                所有方案都需要先 createNamedConnection 注册连接，并用 describeConnection 确认就绪。
 
-                ### Option B: Query to Table
-                Call queryToTable with:
-                - sourceSql: complex query with JOINs, aggregations
-                - targetTable: where to store results
-                - deleteExisting: true to clear old data first
-                Example: queryToTable("SELECT ... FROM ... GROUP BY ...", "daily_report", true)
+                ### 方案 A：表到表转换写入（同库）
+                调用 transformAndInsert：
+                - connectionName：连接名
+                - sourceTable / targetTable：源表与目标表（目标表须已存在）
+                - columnMapping：列映射数组，每项格式 源列:目标列[:转换]，转换可选 upper、lower、trim、int、long、double
+                - whereClause：可选过滤条件，只写 WHERE 之后的部分
+                示例 columnMapping：["id:ID", "name:FULL_NAME:upper"]
 
-                ### Option C: Batch Upsert
-                Call batchUpsert with:
-                - upsertSql: INSERT ... ON CONFLICT ... UPDATE (SQL Server: MERGE)
-                - rows: list of row maps
-                Example: batchUpsert("INSERT INTO t (id,name) VALUES (:id,:name) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name", rows, "my-conn")
+                ### 方案 B：查询结果落表（同库，自动分页）
+                调用 exportQueryToTable：
+                - sourceSql：源 SELECT 语句，会被分页执行
+                - targetTable：目标表，列名需与源结果集一致
+                适合带 JOIN、聚合的复杂查询结果物化。注意翻页有上限，触顶时返回的 rowCount 是部分结果。
 
-                ### Option D: SQL Template Execution
-                Call executeSqlTemplate for pre-built patterns:
-                - query_by_id: fetch single record by primary key
-                - list_by_page: paginated list query
-                - count_by_condition: conditional count
+                ### 方案 C：跨库搬数
+                调用 insertQueryResult：
+                - sourceConnectionName / sourceSql：源库连接名与查询
+                - targetConnectionName / targetTable：目标库连接名与目标表
+                注意源结果整体读入内存，batchSize 只作用于写入侧，大表请自行按时间分片多次调用。
 
-                Would you like guidance on a specific pipeline step?
+                ### 方案 D：外部数据写入
+                - insertData：纯插入，rows 传行数组（每行是列名到值的 Map），列集合以第一行为准
+                - upsertData：按 keyColumns 匹配，存在则更新、不存在则插入，可重复执行不产生重复数据
+
+                ### 方案 E：多步骤异步作业
+                调用 submitEtlJob 提交作业定义（含 id、name、steps），步骤 type 取值：query_to_table、query_to_json、read、transform、ddl、upsert、export，支持 dependsOn 声明依赖。
+                提交后立即返回，必须用 getJobStatus 轮询状态；listJobs 看全部作业。
+                注意 stopJob 当前只登记停止请求，不会真正中断正在执行的作业。
+
+                ### 写入前后建议
+                写入前用 validateDataQuality 或 checkTableQuality 校验源数据；改结构前用 backupData 做数据快照。
+
+                需要哪个方案？告诉我源和目标，我来生成具体调用。
                 """;
 
         return new McpSchema.GetPromptResult(
-                "ETL Pipeline Guide",
+                "ETL 数据管道指南",
                 List.of(new McpSchema.PromptMessage(
                         McpSchema.Role.ASSISTANT,
                         new McpSchema.TextContent(guide)

@@ -55,11 +55,18 @@ public class QueryAnalysisTools extends McpToolBase {
         this.adminOperations = adminOperations;
     }
 
-    @McpTool(description = "获取 SQL 执行计划，分析性能并返回优化建议（先计划后执行方案）",
+    @McpTool(description = """
+            【获取执行计划】对 SELECT 语句执行数据库原生 EXPLAIN，返回原始计划行与规则告警。只跑 EXPLAIN，不执行原查询。
+            前置条件：先调用 createNamedConnection 注册数据库连接；connection 与 sql 均必填；sql 必须以 SELECT 或 WITH 开头，否则报安全校验错误。
+            使用场景：assessQueryRisk 判定 risk_level=high（必须）或 medium（建议）时，先取计划再决定是否执行；核对是否发生全表扫描。
+            返回字段：connection、dialect、originalSql、explainSql（实际下发的 EXPLAIN 语句）、plan（计划行数组，每项为列名到值的键值对；SQL Server 因计划走会话输出，只返回一条 note 提示）、warnings（全表扫描、嵌套循环、哈希连接、排序、索引跳过扫描等提示）、success。
+            不要用于：非 SELECT 语句；方言不支持 EXPLAIN 时会返回 EXPLAIN_NOT_SUPPORTED 错误；需要中文逐行解读（把 plan 文本交给 interpretPlan）；需要一次拿到索引与重写建议（用 analyzeQuery）。
+            标签：[read, query, explain, plan, performance]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> explainPlan(
-            @McpToolParam(description = "连接名称") String connection,
-            @McpToolParam(description = "要分析的 SQL 语句") String sql) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = "要分析的 SQL 语句，必填；必须是 SELECT 或以 WITH 开头的查询") String sql) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
             validateRequired(sql, "sql");
@@ -87,24 +94,19 @@ public class QueryAnalysisTools extends McpToolBase {
     }
 
     @McpTool(description = """
-            【查询风险评估】评估 SQL 查询的风险等级（low/medium/high），辅助决策是否需要预检执行计划。
-            
-            评分规则：
-            - high: 总分 > 5（如无 WHERE、大数据量表、嵌套子查询）
-            - medium: 总分 3-5
-            - low: 总分 ≤ 2
-            
-            使用规则：
-            - risk_level=high 时必须先调用 explainPlan 分析再执行
-            - risk_level=medium 时建议调用 explainPlan 检查
-            - risk_level=low 可直接执行
-            
-            返回字段：riskScore、riskLevel、tables（各表行数）、suggestions、recommendation
+            【查询风险评估】不执行 SQL，仅按语句结构与所涉表的行数估算风险等级（low / medium / high），用于决定是否需要先看执行计划。
+            前置条件：先调用 createNamedConnection 注册数据库连接；connection 与 sql 均必填。表行数按表名缓存 10 分钟，取不到行数的表不计分。
+            评分规则：所涉每张表按行数累加——超 1000 万 +3、超 100 万 +2、超 10 万 +1；无 WHERE +3；有 ORDER BY 且无 WHERE +2；含嵌套子查询 +2；含 JOIN +1；含 GROUP BY +1；含 DISTINCT +1；含 UNION +1。
+            等级划分：总分 ≤2 为 low；3-5 为 medium；>5 为 high。
+            决策规则：riskLevel=high 必须先调用 explainPlan 分析执行计划再执行；riskLevel=medium 建议先调用 explainPlan 检查；riskLevel=low 可直接执行。
+            返回字段：connection、dialect、sql、tables（表名 → 估算行数）、riskScore、riskLevel、suggestions（针对性优化建议数组）、recommendation（是否需要先看执行计划的结论）、success。
+            不要用于：取执行计划本身（用 explainPlan）；需要索引或重写建议（用 analyzeQuery / recommendIndexes / suggestRewrites）。
+            标签：[read, query, risk, assessment, performance]
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> assessQueryRisk(
-            @McpToolParam(description = "连接名称") String connection,
-            @McpToolParam(description = "要评估的 SQL 语句") String sql) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = "要评估的 SQL 语句，必填；支持带 WITH 子句的查询（会从主查询的 FROM / JOIN 中提取表名）") String sql) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
             validateRequired(sql, "sql");

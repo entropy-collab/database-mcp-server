@@ -16,11 +16,14 @@
 package com.entropy.database.mcp.quality;
 
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.properties.QualityProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -41,14 +44,28 @@ public class QualityCheckService {
     private final QualityRuleRegistry ruleRegistry;
     private final QualityProperties properties;
     private final QualityAlertService alertService;
+    /**
+     * Whether {@code CUSTOM_SQL} rules may run. Off by default: the rule body is caller-supplied
+     * SQL, and with an empty {@code allowed-tables} whitelist it can read any table the connection
+     * can see. Kept as a {@code @Value} rather than a new field on {@link QualityProperties} so the
+     * shared properties records stay untouched.
+     */
+    private final boolean customSqlEnabled;
+    /** The SQL-level table whitelist; a CUSTOM_SQL rule is refused unless it is non-empty. */
+    private final List<String> allowedTables;
 
     public QualityCheckService(QualityRuleRegistry ruleRegistry,
                                DatabaseProperties dbProperties,
-                               QualityAlertService alertService) {
+                               QualityAlertService alertService,
+                               @Value("${entropy.mcp.database.quality.custom-sql-enabled:false}")
+                               boolean customSqlEnabled) {
         this.ruleRegistry = ruleRegistry;
         this.properties = dbProperties != null && dbProperties.quality() != null
                 ? dbProperties.quality() : new QualityProperties();
         this.alertService = alertService;
+        this.customSqlEnabled = customSqlEnabled;
+        this.allowedTables = dbProperties != null && dbProperties.security() != null
+                ? dbProperties.security().allowedTables() : List.of();
     }
 
     /**
@@ -67,11 +84,15 @@ public class QualityCheckService {
             return emptyReport(tableName, schema, connectionKey);
         }
 
+        // Caller-supplied rule columns reach SQL by interpolation, so they are checked before any
+        // probe runs: a rejected column must fail the call, not be swallowed by the per-rule catch.
+        validateRuleColumns(rules, dialect);
+
         List<QualityIssue> issues = new ArrayList<>();
         List<QualityRule> executedRules = new ArrayList<>();
 
         // Discover columns
-        List<String> columns = queryColumns(db, connectionKey, tableName, dialect);
+        List<String> columns = discoveredColumns(db, connectionKey, tableName, dialect);
 
         // NULL rate per column
         for (String col : columns) {
@@ -93,7 +114,8 @@ public class QualityCheckService {
 
         // Duplicate check on all columns
         if (!columns.isEmpty()) {
-            String columnList = columns.stream().map(dialect::quote).reduce((a, b) -> a + ", " + b).orElse("");
+            String columnList = columns.stream().map(col -> quoteColumn(col, dialect))
+                    .reduce((a, b) -> a + ", " + b).orElse("");
             Long dupCount = queryDuplicateGroups(db, connectionKey, tableName, columnList, dialect);
             if (dupCount != null && dupCount > 0) {
                 double dupRatePct = totalRows > 0 ? (dupCount * 100.0 / totalRows) : 0;
@@ -167,7 +189,7 @@ public class QualityCheckService {
         try {
             String placeholders = allowed.stream().map(x -> "?").reduce((a, b) -> a + ", " + b).orElse("");
             String sql = "SELECT COUNT(*) FROM " + dialect.quote(tableName)
-                    + " WHERE " + dialect.quote(col) + " NOT IN (" + placeholders + ")";
+                    + " WHERE " + quoteColumn(col, dialect) + " NOT IN (" + placeholders + ")";
             long violationCount = queryCount(db, connection, sql, allowed.toArray());
             double violationRate = totalRows > 0 ? (violationCount * 100.0 / totalRows) : 0;
             return new QualityIssue(rule.id(), rule.name(), rule.type(), col,
@@ -188,18 +210,19 @@ public class QualityCheckService {
         Number max = (Number) rule.params().get("max");
         if (min == null && max == null) return null;
         try {
+            String quotedColumn = quoteColumn(col, dialect);
             StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM ")
                     .append(dialect.quote(tableName))
                     .append(" WHERE ")
-                    .append(dialect.quote(col))
+                    .append(quotedColumn)
                     .append(" IS NOT NULL");
             Object[] params = new Object[0];
             if (min != null) {
-                sql.append(" AND ").append(dialect.quote(col)).append(" < ?");
+                sql.append(" AND ").append(quotedColumn).append(" < ?");
                 params = appendParam(params, min);
             }
             if (max != null) {
-                sql.append(" AND ").append(dialect.quote(col)).append(" > ?");
+                sql.append(" AND ").append(quotedColumn).append(" > ?");
                 params = appendParam(params, max);
             }
             long violationCount = queryCount(db, connection, sql.toString(), params);
@@ -219,6 +242,19 @@ public class QualityCheckService {
                                            QualityRule rule, long totalRows) {
         String sql = (String) rule.params().get("sql");
         if (sql == null) return null;
+        // The rule body is caller-supplied SQL. It is only run when explicitly enabled and when a
+        // table whitelist is configured, so it cannot be used to read arbitrary tables.
+        if (!customSqlEnabled) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "CUSTOM_SQL quality rules are disabled. Set "
+                            + "entropy.mcp.database.quality.custom-sql-enabled=true and configure "
+                            + "entropy.mcp.database.security.allowed-tables to allow rule '" + rule.id() + "'.");
+        }
+        if (allowedTables.isEmpty()) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "CUSTOM_SQL quality rule '" + rule.id() + "' requires a non-empty "
+                            + "entropy.mcp.database.security.allowed-tables whitelist.");
+        }
         try {
             List<Map<String, Object>> rows = db.queryRows(sql, connection);
             // A rule whose query yields nothing is reported as no issue, the same as one that fails.
@@ -236,6 +272,59 @@ public class QualityCheckService {
 
     // ─── Helper Queries ──────────────────────────────────────────────────
 
+    /**
+     * Rejects a rule whose column cannot be a plain identifier, and a CUSTOM_SQL rule that is not
+     * explicitly enabled. Run before any probe, so the failure reaches the caller instead of being
+     * absorbed by the per-rule {@code catch} in {@link #check}.
+     */
+    private void validateRuleColumns(List<QualityRule> rules, DatabaseDialect dialect) {
+        if (rules == null) return;
+        for (QualityRule rule : rules) {
+            if (!rule.enabled()) continue;
+            if (rule.column() != null) {
+                quoteColumn(rule.column(), dialect);
+            }
+            Object columns = rule.params().get("columns");
+            if (columns instanceof Collection<?> columnList) {
+                for (Object column : columnList) {
+                    quoteColumn(column == null ? null : column.toString(), dialect);
+                }
+            }
+            if (rule.type() == QualityRule.RuleType.CUSTOM_SQL) {
+                assertCustomSqlAllowed(rule);
+            }
+        }
+    }
+
+    private void assertCustomSqlAllowed(QualityRule rule) {
+        if (!customSqlEnabled) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "CUSTOM_SQL quality rules are disabled. Set "
+                            + "entropy.mcp.database.quality.custom-sql-enabled=true and configure "
+                            + "entropy.mcp.database.security.allowed-tables to allow rule '" + rule.id() + "'.");
+        }
+        if (allowedTables.isEmpty()) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "CUSTOM_SQL quality rule '" + rule.id() + "' requires a non-empty "
+                            + "entropy.mcp.database.security.allowed-tables whitelist.");
+        }
+    }
+
+    /**
+     * Validate a column name and quote it for the dialect.
+     *
+     * <p>Quoting alone is not a boundary: a column name is interpolated into these probes, and
+     * whether a delimiter inside it is escaped is the dialect's business, not this class's. So the
+     * name must first be a plain identifier.
+     */
+    private String quoteColumn(String column, DatabaseDialect dialect) {
+        if (column == null || !dialect.isValidIdentifier(column)) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "Invalid column name: " + column);
+        }
+        return dialect.quote(column);
+    }
+
     private long queryRowCount(DatabaseReadOperations db, String connection, String tableName,
                                DatabaseDialect dialect) {
         try {
@@ -244,6 +333,25 @@ public class QualityCheckService {
             log.warn("Failed to count rows in table '{}': {}", tableName, e.getMessage(), e);
             return 0;
         }
+    }
+
+    /**
+     * Lists the table's columns, dropping any name that is not a plain identifier: such a column
+     * cannot be interpolated into the probes below safely, and skipping one check is preferable to
+     * failing the whole report.
+     */
+    private List<String> discoveredColumns(DatabaseReadOperations db, String connection, String tableName,
+                                           DatabaseDialect dialect) {
+        List<String> columns = queryColumns(db, connection, tableName, dialect);
+        List<String> usable = new ArrayList<>(columns.size());
+        for (String column : columns) {
+            if (column != null && dialect.isValidIdentifier(column)) {
+                usable.add(column);
+            } else {
+                log.warn("Skipping column '{}' of table '{}': not a plain identifier", column, tableName);
+            }
+        }
+        return usable;
     }
 
     private List<String> queryColumns(DatabaseReadOperations db, String connection, String tableName,
@@ -263,21 +371,29 @@ public class QualityCheckService {
                                 String column, DatabaseDialect dialect) {
         try {
             return queryCount(db, connection, "SELECT COUNT(*) FROM " + dialect.quote(tableName)
-                    + " WHERE " + dialect.quote(column) + " IS NULL");
+                    + " WHERE " + quoteColumn(column, dialect) + " IS NULL");
         } catch (Exception e) {
             log.warn("Null check failed for column '{}': {}", column, e.getMessage(), e);
             return 0;
         }
     }
 
+    /**
+     * Counts duplicate groups.
+     *
+     * <p>The derived table is aliased: MySQL and PostgreSQL reject an unaliased one outright
+     * ("Every derived table must have its own alias"), which made this check silently answer 0 on
+     * both. The failure path now carries the cause and is logged at warn, so a check that cannot
+     * run is visible instead of looking like a clean result.
+     */
     private Long queryDuplicateGroups(DatabaseReadOperations db, String connection, String tableName,
                                       String columnList, DatabaseDialect dialect) {
         try {
             return queryCount(db, connection,
                     "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + dialect.quote(tableName)
-                            + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)");
+                            + " GROUP BY " + columnList + " HAVING COUNT(*) > 1) t");
         } catch (Exception e) {
-            log.warn("Duplicate check failed for table '{}'", tableName);
+            log.warn("Duplicate check failed for table '{}': {}", tableName, e.getMessage(), e);
             return 0L;
         }
     }

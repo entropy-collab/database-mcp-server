@@ -18,7 +18,40 @@ package com.entropy.database.mcp.util;
 import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.exception.ErrorCode;
 
+import net.sf.jsqlparser.expression.DateValue;
+import net.sf.jsqlparser.expression.DoubleValue;
+import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.LongValue;
+import net.sf.jsqlparser.expression.NotExpression;
+import net.sf.jsqlparser.expression.NullValue;
+import net.sf.jsqlparser.expression.Parenthesis;
+import net.sf.jsqlparser.expression.SignedExpression;
+import net.sf.jsqlparser.expression.StringValue;
+import net.sf.jsqlparser.expression.TimeValue;
+import net.sf.jsqlparser.expression.TimestampValue;
+import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
+import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
+import net.sf.jsqlparser.expression.operators.relational.Between;
+import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThan;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals;
+import net.sf.jsqlparser.expression.operators.relational.InExpression;
+import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
+import net.sf.jsqlparser.expression.operators.relational.LikeExpression;
+import net.sf.jsqlparser.expression.operators.relational.MinorThan;
+import net.sf.jsqlparser.expression.operators.relational.MinorThanEquals;
+import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
+import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.schema.Column;
+import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.select.PlainSelect;
+
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.Collection;
+import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -71,8 +104,32 @@ public final class ValidationUtils {
         }
     }
 
-    public static void requireNotBlank(String value, String paramName) {
+    /** Pattern for an ISO-8601 calendar date; the value must also be a real date. */
+    private static final Pattern ISO_DATE_PATTERN = Pattern.compile("\\d{4}-\\d{2}-\\d{2}");
+
+    /**
+     * Validate a date that is going to be inlined into SQL (Oracle {@code DATE 'yyyy-mm-dd'}).
+     *
+     * <p>Shape and calendar validity are both checked, so {@code 2026-02-30} or
+     * {@code 2026-01-01' OR '1'='1} cannot reach the statement.
+     */
+    public static void validateIsoDate(String value, String paramName) {
         if (value == null || value.isBlank()) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED, paramName + " cannot be blank");
+        }
+        if (!ISO_DATE_PATTERN.matcher(value).matches()) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    paramName + " must be in YYYY-MM-DD format: " + value);
+        }
+        try {
+            LocalDate.parse(value);
+        } catch (DateTimeParseException e) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    paramName + " is not a valid calendar date: " + value, e);
+        }
+    }
+
+    public static void requireNotBlank(String value, String paramName) {        if (value == null || value.isBlank()) {
             throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED, paramName + " cannot be blank");
         }
     }
@@ -116,51 +173,130 @@ public final class ValidationUtils {
         }
     }
 
-    // Pre-compiled patterns for performance
-    // Only allow: letters, digits, underscores, whitespace, comparison operators, quotes, and basic math in values
-    private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("[A-Za-z0-9_\\s.,'\"=<>!%+-]+");
-    // Dangerous substrings that indicate SQL injection
-    private static final String[] DANGEROUS_PATTERNS = {";", "--", "/*", "*/", "(", ")", "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE "};
+    // ─── WHERE clause validation ─────────────────────────────────────────────
+    //
+    // A character blacklist cannot decide whether a fragment is a safe predicate: '-' plus a
+    // quote is enough to close a literal and open a comment. So the clause is parsed and its
+    // expression tree is walked against a whitelist of node types instead.
+
+    /** SQL comment openers. The parser silently strips them, so anything after them is invisible. */
+    private static final Pattern COMMENT_TOKEN = Pattern.compile("--|/\\*|\\*/");
+
+    /** Wrapper the clause is parsed inside; DUAL keeps it parseable without a real table. */
+    private static final String WHERE_PROBE_PREFIX = "SELECT 1 FROM DUAL WHERE ";
+
+    /** Binary nodes a predicate may use: boolean connectives, comparisons and LIKE. */
+    private static final Set<Class<?>> ALLOWED_BINARY_NODES = Set.of(
+            AndExpression.class, OrExpression.class,
+            EqualsTo.class, NotEqualsTo.class,
+            GreaterThan.class, GreaterThanEquals.class,
+            MinorThan.class, MinorThanEquals.class,
+            LikeExpression.class);
+
+    /** Literal nodes a predicate may compare against. */
+    private static final Set<Class<?>> ALLOWED_LITERAL_NODES = Set.of(
+            StringValue.class, LongValue.class, DoubleValue.class, NullValue.class,
+            DateValue.class, TimeValue.class, TimestampValue.class);
 
     /**
-     * Validate WHERE clause for SQL injection safety.
-     * Only allows simple column comparisons: col = value, col > value, etc.
-     * Rejects subqueries, multi-statement attacks, and dangerous keywords.
+     * Validate a WHERE clause fragment for SQL injection safety.
+     *
+     * <p>The clause is parsed as {@code SELECT 1 FROM DUAL WHERE <clause>} and every node of the
+     * resulting predicate must be on a whitelist: column references, literals, comparison
+     * operators, {@code AND}/{@code OR}/{@code NOT}, {@code IN} lists, {@code BETWEEN},
+     * {@code IS NULL} and {@code LIKE}. Subqueries, function calls, set operations, extra FROM or
+     * JOIN items, trailing clauses, SQL comments, multiple statements and anything that fails to
+     * parse are rejected.
      */
     public static void validateWhereClause(String whereClause, String paramName) {
         if (whereClause == null || whereClause.isBlank()) {
             return;
         }
-        String lower = whereClause.toLowerCase().trim();
-        // Reject multi-statement attacks: semicolon not allowed anywhere in WHERE clause
         if (whereClause.contains(";")) {
-            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
-                    paramName + " contains disallowed semicolon");
+            throw reject(paramName, "contains disallowed semicolon");
         }
-        // Reject subqueries and multi-statement patterns
-        for (String dangerous : DANGEROUS_PATTERNS) {
-            if (lower.contains(dangerous) && dangerous.contains(" ")) {
-                // Allow comparison operators like "= ", "> ", "< " but reject keywords
-                if (!isComparisonOperator(dangerous.trim())) {
-                    throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
-                            paramName + " contains dangerous SQL pattern: " + dangerous.trim());
-                }
-            }
+        if (COMMENT_TOKEN.matcher(whereClause).find()) {
+            throw reject(paramName, "contains a SQL comment, which is not allowed in a WHERE clause");
         }
-        // Reject subqueries: any parenthesis containing SELECT
-        if (lower.contains("select") && lower.contains("(")) {
+
+        Statement statement;
+        try {
+            statement = CCJSqlParserUtil.parse(WHERE_PROBE_PREFIX + whereClause);
+        } catch (Exception e) {
             throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
-                    paramName + " contains disallowed subquery pattern");
+                    paramName + " is not a parseable SQL predicate: " + whereClause, e);
         }
-        // Only allow safe characters: letters, numbers, spaces, operators, quotes, parentheses
-        if (!WHERE_CLAUSE_PATTERN.matcher(whereClause).matches()) {
-            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
-                    paramName + " contains invalid characters. Only alphanumeric, spaces, and basic operators are allowed");
+        if (!(statement instanceof PlainSelect probe)) {
+            throw reject(paramName, "must be a single predicate, not a compound statement");
+        }
+        assertNothingButAPredicate(probe, paramName);
+        assertAllowedExpression(probe.getWhere(), paramName);
+    }
+
+    /**
+     * Guards against a clause that closes the predicate and appends its own SQL: the probe must
+     * still be {@code SELECT 1 FROM DUAL WHERE ...} and nothing else.
+     */
+    private static void assertNothingButAPredicate(PlainSelect probe, String paramName) {
+        if (probe.getWhere() == null) {
+            throw reject(paramName, "does not contain a predicate");
+        }
+        boolean untouched = probe.getJoins() == null
+                && probe.getGroupBy() == null
+                && probe.getHaving() == null
+                && probe.getOrderByElements() == null
+                && probe.getLimit() == null
+                && probe.getOffset() == null
+                && probe.getFetch() == null
+                && probe.getDistinct() == null
+                && probe.getFromItem() instanceof net.sf.jsqlparser.schema.Table table
+                && "DUAL".equalsIgnoreCase(table.getName());
+        if (!untouched) {
+            throw reject(paramName, "must contain only a predicate, without any further SQL clause");
         }
     }
 
-    private static boolean isComparisonOperator(String op) {
-        return op.equals("=") || op.equals(">") || op.equals("<") || op.equals("!")
-                || op.equals("<>") || op.equals("<=") || op.equals(">=");
+    /** Recursively whitelists the predicate's expression tree. */
+    private static void assertAllowedExpression(Expression expression, String paramName) {
+        if (expression == null) {
+            throw reject(paramName, "contains an empty expression");
+        }
+        if (ALLOWED_LITERAL_NODES.contains(expression.getClass()) || expression instanceof Column) {
+            return;
+        }
+        if (ALLOWED_BINARY_NODES.contains(expression.getClass())
+                && expression instanceof net.sf.jsqlparser.expression.BinaryExpression binary) {
+            assertAllowedExpression(binary.getLeftExpression(), paramName);
+            assertAllowedExpression(binary.getRightExpression(), paramName);
+            return;
+        }
+        switch (expression) {
+            case Parenthesis parenthesis -> assertAllowedExpression(parenthesis.getExpression(), paramName);
+            case NotExpression not -> assertAllowedExpression(not.getExpression(), paramName);
+            case SignedExpression signed -> assertAllowedExpression(signed.getExpression(), paramName);
+            case IsNullExpression isNull -> assertAllowedExpression(isNull.getLeftExpression(), paramName);
+            case Between between -> {
+                assertAllowedExpression(between.getLeftExpression(), paramName);
+                assertAllowedExpression(between.getBetweenExpressionStart(), paramName);
+                assertAllowedExpression(between.getBetweenExpressionEnd(), paramName);
+            }
+            case InExpression in -> {
+                assertAllowedExpression(in.getLeftExpression(), paramName);
+                // Only a literal value list is allowed on the right-hand side; a ParenthesedSelect
+                // lands here for `IN (SELECT ...)` and is not an ExpressionList, so it is rejected.
+                if (!(in.getRightExpression() instanceof ExpressionList<?> values)) {
+                    throw reject(paramName, "may only use IN with a literal value list");
+                }
+                for (Object item : (List<?>) values) {
+                    assertAllowedExpression((Expression) item, paramName);
+                }
+            }
+            default -> throw reject(paramName, "contains a disallowed SQL expression: "
+                    + expression.getClass().getSimpleName() + " (" + expression + ")");
+        }
+    }
+
+    private static McpValidationException reject(String paramName, String detail) {
+        return new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED, paramName + " " + detail);
     }
 }

@@ -91,6 +91,18 @@ public final class DialectQueryUtils {
                                                            String connection,
                                                            java.util.function.Function<DatabaseDialect, String> sqlProvider,
                                                            List<Object> argsList) {
+        return executeDialectQuery(db, connection, sqlProvider, dialect -> argsList);
+    }
+
+    /**
+     * Variant whose bind arguments are derived from the resolved dialect, for the metadata queries
+     * whose single placeholder must carry the <em>dialect-normalized</em> table name (Oracle stores
+     * identifiers upper-cased, so a lowercase argument matches no dictionary row).
+     */
+    public static Map<String, Object> executeDialectQuery(DatabaseOperations db,
+                                                           String connection,
+                                                           java.util.function.Function<DatabaseDialect, String> sqlProvider,
+                                                           java.util.function.Function<DatabaseDialect, List<Object>> argsProvider) {
         try {
             requireConnection(connection);
             DatabaseDialect dialect = db.getDialect(connection);
@@ -106,6 +118,7 @@ public final class DialectQueryUtils {
                 return McpToolUtils.success(Map.of("rows", List.of()));
             }
 
+            List<Object> argsList = argsProvider.apply(dialect);
             List<Map<String, Object>> rows;
             if (argsList.isEmpty() || !sql.contains("?")) {
                 rows = db.queryRows(sql, connection);

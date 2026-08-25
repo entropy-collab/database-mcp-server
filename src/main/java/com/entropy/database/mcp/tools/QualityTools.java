@@ -57,14 +57,32 @@ public class QualityTools extends McpToolBase {
         this.qualityAlertService = qualityAlertService;
     }
 
-    @McpTool(description = "Run data quality checks on a table",
+    @McpTool(description = """
+            【执行表数据质量检查】对指定表执行数据质量检查并生成报告，同时给出结构化结果与可直接展示的格式化文本。
+            前置条件：先调用 createNamedConnection 注册连接；表名必须是合法标识符，否则报参数校验失败。表为空（行数 0）时直接返回空报告，评分 100 且不执行任何规则。
+            检查内容：内置检查始终执行——逐列统计空值率，并对全部列组合统计重复行；customRules 是在内置检查之外追加的规则，不会替换内置检查。
+            使用场景：新表接入前评估数据可用性、上线前核对空值与重复、按业务规则校验枚举值与数值区间。
+            返回字段：report（含 tableName、schema、connectionKey、checkedAt、totalRows、rulesChecked、issuesFound、overallScore、issues、rules；issues 每项含 ruleId、ruleName、ruleType、column、severity、actualValue、threshold、totalRows、issueCount、detail）、formattedReport（按 format 渲染的文本）、format（实际使用的格式）。
+            不要用于：查看有哪些规则可用及其参数（先用 listQualityRuleTemplates）；查看历史告警汇总（用 getQualityAlertSummary）。推荐顺序：listQualityRuleTemplates 看模板，再用本工具执行检查。
+            标签：[read, quality, check, validation]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> checkTableQuality(
-            @McpToolParam(description = "Connection name", required = false) String connectionName,
-            @McpToolParam(description = "Table name to check") String tableName,
-            @McpToolParam(description = "Schema name (optional)", required = false) String schema,
-            @McpToolParam(description = "Custom quality rules as JSON list (optional)", required = false) List<Map<String, Object>> customRules,
-            @McpToolParam(description = "Report format: json, csv, or text (default json)", required = false) String format) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = "要检查的表名，必填；须为合法标识符（不含引号、空格等特殊字符）") String tableName,
+            @McpToolParam(description = "Schema 名，可省略；仅作为报告字段回显，不参与表名限定", required = false) String schema,
+            @McpToolParam(description = """
+                    追加的自定义规则列表，可省略。每项为键值对：\
+                    type 取值 ENUM_VALUES（校验列值在允许集合内，需 params 中的 allowedValues）、\
+                    RANGE（校验数值列落在区间内，需 min 或 max）、\
+                    CUSTOM_SQL（执行自定义计数 SQL，需 sql；该类型默认被禁用，须开启 \
+                    entropy.mcp.database.quality.custom-sql-enabled 并配置非空的表白名单，否则报参数校验失败）；\
+                    另有 NULL_RATE、DUPLICATES、FORMAT 三种取值当前不会被执行（空值率与重复行已由内置检查覆盖）。\
+                    其余字段：id、name 规则标识与显示名；column 目标列名，须为合法标识符；\
+                    threshold 阈值，省略时默认 0.05；severity 取值 INFO、WARNING、ERROR、CRITICAL，省略时默认 WARNING；\
+                    enabled 显式传 false 可跳过该规则，默认启用。字段类型不符的规则会被跳过而不中断整体检查。""",
+                    required = false) List<Map<String, Object>> customRules,
+            @McpToolParam(description = "formattedReport 的渲染格式，取值 json、csv、text（大小写不敏感）；省略或传无法识别的值时按 json 渲染", required = false) String format) {
         return safeExecute(() -> {
             DatabaseDialect dialect = adminOperations.getDialect(connectionName);
 
@@ -72,7 +90,7 @@ public class QualityTools extends McpToolBase {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid table name: " + tableName + " (tableName=" + tableName + ")");
             }
             String normalizedTable = dialect.normalizeTableName(tableName);
-            List<QualityRule> rules = buildRules(customRules);
+            List<QualityRule> rules = buildRules(customRules, dialect);
 
             QualityReport report = qualityCheckService.check(connectionName, normalizedTable, schema, rules, dialect, readOperations);
 
@@ -90,7 +108,15 @@ public class QualityTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List all built-in quality rule templates",
+    @McpTool(description = """
+            【列出质量规则模板】列出内置的质量规则模板及其参数说明，作为拼装 checkTableQuality 的 customRules 的参考。无入参，不访问数据库。
+            前置条件：无。
+            使用场景：执行质量检查前先确认支持哪些规则类型、每种类型需要哪些参数。
+            返回字段：templates（数组，每项含 id、name、description、parameters；parameters 为参数名到类型说明的映射）。
+            注意：返回的 null_rate 与 duplicates 两个模板对应的规则由检查引擎自动执行，通过 customRules 传入不会额外生效；可实际驱动的自定义规则类型为 ENUM_VALUES、RANGE、CUSTOM_SQL。
+            不要用于：真正执行检查（用 checkTableQuality）；查看告警结果（用 getQualityAlertSummary）。
+            标签：[read, quality, template, metadata]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listQualityRuleTemplates() {
         return safeExecute(() -> success(Map.of("templates", List.of(
@@ -112,23 +138,30 @@ public class QualityTools extends McpToolBase {
         ))));
     }
 
-    @McpTool(description = "Get recent quality alert summary",
+    @McpTool(description = """
+            【查看质量告警汇总】查看数据质量检查触发的告警汇总。
+            前置条件：告警历史需要持久化存储后端；当前实现尚未接入，因此始终返回空结果并在 message 中说明原因，不报错。
+            使用场景：确认近期是否有严重质量问题被触发；需要真实告警明细时，请改看 checkTableQuality 报告中的 issues，或查询告警日志。
+            返回字段：totalAlerts、recentAlerts（数组）、message（说明当前告警历史依赖持久化存储）。
+            不要用于：执行检查并获取本次问题清单（用 checkTableQuality）；查看可用规则（用 listQualityRuleTemplates）。
+            标签：[read, quality, alert, summary]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getQualityAlertSummary(
-            @McpToolParam(description = "Number of recent alerts to return (default 20)", required = false) int limit) {
+            @McpToolParam(description = "返回的最近告警条数上限，整数；取值会被夹到 1..100 区间。当前实现忽略该参数并始终返回空列表", required = false) int limit) {
         return safeExecute(() -> {
             int clamped = Math.min(Math.max(limit, 1), 100);
             return success(qualityAlertService.getAlertSummary(clamped));
         });
     }
 
-    private List<QualityRule> buildRules(List<Map<String, Object>> customRules) {
+    private List<QualityRule> buildRules(List<Map<String, Object>> customRules, DatabaseDialect dialect) {
         if (customRules == null || customRules.isEmpty()) return List.of();
-        return customRules.stream().map(this::parseRule).filter(r -> r != null && r.enabled()).toList();
+        return customRules.stream().map(map -> parseRule(map, dialect)).filter(r -> r != null && r.enabled()).toList();
     }
 
     @SuppressWarnings("unchecked")
-    private QualityRule parseRule(Map<String, Object> map) {
+    private QualityRule parseRule(Map<String, Object> map, DatabaseDialect dialect) {
         try {
             String id = (String) map.get("id");
             String name = (String) map.get("name");
@@ -137,6 +170,16 @@ public class QualityTools extends McpToolBase {
             Double threshold = (Double) map.get("threshold");
             String severityStr = (String) map.get("severity");
             boolean enabled = !Boolean.FALSE.equals(map.get("enabled"));
+
+            // A rule column is interpolated into the check SQL, so it must be a plain identifier.
+            // This is rejected here, at the tool boundary, rather than left to the check engine's
+            // per-rule catch, where it would look like a rule that simply found nothing.
+            requireIdentifier(column, "column", dialect);
+            if (map.get("columns") instanceof List<?> columns) {
+                for (Object candidate : columns) {
+                    requireIdentifier(candidate == null ? null : candidate.toString(), "columns", dialect);
+                }
+            }
 
             QualityRule.RuleType type = parseEnum(typeStr, QualityRule.RuleType.class);
             QualityRule.Severity severity = parseEnum(severityStr, QualityRule.Severity.class);
@@ -154,6 +197,15 @@ public class QualityTools extends McpToolBase {
             // logged: silently dropping a rule the caller asked for looked like the rule passed.
             log.warn("Skipping malformed quality rule {}: {}", map != null ? map.get("id") : null, e.toString());
             return null;
+        }
+    }
+
+    /** A blank value means "not supplied" and is allowed; a supplied value must be an identifier. */
+    private static void requireIdentifier(String value, String paramName, DatabaseDialect dialect) {
+        if (value == null || value.isBlank()) return;
+        if (!dialect.isValidIdentifier(value)) {
+            throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "Invalid quality rule " + paramName + ": " + value);
         }
     }
 

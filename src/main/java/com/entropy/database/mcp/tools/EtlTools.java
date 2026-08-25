@@ -74,14 +74,22 @@ public class EtlTools extends McpToolBase {
         this.sqlValidator = sqlValidator;
     }
 
-    @McpTool(description = "Create a named BYOK connection to a remote database",
+    @McpTool(description = """
+            【注册数据库连接】创建一个命名的 BYOK 连接：建连接池、跑一次连通性测试查询，成功后即可被其他工具按名引用。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true（本类全部工具都受该开关控制）。
+            使用场景：使用本服务任何查询、写入、DDL 工具之前的第一步。
+            注意：注册成功后建议先调用 describeConnection 确认连接就绪，再执行查询。
+            返回字段：connectionName、dialect（实际生效的方言，未显式传入时由 jdbcUrl 推断）、message、recommendation。
+            不要用于：创建 Oracle 跨库链路（用 createDbLink）；把库注册进联邦网关（联邦网关的 databaseId 由服务端注册，见 listDatabases）。
+            标签：[write, connection, byok, setup]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = true, openWorldHint = true))
     public Map<String, Object> createNamedConnection(
-            @McpToolParam(description = "Connection name for reuse") String name,
-            @McpToolParam(description = "JDBC URL") String jdbcUrl,
-            @McpToolParam(description = "Database username") String username,
-            @McpToolParam(description = "Database password") String password,
-            @McpToolParam(description = "Database dialect (oracle, mysql, postgres, sqlserver)") String dialect) {
+            @McpToolParam(description = "连接名，后续所有工具用它引用这个数据库；同名重复注册会复用已有连接池") String name,
+            @McpToolParam(description = "JDBC 连接串，必填（如 jdbc:oracle:thin:@host:1521/svc、jdbc:mysql://host:3306/db）") String jdbcUrl,
+            @McpToolParam(description = "数据库登录用户名，必填") String username,
+            @McpToolParam(description = "数据库登录密码；传 null 视为空字符串") String password,
+            @McpToolParam(description = "数据库方言，取值：oracle、mysql、postgres、sqlserver、sqlite、db2、h2、generic；留空时按 jdbcUrl 自动推断") String dialect) {
         return safeExecute(() -> {
             ConnectionProperties properties = ConnectionProperties.builder()
                     .jdbcUrl(jdbcUrl)
@@ -104,13 +112,21 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Batch insert rows into a remote table via BYOK connection",
+    @McpTool(description = """
+            【批量插入外部数据】把调用方直接给出的行数据按 JDBC 批量方式插入目标表。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；先用 createNamedConnection 注册连接；connectionName 必填不可省略；rows 不能为空。
+            使用场景：数据来自模型或外部系统（已经拿在手里的 JSON 行），需要一次性写库。
+            注意：列名取自 rows 第一行的键，后续行按同一组列取值，缺失的键写入 null；纯 INSERT，不做去重也不做更新。
+            返回字段：connectionName、tableName、rowCount（实际写入行数）、batchSize、durationMs、message。
+            不要用于：数据来自 SQL 查询结果（同库或跨库用 insertQueryResult，需分页搬大表用 exportQueryToTable）；需要按主键幂等覆盖（用 upsertData）；需要列改名或大小写转换（用 transformAndInsert）。
+            标签：[write, etl, insert, batch]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> insertData(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
-            @McpToolParam(description = "Target table name") String tableName,
-            @McpToolParam(description = "List of rows to insert (each map is a row)") List<Map<String, Object>> rows,
-            @McpToolParam(description = "Batch size for JDBC batch update") Integer batchSize) throws Exception {
+            @McpToolParam(description = "目标表名，须为合法标识符") String tableName,
+            @McpToolParam(description = "待插入的行列表，每个 Map 是一行（键为列名）；列集合以第一行为准") List<Map<String, Object>> rows,
+            @McpToolParam(description = "JDBC 批量提交的批大小，必须为正数；传 null 时使用配置项 entropy.mcp.database.etl.batch-size") Integer batchSize) throws Exception {
         return safeExecute(() -> {
             requireNotBlank(connectionName, "connectionName");
             requireNotBlank(tableName, "tableName");
@@ -130,14 +146,22 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Insert query results into a target table (ETL helper)",
+    @McpTool(description = """
+            【查询结果搬运】在源连接上执行 SELECT，把结果整批写入目标连接的表，支持跨连接搬数。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；源、目标连接都要先用 createNamedConnection 注册；sourceSql 只允许 SELECT。
+            使用场景：把一个库的查询结果落到另一个库（或同库另一张表），列名与源结果集保持一致。
+            注意：源结果会先整体读入内存再写出，batchSize 只控制写入侧，大表请在 sourceSql 里自行加过滤或行数限制；源结果为空时返回 message=No rows returned 与 rowCount=0。
+            返回字段：sourceConnection、targetConnection、targetTable、rowCount、batchSize、durationMs、message。
+            不要用于：需要按页搬运超大结果（用 exportQueryToTable，内部按 continuationToken 翻页）；需要改列名或做大小写/类型转换（用 transformAndInsert）；数据不是查出来而是外部传入（用 insertData）。
+            标签：[write, etl, insert, copy]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> insertQueryResult(
-            @McpToolParam(description = "Source BYOK connection name") String sourceConnectionName,
-            @McpToolParam(description = "Source SELECT query") String sourceSql,
-            @McpToolParam(description = "Target BYOK connection name") String targetConnectionName,
-            @McpToolParam(description = "Target table name") String targetTable,
-            @McpToolParam(description = "Batch size for insertion") Integer batchSize) throws Exception {
+            @McpToolParam(description = "源库连接名（读取数据的一侧）。" + ToolParams.CONNECTION_DESCRIPTION) String sourceConnectionName,
+            @McpToolParam(description = "源库上执行的 SELECT 语句，只允许查询") String sourceSql,
+            @McpToolParam(description = "目标库连接名（写入数据的一侧）。" + ToolParams.CONNECTION_DESCRIPTION) String targetConnectionName,
+            @McpToolParam(description = "目标表名，须为合法标识符，且列名要与源结果集一致") String targetTable,
+            @McpToolParam(description = "写入侧的批大小，必须为正数；传 null 时默认 1000") Integer batchSize) throws Exception {
         return safeExecute(() -> {
             validateIdentifier(targetTable, "targetTable");
             if (sqlValidator != null) sqlValidator.validateSelect(sourceSql);
@@ -157,17 +181,26 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Transform and insert data with column mapping (ETL helper)",
+    @McpTool(description = """
+            【转换后插入】在同一个连接内把源表数据按列映射搬到目标表，可对每列施加一个转换函数。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；连接已注册且 connectionName 必填不可省略；源表、目标表、映射两侧都必须是该方言下的合法标识符（不接受表达式或子查询）。
+            使用场景：源表与目标表列名不一致、或需要统一大小写/去空格/改数值类型的同库搬数。
+            注意：源表数据先整体读入内存再批量写出；源表查不到数据时返回 message=No rows returned 与 rowCount=0；纯 INSERT，不做幂等覆盖。
+            返回字段：connectionName、sourceTable、targetTable、rowCount、durationMs、message。
+            不要用于：跨连接搬数（用 insertQueryResult）；列名完全一致无需转换（用 insertQueryResult 更直接）；按主键覆盖（用 upsertData）。
+            标签：[write, etl, transform, insert]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> transformAndInsert(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
-            @McpToolParam(description = "Source table name") String sourceTable,
-            @McpToolParam(description = "Target table name") String targetTable,
-            @McpToolParam(description = "Column mappings (e.g., ['id:ID', 'name:FULL_NAME:upper'])") List<String> columnMapping,
-            @McpToolParam(description = "Optional WHERE clause for filtering", required = false) String whereClause,
-            @McpToolParam(description = "Batch size for insertion", required = false) Integer batchSize) throws Exception {
+            @McpToolParam(description = "源表名，须为合法标识符") String sourceTable,
+            @McpToolParam(description = "目标表名，须为合法标识符") String targetTable,
+            @McpToolParam(description = "列映射列表，每项格式 源列:目标列[:转换]；转换可选值：upper、lower、trim、int、long、double，省略或写其它值均按原值不转换（如 ['id:ID', 'name:FULL_NAME:upper']）") List<String> columnMapping,
+            @McpToolParam(description = "可选的过滤条件，只写 WHERE 之后的部分（不含 WHERE 关键字），会经过合法性校验；省略则全表", required = false) String whereClause,
+            @McpToolParam(description = "写入侧的批大小，必须为正数；省略时默认 1000", required = false) Integer batchSize) throws Exception {
         return safeExecute(() -> {
             validateTransformParams(connectionName, sourceTable, targetTable, columnMapping);
+            DatabaseDialect dialect = routingFacade.getDialect(connectionName);
             List<String> sourceColumns = new ArrayList<>();
             List<String> targetColumns = new ArrayList<>();
             List<String> transforms = new ArrayList<>();
@@ -177,12 +210,15 @@ public class EtlTools extends McpToolBase {
                 if (parts.length < 2) {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid column mapping: " + mapping + ". Expected format: source:target[:transform] (connectionName=" + connectionName + ", sourceTable=" + sourceTable + ", targetTable=" + targetTable + ")");
                 }
-                sourceColumns.add(parts[0]);
-                targetColumns.add(parts[1]);
+                // Both halves of the mapping are interpolated into the SELECT list, so each one has
+                // to be a plain identifier: without this, "(SELECT PASSWORD FROM X):Y" is a valid
+                // mapping that smuggles a subquery into the projection.
+                sourceColumns.add(requireColumnIdentifier(parts[0], dialect, "columnMapping source column"));
+                targetColumns.add(requireColumnIdentifier(parts[1], dialect, "columnMapping target column"));
                 transforms.add(parts.length >= 3 ? parts[2] : "none");
             }
 
-            String selectSql = buildTransformSelect(sourceColumns, transforms, targetColumns, sourceTable, whereClause);
+            String selectSql = buildTransformSelect(sourceColumns, transforms, targetColumns, sourceTable, whereClause, dialect);
             List<Map<String, Object>> rows = routingFacade.queryRows(selectSql, connectionName);
             if (rows.isEmpty()) return emptyResult();
 
@@ -199,13 +235,21 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Upsert data into a table (insert or update based on key columns)",
+    @McpTool(description = """
+            【幂等写入】按键列匹配做插入或更新（UPSERT），同一批数据重复执行结果一致。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；连接已注册且 connectionName 必填不可省略；rows 与 keyColumns 都不能为空；目标表在 keyColumns 上应有唯一约束或主键。
+            使用场景：重放数据、增量同步、失败重试等要求幂等的写入场景。
+            注意：列集合取自 rows 第一行的键；批大小固定为 1000，不可配置；键列已存在的行会被更新，属于覆盖写。
+            返回字段：connectionName、tableName、keyColumns、rowCount、durationMs、message。
+            不要用于：确定只需追加、不希望覆盖已有行（用 insertData）；数据来自查询结果（用 insertQueryResult）。
+            标签：[write, etl, upsert, idempotent]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> upsertData(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
-            @McpToolParam(description = "Target table name") String tableName,
-            @McpToolParam(description = "Key columns for matching (e.g., ['id'])") List<String> keyColumns,
-            @McpToolParam(description = "List of rows to upsert") List<Map<String, Object>> rows) throws Exception {
+            @McpToolParam(description = "目标表名，须为合法标识符") String tableName,
+            @McpToolParam(description = "用于匹配已有行的键列列表，不能为空（如 ['id']）") List<String> keyColumns,
+            @McpToolParam(description = "待写入的行列表，每个 Map 是一行（键为列名）；列集合以第一行为准，且需包含全部 keyColumns") List<Map<String, Object>> rows) throws Exception {
         return safeExecute(() -> {
             requireNotBlank(connectionName, "connectionName");
             requireNotBlank(tableName, "tableName");
@@ -224,12 +268,20 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Validate data quality in a table (nulls, duplicates, types)",
+    @McpTool(description = """
+            【表数据质量校验】统计指定列的空值、整表在这些列上的重复行，并给出通过率评分。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；连接已注册。省略 columns 时会读取 Oracle 数据字典 user_tab_columns 自动取列，非 Oracle 库请显式传入 columns。
+            使用场景：数据搬运后做落地校验、排查主键或唯一键重复、快速评估某张表的数据整洁度。
+            检查项：每个列各做一次 IS NULL 计数（发现即记 NULL_VALUES，severity=WARNING）；对全部列组合做一次重复行计数（发现即记 DUPLICATES，severity=ERROR）；再统计整表行数。
+            返回字段：summary（含 table、totalRows、columnsChecked、issuesFound、totalChecks、passed、failed、qualityScore）、issues（数组，每项含 type、column 或 columns、count、severity）、message。
+            不要用于：按规则模板做可配置的质量校验（用 checkTableQuality）；只想看行数估算（用 estimateTableSize）。
+            标签：[read, etl, quality, validation]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> validateDataQuality(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
-            @McpToolParam(description = "Table name to validate") String tableName,
-            @McpToolParam(description = "Columns to check (null for all)", required = false) List<String> columns) {
+            @McpToolParam(description = "要校验的表名，须为该方言下的合法标识符") String tableName,
+            @McpToolParam(description = "要检查的列名列表；省略或传空列表时自动读取表的全部列（该自动读取依赖 Oracle 的 user_tab_columns）", required = false) List<String> columns) {
         return safeExecute(() -> {
             DatabaseDialect dialect = routingFacade.getDialect(connectionName);
             if (!dialect.isValidIdentifier(tableName)) {
@@ -254,8 +306,10 @@ public class EtlTools extends McpToolBase {
                 if (nullCount != null && nullCount > 0) issues.add(Map.of("type", "NULL_VALUES", "column", column, "count", nullCount, "severity", "WARNING"));
             }
             totalChecks++;
+            // The derived table needs an alias: MySQL and PostgreSQL reject an unaliased one, which
+            // made this count silently answer 0 there.
             Long duplicateCount = queryCount(
-                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + validatedTable + " GROUP BY " + columnList + " HAVING COUNT(*) > 1)", connectionName);
+                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + validatedTable + " GROUP BY " + columnList + " HAVING COUNT(*) > 1) t", connectionName);
             if (duplicateCount != null && duplicateCount > 0) issues.add(Map.of("type", "DUPLICATES", "columns", colList, "count", duplicateCount, "severity", "ERROR"));
             totalChecks++;
             Long rowCount = queryCount("SELECT COUNT(*) FROM " + validatedTable, connectionName);
@@ -271,13 +325,21 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Export query results to a table with automatic batching",
+    @McpTool(description = """
+            【分页导出到表】在同一连接内按页读取 SELECT 结果并逐页批量写入目标表，适合搬运大结果集。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；连接已注册；targetTable 须为该方言下的合法标识符，且列名与源结果集一致。
+            使用场景：结果集大到不宜一次读进内存，需要边翻页边落表。
+            注意：翻页页大小等于 batchSize；最多翻 1000 页，达到上限会停止并在服务端日志告警，此时 rowCount 只反映已写入部分。
+            返回字段：connectionName、sourceQuery、targetTable、rowCount、batchSize、durationMs、message。
+            不要用于：跨连接搬数（用 insertQueryResult）；结果集很小且无需翻页（用 insertQueryResult 更简单）；需要列改名或转换（用 transformAndInsert）；导出成文件而非表（用 exportCsv 或 exportJson）。
+            标签：[write, etl, export, batch, paginated]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> exportQueryToTable(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
-            @McpToolParam(description = "Source SELECT query") String sourceSql,
-            @McpToolParam(description = "Target table name") String targetTable,
-            @McpToolParam(description = "Batch size for processing", required = false) Integer batchSize) throws Exception {
+            @McpToolParam(description = "源 SELECT 语句，将被分页执行") String sourceSql,
+            @McpToolParam(description = "目标表名，须为合法标识符，列名要与源结果集一致") String targetTable,
+            @McpToolParam(description = "每页读取并写入的行数；省略时默认 1000", required = false) Integer batchSize) throws Exception {
         return safeExecute(() -> {
             DatabaseDialect dialect = routingFacade.getDialect(connectionName);
             if (!dialect.isValidIdentifier(targetTable)) {
@@ -312,9 +374,18 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Submit an ETL job for execution (MigrationJob DSL)",
+    @McpTool(description = """
+            【提交 ETL 作业】按 MigrationJob DSL 提交一个多步骤作业，异步执行并立即返回，步骤间可声明依赖关系。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；各步骤用到的连接都要先用 createNamedConnection 注册；steps 不能为空。
+            使用场景：需要多步编排（先读、再转换、再写、最后建索引）、步骤有先后依赖、或耗时较长不宜同步等待。
+            调用方式：本工具只负责提交，不等待完成；提交后必须用 getJobStatus 轮询 jobId 查看进度与每步结果，可用 listJobs 查看全部作业、stopJob 请求停止。
+            jobDefinition 结构：{id, name, description, steps:[{id, type, dependsOn, connection, sourceSql, targetTable, targetConnection, params}]}。step 的 id 或 type 为空会被跳过并记日志；type 非法会报错；params 必须是对象。
+            返回字段：jobId、jobName、totalSteps（实际被接受的步骤数）、status（提交时的初始状态）、message。
+            不要用于：单步同步写入（用 insertData / insertQueryResult / transformAndInsert / upsertData / exportQueryToTable，这些会当场返回 rowCount）。
+            标签：[write, etl, job, async]
+            """,
              annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false))
-    public Map<String, Object> submitEtlJob(@McpToolParam(description = "Job definition (id, name, description, steps)") Object jobDefinition) {
+    public Map<String, Object> submitEtlJob(@McpToolParam(description = "作业定义对象，须为 Map：id（作业标识）、name（作业名）、description（可选说明）、steps（步骤数组，不能为空）。每个步骤含 id、type（取值：query_to_table、query_to_json、read、transform、ddl、upsert、export，不区分大小写）、dependsOn（前置步骤 id 数组或逗号分隔字符串，可省略）、connection、sourceSql、targetTable、targetConnection、params（对象，放该步骤类型专用参数）") Object jobDefinition) {
         return safeExecute(() -> {
             @SuppressWarnings("unchecked")
             Map<String, Object> jd = (Map<String, Object>) jobDefinition;
@@ -363,9 +434,16 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get the status of an ETL job",
+    @McpTool(description = """
+            【查询作业状态】按 jobId 查看某个 ETL 作业的整体进度与每个步骤的执行明细。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；jobId 来自 submitEtlJob 的返回值；作业不存在会报错。
+            使用场景：submitEtlJob 之后轮询进度，或作业失败后定位是哪一步、错在哪。
+            返回字段：job 对象，含 jobId、jobName、status、startedAt、completedAt、progress（百分比字符串，如 60.0%）、steps（数组，每项含 stepId、status、startedAt、completedAt、rowsAffected、error）。
+            不要用于：查看全部作业概览（用 listJobs）。
+            标签：[read, etl, job, status]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
-    public Map<String, Object> getJobStatus(@McpToolParam(description = "Job identifier") String jobId) {
+    public Map<String, Object> getJobStatus(@McpToolParam(description = "作业标识，取值为 submitEtlJob 返回的 jobId") String jobId) {
         return safeExecute(() -> {
             Optional<JobExecution> execution = executionEngine.getExecution(jobId);
             if (execution.isEmpty()) throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Job not found: " + jobId + " (jobId=" + jobId + ")");
@@ -388,7 +466,14 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List all submitted ETL jobs",
+    @McpTool(description = """
+            【列出所有作业】列出本进程内已提交的全部 ETL 作业概览，按 jobId 升序排列。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true。作业记录保存在内存中，服务重启后清空。
+            使用场景：忘记 jobId、需要挑出仍在运行或失败的作业。
+            返回字段：totalJobs、jobs（数组，每项含 jobId、jobName、status、startedAt、completedAt、progress、totalSteps、completedSteps、failedSteps）。
+            不要用于：查看单个作业的步骤级明细（用 getJobStatus）。
+            标签：[read, etl, job, list]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listJobs() {
         return safeExecute(() -> {
@@ -407,9 +492,16 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Stop a running ETL job",
+    @McpTool(description = """
+            【请求停止作业】校验 jobId 存在后记录一次停止请求。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；jobId 必须存在，否则报错。
+            使用场景：想中止一个长时间运行的作业。
+            注意：当前实现只发出停止信号并写日志，不会真正中断正在执行的步骤，作业状态也不会因此改变；优雅停止需要接入生产级调度器。停止后请用 getJobStatus 确认作业实际状态。
+            返回字段：jobId、message。
+            标签：[write, etl, job, control]
+            """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
-    public Map<String, Object> stopJob(@McpToolParam(description = "Job identifier to stop") String jobId) {
+    public Map<String, Object> stopJob(@McpToolParam(description = "要停止的作业标识，取值为 submitEtlJob 返回的 jobId") String jobId) {
         return safeExecute(() -> {
             Optional<JobExecution> execution = executionEngine.getExecution(jobId);
             if (execution.isEmpty()) throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Job not found: " + jobId + " (jobId=" + jobId + ")");
@@ -428,14 +520,21 @@ public class EtlTools extends McpToolBase {
             "double", s -> "CAST(" + s + " AS DOUBLE)"
     );
 
+    /**
+     * Builds the transform projection.
+     *
+     * <p>Column names are quoted, and the caller has already checked that each one is a plain
+     * identifier: quoting on its own would not stop {@code "(SELECT ...)"} from becoming an
+     * expression, because the fragment is placed in the SELECT list, not in a value position.
+     */
     private String buildTransformSelect(List<String> sourceColumns, List<String> transforms, List<String> targetColumns,
-                                         String sourceTable, String whereClause) {
+                                         String sourceTable, String whereClause, DatabaseDialect dialect) {
         List<String> selectExprs = new ArrayList<>();
         for (int i = 0; i < sourceColumns.size(); i++) {
-            String src = sourceColumns.get(i);
+            String src = dialect.quote(sourceColumns.get(i));
             String transform = transforms.get(i);
             String expr = TRANSFORM_FN.getOrDefault(transform, IDENTITY).apply(src);
-            selectExprs.add(expr + " AS " + targetColumns.get(i));
+            selectExprs.add(expr + " AS " + dialect.quote(targetColumns.get(i)));
         }
         String sql = "SELECT " + String.join(", ", selectExprs) + " FROM " + sourceTable;
         if (whereClause != null && !whereClause.isBlank()) {
@@ -443,6 +542,16 @@ public class EtlTools extends McpToolBase {
             sql += " WHERE " + whereClause;
         }
         return sql;
+    }
+
+    /** Accepts a mapping half only if it is a plain identifier for the connection's dialect. */
+    private static String requireColumnIdentifier(String column, DatabaseDialect dialect, String paramName) {
+        String trimmed = column == null ? null : column.trim();
+        if (trimmed == null || !dialect.isValidIdentifier(trimmed)) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "Invalid " + paramName + ": " + column);
+        }
+        return trimmed;
     }
 
     /**
