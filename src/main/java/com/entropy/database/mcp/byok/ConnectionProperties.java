@@ -61,6 +61,13 @@ public record ConnectionProperties(
     /**
      * Validate that all required fields are present and well-formed.
      * Use this before passing to factory methods for early failure.
+     *
+     * <p>This is a value-object self-check only: it has no access to configuration and callers may
+     * skip it. The security guard on the JDBC URL (H2 {@code INIT}/{@code RUNSCRIPT}, MySQL
+     * {@code allowLoadLocalInfile}, driver and host policy) therefore lives in
+     * {@code DynamicDataSourceManagerImpl}, the single chokepoint every connection registration
+     * passes through, and is configured by
+     * {@code entropy.mcp.database.byok.url-guard}. Do not re-implement it here.
      */
     public void validate() {
         if (jdbcUrl == null || jdbcUrl.isBlank()) {

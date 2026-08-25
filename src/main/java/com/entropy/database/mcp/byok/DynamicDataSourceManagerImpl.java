@@ -15,7 +15,9 @@
  */
 package com.entropy.database.mcp.byok;
 
+import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpLeaseExpiredException;
+import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.monitor.HikariPoolStats;
@@ -23,14 +25,14 @@ import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.ByokProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 
 import org.springframework.beans.factory.DisposableBean;
 
@@ -48,9 +50,40 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     private final DialectResolver dialectResolver;
     private final ByokDataSourceFactory dataSourceFactory;
     private final com.github.benmanes.caffeine.cache.Cache<String, LeasedDataSource> leasedCache;
-    private final Map<String, ConnectionMetadata> metadataRegistry;
-    private final Set<String> readonlyKeys = ConcurrentHashMap.newKeySet();
-    private final Map<String, String> contentFingerprintToKey; // content fingerprint → canonical key
+
+    /**
+     * Everything we know about a live connection, as one immutable value.
+     *
+     * <p>Metadata, the read-only flag and the content fingerprint used to be three separate
+     * collections keyed by connection name. Caffeine's {@code removalListener} is asynchronous
+     * (it runs on {@link ForkJoinPool#commonPool()} by default), so a lease that expired could have
+     * its callback delivered <em>after</em> a business thread had already rebuilt the connection under
+     * the same name - and the callback then deleted the fresh entry's read-only flag by name. Since
+     * {@code McpToolExceptionAspect} treats a missing flag as "writable", a read-only connection
+     * silently became writable.
+     *
+     * <p>Binding the three facts to the {@link LeasedDataSource} that owns them turns that race into a
+     * no-op: a late callback can only remove state it still owns (see
+     * {@link #unregisterIfOwnedBy(String, LeasedDataSource)}).
+     *
+     * @param owner       the leased datasource these facts describe; identity, not equality, decides
+     *                    ownership
+     * @param metadata    what {@code listConnections} reports
+     * @param readonly    whether write tools must be rejected for this connection
+     * @param fingerprint content fingerprint for pool de-duplication, {@code null} for externally
+     *                    managed datasources that are never de-duplicated
+     */
+    private record ConnectionRegistration(LeasedDataSource owner,
+                                          ConnectionMetadata metadata,
+                                          boolean readonly,
+                                          String fingerprint) {
+    }
+
+    /** connection name → its registration. Mutated only under {@link #registryLock}. */
+    private final Map<String, ConnectionRegistration> registrations = new ConcurrentHashMap<>();
+
+    /** content fingerprint → canonical connection name. Mutated only under {@link #registryLock}. */
+    private final Map<String, String> contentFingerprintToKey = new ConcurrentHashMap<>();
 
     /**
      * Fixed set of striped monitors guarding per-key connection creation and eviction.
@@ -64,7 +97,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     private static final int LOCK_STRIPES = 64;
     private final Object[] keyLocks = new Object[LOCK_STRIPES];
 
-    /** Guards the metadata / fingerprint / readonly registries as one unit. */
+    /** Guards {@link #registrations} and {@link #contentFingerprintToKey} as one unit. */
     private final Object registryLock = new Object();
 
     private final Duration leaseDuration;
@@ -76,12 +109,25 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     /**
      * Dependencies record for DynamicDataSourceManagerImpl.
      * Groups constructor parameters to simplify bean definition.
+     *
+     * @param cacheMaintenanceExecutor executor Caffeine uses for eviction bookkeeping and removal
+     *                                 notifications; {@code null} keeps Caffeine's default
+     *                                 {@link ForkJoinPool#commonPool()}. Tests inject a deterministic
+     *                                 executor to reproduce late-callback interleavings.
      */
     public record Dependencies(
             DialectResolver dialectResolver,
             ByokDataSourceFactory dataSourceFactory,
             ByokProperties byokProperties,
-            McpMetricsCollector metricsCollector) {
+            McpMetricsCollector metricsCollector,
+            Executor cacheMaintenanceExecutor) {
+
+        public Dependencies(DialectResolver dialectResolver,
+                            ByokDataSourceFactory dataSourceFactory,
+                            ByokProperties byokProperties,
+                            McpMetricsCollector metricsCollector) {
+            this(dialectResolver, dataSourceFactory, byokProperties, metricsCollector, null);
+        }
     }
 
     public DynamicDataSourceManagerImpl(Dependencies deps) {
@@ -93,35 +139,43 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         this.maxCachedConnections = deps.byokProperties().maxCachedConnections();
         this.metricsCollector = deps.metricsCollector();
 
-        this.metadataRegistry = new ConcurrentHashMap<>();
-        this.contentFingerprintToKey = new ConcurrentHashMap<>();
         java.util.Arrays.setAll(this.keyLocks, i -> new Object());
 
+        Executor cacheExecutor = deps.cacheMaintenanceExecutor() != null
+                ? deps.cacheMaintenanceExecutor()
+                : ForkJoinPool.commonPool();
 
         this.leasedCache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
                 .maximumSize(maxCachedConnections)
                 .expireAfterAccess(leaseDuration)
-                .removalListener((String key, LeasedDataSource value, com.github.benmanes.caffeine.cache.RemovalCause cause) -> {
-                    // Acquire per-key lock to coordinate with acquire() threads
-                    Object lock = lockFor(key);
-                    synchronized (lock) {
-                        synchronized (registryLock) {
-                            metadataRegistry.remove(key);
-                            readonlyKeys.remove(key);
-                            contentFingerprintToKey.values().removeIf(v -> v.equals(key));
-                        }
-                        if (metricsCollector != null) {
-                            metricsCollector.recordByokConnectionRemoved();
-                        }
-                        // Close datasource while holding the per-key lock to prevent
-                        // concurrent acquire() from getting a closed datasource
-                        if (value != null) {
-                            log.info("Removing expired datasource: {} (cause: {})", key, cause);
-                            value.close();
-                        }
-                    }
-                })
+                .executor(cacheExecutor)
+                .removalListener(this::onCacheRemoval)
                 .build();
+    }
+
+    /**
+     * Removal callback for every cause (expiry, size, explicit invalidation, replacement).
+     *
+     * <p>Deliberately does <em>not</em> take the striped lock. It used to, to keep a concurrent
+     * {@code acquire()} from handing out a datasource that is being closed - but that never worked,
+     * because the fast path of {@code acquire()} reads the cache before taking the lock. What actually
+     * makes this safe is that all state removal is scoped to {@code value}'s identity, so a callback
+     * that arrives after the connection was rebuilt cannot touch the new connection. Staying off the
+     * lock also means pool shutdown never blocks unrelated keys that hash to the same stripe.
+     */
+    private void onCacheRemoval(String key,
+                                LeasedDataSource value,
+                                com.github.benmanes.caffeine.cache.RemovalCause cause) {
+        if (key != null && value != null) {
+            unregisterIfOwnedBy(key, value);
+        }
+        if (metricsCollector != null) {
+            metricsCollector.recordByokConnectionRemoved();
+        }
+        if (value != null) {
+            log.info("Removing datasource: {} (cause: {})", key, cause);
+            value.close();
+        }
     }
 
     /**
@@ -138,6 +192,8 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      */
     @Override
     public ByokDataSourceContext acquire(String key, ConnectionProperties connection) {
+        guardJdbcUrl(key, connection.jdbcUrl());
+
         String fingerprint = connection.getCacheKey();
 
         // Check if an identical physical connection already exists under a different name
@@ -152,14 +208,11 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                         return existing.renewLease();
                     } catch (McpLeaseExpiredException e) {
                         log.warn("Canonical connection '{}' expired, recreating", canonicalKey);
-                        contentFingerprintToKey.remove(fingerprint);
-                        leasedCache.invalidate(canonicalKey);
-                        existing.close();
+                        evictIfCurrent(canonicalKey, existing);
                     }
                 } else if (existing != null && existing.isClosed()) {
                     log.warn("Canonical connection '{}' is closed, evicting", canonicalKey);
-                    contentFingerprintToKey.remove(fingerprint);
-                    leasedCache.invalidate(canonicalKey);
+                    evictIfCurrent(canonicalKey, existing);
                 }
             }
         }
@@ -172,20 +225,16 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 log.warn("Datasource {} exceeded max lifetime, evicting and recreating", key);
                 Object lock = lockFor(key);
                 synchronized (lock) {
-                    leasedCache.invalidate(key);
-                    contentFingerprintToKey.remove(fingerprint);
-                    existing.close();
+                    evictIfCurrent(key, existing);
                 }
             }
         } else if (existing != null && existing.isClosed()) {
-            // Connection is being closed by removalListener, evict and recreate
+            // Connection is being closed by the removal callback, evict and recreate
             log.warn("Datasource {} is closed (eviction in progress), evicting and recreating", key);
-            leasedCache.invalidate(key);
-            contentFingerprintToKey.remove(fingerprint);
+            evictIfCurrent(key, existing);
         }
 
         Object lock = lockFor(key);
-        boolean created = false;
         synchronized (lock) {
             // Double-check after acquiring lock
             existing = leasedCache.getIfPresent(key);
@@ -194,15 +243,12 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                     return existing.renewLease();
                 } catch (McpLeaseExpiredException e) {
                     log.warn("Datasource {} exceeded max lifetime during lock, evicting and recreating", key);
-                    leasedCache.invalidate(key);
-                    contentFingerprintToKey.remove(fingerprint);
-                    existing.close();
+                    evictIfCurrent(key, existing);
                 }
             } else if (existing != null && existing.isClosed()) {
                 // Evict closed connection and proceed to create new one
                 log.warn("Datasource {} is closed (eviction in progress), evicting", key);
-                leasedCache.invalidate(key);
-                contentFingerprintToKey.remove(fingerprint);
+                evictIfCurrent(key, existing);
             }
 
             // Re-check canonical key in case another thread created it
@@ -215,24 +261,22 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                         return alias.renewLease();
                     } catch (McpLeaseExpiredException e) {
                         log.warn("Canonical connection '{}' expired during lock", canonicalKey);
-                        contentFingerprintToKey.remove(fingerprint);
-                        leasedCache.invalidate(canonicalKey);
-                        alias.close();
+                        evictIfCurrent(canonicalKey, alias);
                     }
                 } else if (alias != null && alias.isClosed()) {
                     log.warn("Canonical connection '{}' is closed during lock", canonicalKey);
-                    contentFingerprintToKey.remove(fingerprint);
-                    leasedCache.invalidate(canonicalKey);
+                    evictIfCurrent(canonicalKey, alias);
                 }
             }
 
-            LeasedDataSource newLeased = createLeasedDataSource(key, connection);
+            DatabaseDialect dialect = dialectResolver.resolve(connection.dialect(), null);
+            LeasedDataSource newLeased = createLeasedDataSource(key, connection, dialect);
+
+            // Register before publishing to the cache: the other order leaves a window in which a
+            // concurrent acquire() finds the context but isReadonly() still answers false, which for a
+            // read-only connection means write tools are let through.
+            register(key, newLeased, connection, dialect, fingerprint);
             leasedCache.put(key, newLeased);
-            contentFingerprintToKey.put(fingerprint, key);
-            registerMetadata(key, connection,
-                    dialectResolver.resolve(connection.dialect(), null),
-                    newLeased.getContext().getDataSource());
-            created = true;
             return newLeased.renewLease();
         }
     }
@@ -262,20 +306,22 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      */
     @Override
     public void registerExisting(String key, DataSource existingDataSource, DatabaseDialect dialect) {
+        guardJdbcUrl(key, jdbcUrlOf(existingDataSource));
+
         Object lock = lockFor(key);
         synchronized (lock) {
-            LeasedDataSource existing = leasedCache.getIfPresent(key);
-            if (existing != null) {
+            LeasedDataSource previous = leasedCache.getIfPresent(key);
+            if (previous != null) {
                 log.warn("Datasource {} already registered, replacing", key);
-                leasedCache.invalidate(key); // Invalidate first to prevent new access
-                existing.close(); // Then close (will be idempotent if already closed by removalListener)
+                evictIfCurrent(key, previous);
             }
 
             ByokDataSourceContext context = dataSourceFactory.createExisting(key, existingDataSource, dialect);
             LeasedDataSource leased = new LeasedDataSource(key, context, leaseDuration, maxLifetime, false);
-            leasedCache.put(key, leased);
 
-            registerMetadata(key, null, dialect, existingDataSource);
+            // Same ordering rule as acquire(): registry first, cache second.
+            register(key, leased, null, dialect, null);
+            leasedCache.put(key, leased);
 
             log.info("Registered existing datasource as BYOK connection: {}", key);
             if (metricsCollector != null) {
@@ -287,15 +333,12 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     /**
      * Create a new LeasedDataSource for the given key and connection.
      */
-    private LeasedDataSource createLeasedDataSource(String key, ConnectionProperties connection) {
+    private LeasedDataSource createLeasedDataSource(String key, ConnectionProperties connection,
+                                                   DatabaseDialect dialect) {
         log.info("Creating new datasource: {}", key);
 
         ByokDataSourceContext context = null;
         try {
-            // 1. Resolve dialect BEFORE creating datasource
-            DatabaseDialect dialect = dialectResolver.resolve(connection.dialect(), null);
-
-            // 2. Create full context via unified factory
             context = dataSourceFactory.create(key, connection, dialect);
 
             LeasedDataSource leased = new LeasedDataSource(
@@ -318,10 +361,53 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         }
     }
 
-    // ─── Metadata Registry ──────────────────────────────────────────────────
+    // ─── JDBC URL guard ─────────────────────────────────────────────────────
 
-    private void registerMetadata(String key, ConnectionProperties connection, DatabaseDialect dialect,
-                                  DataSource dataSource) {
+    /**
+     * Apply {@link ByokProperties.UrlGuard} to a caller-supplied JDBC URL.
+     *
+     * <p>This is the chokepoint every connection registration passes through, which is why the guard
+     * lives here rather than in {@link ConnectionProperties#validate()}: that method is a value-object
+     * self-check with no access to configuration and is only called by one tool, so a URL reaching the
+     * manager by any other route would skip it.
+     *
+     * @throws McpValidationException if the URL violates the policy. The message names the offending
+     *                                parameter or host but never echoes the URL, which usually carries
+     *                                the password.
+     */
+    private void guardJdbcUrl(String key, String jdbcUrl) {
+        String violation = byokProperties.urlGuard().findViolation(jdbcUrl);
+        if (violation != null) {
+            log.warn("Rejected connection '{}': {}", key, violation);
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "Connection '" + key + "' was rejected: " + violation);
+        }
+    }
+
+    /**
+     * Best-effort JDBC URL of an externally created datasource, so that
+     * {@link #registerExisting(String, DataSource, DatabaseDialect)} is guarded too. Returns
+     * {@code null} when the URL cannot be determined, in which case there is nothing to guard: the
+     * pool was configured by the host application, not by a caller-supplied string.
+     */
+    private static String jdbcUrlOf(DataSource dataSource) {
+        if (dataSource instanceof com.zaxxer.hikari.HikariDataSource hikari) {
+            try {
+                return hikari.getJdbcUrl();
+            } catch (RuntimeException e) {
+                log.debug("Could not read jdbcUrl from external datasource: {}", e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    // ─── Connection Registry ────────────────────────────────────────────────
+
+    /**
+     * Publish metadata, read-only flag and fingerprint for {@code owner} as one atomic unit.
+     */
+    private void register(String key, LeasedDataSource owner, ConnectionProperties connection,
+                          DatabaseDialect dialect, String fingerprint) {
         var metadata = new ConnectionMetadata(
                 key,
                 dialect.getClass().getSimpleName(),
@@ -333,13 +419,57 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 byokProperties.poolSize(),
                 0
         );
-        metadataRegistry.put(key, metadata);
-        if (connection != null && Boolean.TRUE.equals(connection.readonly())) {
-            readonlyKeys.add(key);
-        } else {
-            readonlyKeys.remove(key);
+        boolean readonly = connection != null && Boolean.TRUE.equals(connection.readonly());
+        var registration = new ConnectionRegistration(owner, metadata, readonly, fingerprint);
+
+        synchronized (registryLock) {
+            ConnectionRegistration previous = registrations.put(key, registration);
+            if (previous != null && previous.fingerprint() != null
+                    && !previous.fingerprint().equals(fingerprint)) {
+                contentFingerprintToKey.remove(previous.fingerprint(), key);
+            }
+            if (fingerprint != null) {
+                contentFingerprintToKey.put(fingerprint, key);
+            }
         }
-        log.debug("Registered connection metadata: {} -> {}", key, metadata);
+        log.debug("Registered connection: {} -> {} (readonly={})", key, metadata, readonly);
+    }
+
+    /**
+     * Drop the registration for {@code key} only while it still belongs to {@code owner}.
+     *
+     * <p>The identity check is the whole point: a removal notification for a lease that expired can be
+     * delivered long after the connection was rebuilt, and a by-name removal would then strip the
+     * fresh connection of its read-only flag and metadata.
+     *
+     * @return whether anything was removed
+     */
+    private boolean unregisterIfOwnedBy(String key, LeasedDataSource owner) {
+        synchronized (registryLock) {
+            ConnectionRegistration current = registrations.get(key);
+            if (current == null || current.owner() != owner) {
+                return false;
+            }
+            registrations.remove(key);
+            if (current.fingerprint() != null) {
+                contentFingerprintToKey.remove(current.fingerprint(), key);
+            }
+            return true;
+        }
+    }
+
+    /**
+     * Evict {@code value} and close it, but only remove the cache entry while it still holds exactly
+     * that value - a plain {@code invalidate(key)} would throw away a replacement another thread has
+     * already installed.
+     */
+    private void evictIfCurrent(String key, LeasedDataSource value) {
+        if (value == null) {
+            return;
+        }
+        unregisterIfOwnedBy(key, value);
+        leasedCache.asMap().remove(key, value);
+        value.close();
     }
 
     private String maskKey(String jdbcUrl) {
@@ -358,29 +488,33 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     @Override
     public ConnectionMetadata getConnectionMetadata(String key) {
         if (key == null || key.isBlank()) return null;
-        return metadataRegistry.get(key);
+        ConnectionRegistration registration = registrations.get(key);
+        return registration != null ? registration.metadata() : null;
     }
 
     @Override
     public boolean isReadonly(String key) {
         if (key == null || key.isBlank()) return false;
-        return readonlyKeys.contains(key);
+        ConnectionRegistration registration = registrations.get(key);
+        return registration != null && registration.readonly();
     }
 
     @Override
     public Collection<String> listConnectionKeys() {
-        return metadataRegistry.keySet();
+        return registrations.keySet();
     }
 
     @Override
     public int getConnectionCount() {
-        return metadataRegistry.size();
+        return registrations.size();
     }
 
     @Override
     public Collection<ConnectionMetadata> getAllConnectionMetadata() {
-        // Return a snapshot to avoid ConcurrentModificationException if metadataRegistry is modified during iteration
-        return new java.util.ArrayList<>(metadataRegistry.values());
+        // Return a snapshot to avoid ConcurrentModificationException if registrations change mid-iteration
+        return registrations.values().stream()
+                .map(ConnectionRegistration::metadata)
+                .toList();
     }
 
     // ─── Shutdown ───────────────────────────────────────────────────────────
@@ -402,9 +536,10 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             }
         }
         leasedCache.invalidateAll();
-        contentFingerprintToKey.clear();
-        metadataRegistry.clear();
-        readonlyKeys.clear();
+        synchronized (registryLock) {
+            contentFingerprintToKey.clear();
+            registrations.clear();
+        }
         log.info("All datasources shut down");
     }
 
@@ -420,8 +555,8 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     }
 
     /**
-     * Force Caffeine to check for expired entries and trigger removal listener.
-     * Safe to call concurrently - will acquire per-key locks for any evictions.
+     * Force Caffeine to check for expired entries and trigger the removal callback.
+     * Safe to call concurrently.
      */
     @Override
     public void evictExpired() {
@@ -443,7 +578,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             }
             ByokDataSourceContext context = leased.getContext();
             DataSource ds = context.getDataSource();
-            ConnectionMetadata meta = metadataRegistry.get(key);
+            ConnectionMetadata meta = getConnectionMetadata(key);
 
             try {
                 if (ds instanceof com.zaxxer.hikari.HikariDataSource hikari) {
