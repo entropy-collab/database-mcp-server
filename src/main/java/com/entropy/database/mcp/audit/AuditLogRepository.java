@@ -17,6 +17,7 @@ package com.entropy.database.mcp.audit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.lang.Nullable;
@@ -30,8 +31,21 @@ import java.util.List;
 
 /**
  * Audit log repository for persisting query audit entries to database.
+ *
+ * <p>Registered only when {@code spring.datasource.url} is set. Without that key Boot still
+ * auto-configures an anonymous embedded database when a driver like H2 is on the classpath, and
+ * this repository used to bind to it — so audit rows landed in a throwaway in-memory schema that
+ * disappeared on restart while {@code entropy.mcp.database.audit.enabled: true} reported
+ * persistence as working. The condition is on the property rather than on the {@code JdbcTemplate}
+ * bean because {@code @ConditionalOnBean} against an auto-configured bean is order-dependent for
+ * scanned components, whereas property presence is not.
+ *
+ * <p>When the key is absent this bean is simply missing, and
+ * {@code QueryAuditLoggerImpl}/{@code ComplianceReportService} take their documented
+ * file-only paths — which is what the code always claimed happened.
  */
 @Repository
+@ConditionalOnProperty(name = "spring.datasource.url")
 public class AuditLogRepository {
 
     private static final Logger log = LoggerFactory.getLogger(AuditLogRepository.class);
@@ -57,28 +71,65 @@ public class AuditLogRepository {
             """;
 
     /**
+     * 建表只需要成功一次。这个类的实例是每个 BYOK 连接 new 一份的（见
+     * {@code ByokDataSourceFactory}），拿不到 {@code @PostConstruct} 那种单例初始化语义，所以用
+     * 实例级的 volatile 标记 + 双检：正常路径上每条审计都跑一次 {@code CREATE TABLE IF NOT EXISTS}
+     * 是白付一次 DDL 往返，在 Oracle 这类会为 DDL 拿字典锁的库上尤其不划算。
+     */
+    private volatile boolean tableEnsured;
+
+    /**
      * Insert a new audit log entry.
      *
      * <p>Propagates the failure on purpose. Swallowing it here made
-     * {@code QueryAuditLoggerImpl}'s {@code catch → dbAvailable = false} circuit breaker
-     * unreachable, so a permanently unwritable {@code audit_log} table produced one stack trace
-     * per query forever instead of degrading to file-only auditing after the first failure.
+     * {@code QueryAuditLoggerImpl}'s circuit breaker unreachable, so a permanently unwritable
+     * {@code audit_log} table produced one stack trace per query forever instead of degrading to
+     * file-only auditing after the first failure.
+     *
+     * <p>建表失败与插入失败在异常消息里分开说明：前者通常是权限或方言问题（一次性、要人介入），
+     * 后者可能只是连接池抖动（会被上层的半开熔断重试），运维要能从日志里直接区分。
      */
     public void insert(AuditLogEntity entity) {
-        jdbcTemplate.execute(CREATE_TABLE_SQL);
-        jdbcTemplate.update(
-            "INSERT INTO audit_log (tool, sql, rows, duration_ms, success, error, timestamp, connection_key) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            entity.tool(),
-            truncate(entity.sql(), 2000),
-            entity.rows(),
-            entity.durationMs(),
-            entity.success(),
-            truncate(entity.error(), 1000),
-            entity.timestamp(),
-            entity.connectionKey()
-        );
+        ensureTable();
+        try {
+            jdbcTemplate.update(
+                "INSERT INTO audit_log (tool, sql, rows, duration_ms, success, error, timestamp, connection_key) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                entity.tool(),
+                truncate(entity.sql(), 2000),
+                entity.rows(),
+                entity.durationMs(),
+                entity.success(),
+                truncate(entity.error(), 1000),
+                entity.timestamp(),
+                entity.connectionKey()
+            );
+        } catch (RuntimeException e) {
+            // 插入失败可能只是表刚被删掉/重建，让下一次调用重新确认一次表结构
+            this.tableEnsured = false;
+            throw new IllegalStateException("Failed to insert into audit_log: " + e.getMessage(), e);
+        }
     }
+
+    private void ensureTable() {
+        if (tableEnsured) {
+            return;
+        }
+        synchronized (this) {
+            if (tableEnsured) {
+                return;
+            }
+            try {
+                jdbcTemplate.execute(CREATE_TABLE_SQL);
+            } catch (RuntimeException e) {
+                throw new IllegalStateException(
+                        "Failed to create or verify the audit_log table (check DDL privileges and dialect): "
+                                + e.getMessage(), e);
+            }
+            tableEnsured = true;
+        }
+    }
+
 
     /**
      * Query audit logs with optional filters.

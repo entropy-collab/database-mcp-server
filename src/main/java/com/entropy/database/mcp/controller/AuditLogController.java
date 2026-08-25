@@ -38,9 +38,16 @@ public class AuditLogController {
     static final int MAX_LIMIT = 1000;
 
     private final QueryAuditLogger auditLogger;
+
+    /**
+     * Absent when no {@code spring.datasource.url} is configured — {@link AuditLogRepository} is
+     * gated on that key, and BYOK deployments routinely run without one. The in-memory
+     * {@code /logs} endpoint still works in that mode, so the controller must not require it.
+     */
     private final AuditLogRepository auditLogRepository;
 
-    public AuditLogController(QueryAuditLogger auditLogger, AuditLogRepository auditLogRepository) {
+    public AuditLogController(QueryAuditLogger auditLogger,
+                              @org.springframework.lang.Nullable AuditLogRepository auditLogRepository) {
         this.auditLogger = auditLogger;
         this.auditLogRepository = auditLogRepository;
     }
@@ -75,6 +82,13 @@ public class AuditLogController {
             @RequestParam(required = false) String connectionKey,
             @RequestParam(required = false) String startTime,
             @RequestParam(required = false) String endTime) {
+        if (auditLogRepository == null) {
+            // No persistence configured: report it rather than 500, and point at the in-memory endpoint.
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                    "Audit history is not persisted: no spring.datasource.url is configured. "
+                            + "Use /api/audit/logs for the in-memory buffer.");
+        }
         Instant start = parseInstant(startTime);
         Instant end = parseInstant(endTime);
         List<AuditLogEntity> entities =

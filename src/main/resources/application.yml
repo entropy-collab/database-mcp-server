@@ -11,7 +11,9 @@ management:
         include: health,info,metrics,prometheus
   endpoint:
     health:
-      show-details: always
+      # /actuator/health 对探针匿名开放（见 SecurityConfig），always 会把每个组件的明细一并给出，
+      # 其中 db 组件在故障时会回显驱动异常（含 JDBC URL）。明细只给已认证的调用方。
+      show-details: when-authorized
       probes:
         enabled: true
     metrics:
@@ -24,10 +26,24 @@ logging:
     org.springframework.ai.tool: DEBUG
 
 spring:
-  autoconfigure:
-    exclude:
-      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+  # These two entries used to exclude Boot 3's
+  # org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration /
+  # DataSourceTransactionManagerAutoConfiguration. Boot 4 moved both to
+  # org.springframework.boot.jdbc.autoconfigure, and an exclude naming a class that is not on the
+  # classpath is silently ignored (AutoConfigurationImportSelector only reports invalid excludes
+  # for classes it can load). So the exclusion never took effect: with h2 on the compile classpath
+  # and no spring.datasource.url, Boot kept building an anonymous embedded H2 pool.
+  #
+  # They are removed rather than renamed on purpose. Audit persistence is opt-in through
+  # spring.datasource.url (see entropy.mcp.database.audit below) and needs the auto-configuration
+  # to stay active; nothing else in the process uses a default DataSource, so leaving it
+  # auto-configurable costs nothing — Hikari only starts a pool when something asks for a
+  # connection.
+  #
+  # datasource:
+  #   url: jdbc:postgresql://audit-db:5432/mcp_audit   # enables audit_log persistence
+  #   username: mcp
+  #   password: ${MCP_AUDIT_DB_PASSWORD}
   ai:
     mcp:
       server:
@@ -57,10 +73,21 @@ entropy:
       dialect: generic
       query:
         max-rows: 100
+        # Also the read statement ceiling — see statement-timeout below.
         timeout-seconds: 30
         max-result-rows: 10000
         max-export-rows: 500
         fetch-size: 100
+      # Statement ceilings per work category. Every JDBC statement gets one: an unbounded statement
+      # holds its request thread until the driver's own socket timeout expires, so a few slow ones
+      # can consume the whole servlet thread pool. The read ceiling lives in query.timeout-seconds
+      # above so there is a single key per category.
+      # Hitting a ceiling means the statement is aborted — pick the matching category rather than
+      # raising a ceiling for work that belongs in another one.
+      statement-timeout:
+        write-seconds: 120
+        ddl-seconds: 300
+        etl-seconds: 600
       audit:
         enabled: true
         retention-days: 7
@@ -87,8 +114,28 @@ entropy:
       etl:
         thread-pool-size: 4
         batch-size: 1000
+      # Widths of the process-wide pools. Every one of these runs blocking JDBC, so they are
+      # absolute numbers rather than multiples of the CPU count.
+      thread-pool:
+        # @Async audit/compliance writes. CallerRuns on overflow, so a full queue slows the
+        # request thread instead of dropping audit records.
+        async-core-size: 4
+        async-max-size: 8
+        async-queue-capacity: 100
+        # Queue in front of the ETL pool; the pool width itself is etl.thread-pool-size above.
+        etl-queue-capacity: 50
+        # Cross-database fan-out in FederatedQueryGateway.
+        federated-query-size: 10
+        # Shared bound on concurrent per-table catalog generation across all scanSchema calls.
+        catalog-scan-size: 4
+        # @Scheduled tasks. Spring's default is a single thread.
+        scheduler-size: 2
       cache:
-        max-size: 1000
+        # Process-wide entry budget shared by every BYOK connection: one Caffeine instance is
+        # created for the whole JVM and keys are scoped per connection. Before that, one cache
+        # of this size existed per connection, so the real ceiling was
+        # max-size x byok.max-cached-connections on a heap sized for a single cache.
+        max-size: 2000
         query-ttl: 30s
         metadata-ttl: 5m
         max-warm-size: 10

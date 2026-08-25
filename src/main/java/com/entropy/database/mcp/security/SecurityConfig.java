@@ -100,6 +100,9 @@ public class SecurityConfig {
             .sessionManagement(session -> session
                 .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> {
+                // 存活/就绪探针拿不到凭证，所以 health 必须匿名可达；但「可达」只该给出 UP/DOWN。
+                // 组件明细里会带上 db 组件的驱动异常（含 JDBC URL）等信息，因此明细由
+                // management.endpoint.health.show-details=when-authorized 收口，而不是靠这里的路径规则。
                 auth.requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                     .requestMatchers("/actuator/info").permitAll();
                 if (securityEnabled) {

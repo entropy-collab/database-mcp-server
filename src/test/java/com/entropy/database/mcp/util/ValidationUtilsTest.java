@@ -49,6 +49,10 @@ class ValidationUtilsTest {
                 "1=1 UNION SELECT password FROM sys_users", // set operation appended to the clause
                 "1=1 ORDER BY 1",                      // trailing clause appended to the wrapper
                 "1=1 GROUP BY 1",
+                "a = 1 CONNECT BY LEVEL < 1000000",    // Oracle hierarchical query: unbounded row generator
+                "a = 1 START WITH b IN (SELECT pwd FROM sys_users) CONNECT BY PRIOR id = pid",
+                "a = 1 FOR UPDATE",                    // locks every matched row for the session
+                "a = 1 WINDOW w AS (PARTITION BY (SELECT 1))", // subquery smuggled into a window definition
                 "status = 'A"                          // unterminated literal: not parseable
         })
         void maliciousClauses(String clause) {

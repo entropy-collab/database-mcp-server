@@ -229,31 +229,52 @@ public final class ValidationUtils {
         if (!(statement instanceof PlainSelect probe)) {
             throw reject(paramName, "must be a single predicate, not a compound statement");
         }
-        assertNothingButAPredicate(probe, paramName);
+        assertNothingButAPredicate(probe, whereClause, paramName);
         assertAllowedExpression(probe.getWhere(), paramName);
     }
 
     /**
      * Guards against a clause that closes the predicate and appends its own SQL: the probe must
      * still be {@code SELECT 1 FROM DUAL WHERE ...} and nothing else.
+     *
+     * <p>逐个枚举 PlainSelect 的可选子句 getter 只在写下它的那一天是完整的：漏掉一个 getter，
+     * 整条子句就会原样通过校验，而调用方（如 EtlTools）会把它字面拼进 SQL。实测被漏掉的
+     * {@code START WITH ... CONNECT BY}（含子查询）、{@code FOR UPDATE}、{@code WINDOW}
+     * 就是这样进来的。所以这里反过来做 fail-closed 判定：把解析出的谓词重新序列化，要求它
+     * 覆盖入参的全部文本；凡是被解析器归到谓词之外的东西——包括 JSQLParser 以后新增的语法
+     * ——都会表现为「入参里多出一段文本」而被拒绝，无需再维护 getter 清单。
      */
-    private static void assertNothingButAPredicate(PlainSelect probe, String paramName) {
+    private static void assertNothingButAPredicate(PlainSelect probe, String whereClause, String paramName) {
         if (probe.getWhere() == null) {
             throw reject(paramName, "does not contain a predicate");
         }
-        boolean untouched = probe.getJoins() == null
-                && probe.getGroupBy() == null
-                && probe.getHaving() == null
-                && probe.getOrderByElements() == null
-                && probe.getLimit() == null
-                && probe.getOffset() == null
-                && probe.getFetch() == null
-                && probe.getDistinct() == null
-                && probe.getFromItem() instanceof net.sf.jsqlparser.schema.Table table
-                && "DUAL".equalsIgnoreCase(table.getName());
-        if (!untouched) {
+        String reserialized = canonicalize(WHERE_PROBE_PREFIX + probe.getWhere());
+        if (!reserialized.equals(canonicalize(WHERE_PROBE_PREFIX + whereClause))) {
             throw reject(paramName, "must contain only a predicate, without any further SQL clause");
         }
+        // FROM/JOIN 无法从 WHERE 之后追加，但保留这一层断言的成本近乎为零，
+        // 且能挡住未来某个版本把 WHERE 之后的文本重新归到 FROM 里的解析行为。
+        if (probe.getJoins() != null
+                || !(probe.getFromItem() instanceof net.sf.jsqlparser.schema.Table table)
+                || !"DUAL".equalsIgnoreCase(table.getName())) {
+            throw reject(paramName, "must contain only a predicate, without any further SQL clause");
+        }
+    }
+
+    /**
+     * 规范化到「可与 JSQLParser 输出逐字比较」的形式：只抹掉空白与大小写差异，因为解析器会把
+     * {@code 1=1} 输出成 {@code 1 = 1}、把关键字统一成大写。字符串字面量里的空白与大小写在
+     * 比较双方同样被抹掉，所以不会让两个不同的字面量互相冒充。
+     */
+    private static String canonicalize(String sql) {
+        StringBuilder canonical = new StringBuilder(sql.length());
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (!Character.isWhitespace(c)) {
+                canonical.append(Character.toUpperCase(c));
+            }
+        }
+        return canonical.toString();
     }
 
     /** Recursively whitelists the predicate's expression tree. */

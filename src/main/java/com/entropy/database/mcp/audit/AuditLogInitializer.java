@@ -18,14 +18,20 @@ package com.entropy.database.mcp.audit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * Initializes audit log table on startup.
+ *
+ * <p>Gated on the same key as {@link AuditLogRepository}: without {@code spring.datasource.url}
+ * this runner used to create {@code audit_log} in an anonymous embedded database that nothing else
+ * ever read.
  */
 @Configuration
+@ConditionalOnProperty(name = "spring.datasource.url")
 public class AuditLogInitializer {
 
     private static final Logger log = LoggerFactory.getLogger(AuditLogInitializer.class);

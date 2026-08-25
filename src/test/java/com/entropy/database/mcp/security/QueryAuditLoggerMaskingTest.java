@@ -100,6 +100,85 @@ class QueryAuditLoggerMaskingTest {
     }
 
     @Test
+    void masksPasswordThatFollowsTheKeywordDirectly() {
+        // PostgreSQL/H2 在关键字后直接给值，没有 = 也没有 :，靠 "field = value" 的规则抓不到
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues("CREATE USER app WITH PASSWORD 'sup3rs3cret'"))
+                .doesNotContain("sup3rs3cret")
+                .contains("CREATE USER app WITH PASSWORD '***'");
+
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues("ALTER ROLE app WITH LOGIN PASSWORD 'sup3rs3cret'"))
+                .doesNotContain("sup3rs3cret")
+                .contains("ALTER ROLE app WITH LOGIN PASSWORD '***'");
+
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues("CREATE USER h2u PASSWORD 'sup3rs3cret'"))
+                .doesNotContain("sup3rs3cret");
+    }
+
+    @Test
+    void masksMysqlPasswordFunctionArgument() {
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues("SELECT PASSWORD('sup3rs3cret')"))
+                .doesNotContain("sup3rs3cret")
+                .contains("PASSWORD('***')");
+    }
+
+    @Test
+    void masksOracleReplacedOldPassword() {
+        String masked = QueryAuditLoggerImpl.maskSensitiveValues(
+                "ALTER USER scott IDENTIFIED BY newpw REPLACE oldpw123");
+
+        assertThat(masked).doesNotContain("newpw").doesNotContain("oldpw123");
+        assertThat(masked).contains("IDENTIFIED BY '***' REPLACE '***'");
+    }
+
+    @Test
+    void leavesTheReplaceStringFunctionAlone() {
+        String sql = "UPDATE t SET name = REPLACE(name, 'a', 'b') WHERE id = 1";
+
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues(sql)).isEqualTo(sql);
+    }
+
+    @Test
+    void masksInsertValueOfASecretColumn() {
+        String masked = QueryAuditLoggerImpl.maskSensitiveValues(
+                "INSERT INTO users (name, password) VALUES ('bob', 'sup3rs3cret')");
+
+        assertThat(masked).doesNotContain("sup3rs3cret");
+        // 只有口令列被换掉，其余值保留，审计仍然能看出这条语句做了什么
+        assertThat(masked).contains("'bob'").contains("'***'");
+    }
+
+    @Test
+    void masksEveryRowOfAMultiRowInsert() {
+        String masked = QueryAuditLoggerImpl.maskSensitiveValues(
+                "INSERT INTO users (name, pwd) VALUES ('bob', 'first'), ('eve', 'second')");
+
+        assertThat(masked).doesNotContain("first").doesNotContain("second");
+        assertThat(masked).contains("'bob'").contains("'eve'");
+    }
+
+    @Test
+    void insertWithoutSecretColumnsIsUntouched() {
+        String sql = "INSERT INTO t (a, b) VALUES (1, 'x')";
+
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues(sql)).isEqualTo(sql);
+    }
+
+    @Test
+    void unparseableInsertFallsBackToTheRegexResult() {
+        // 审计在热路径上：解析失败只能退回正则结果，不能把异常抛给调用方
+        String sql = "INSERT INTO users (name, password) VALUES ('bob',";
+
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues(sql)).isEqualTo(sql);
+    }
+
+    @Test
+    void insertFromSelectIsHandledWithoutThrowing() {
+        String sql = "INSERT INTO users (name, password) SELECT n, p FROM staging";
+
+        assertThat(QueryAuditLoggerImpl.maskSensitiveValues(sql)).isEqualTo(sql);
+    }
+
+    @Test
     void leavesOrdinarySqlAlone() {
         String sql = "SELECT id, name FROM users WHERE status = 'A' AND amount > 100";
 
