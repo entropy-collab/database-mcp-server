@@ -24,6 +24,8 @@
         <sqlserver.jdbc.version>12.6.1.jre8</sqlserver.jdbc.version>
         <sqlite.jdbc.version>3.45.1.0</sqlite.jdbc.version>
         <spring-ai.version>2.0.0</spring-ai.version>
+        <archunit.version>1.4.2</archunit.version>
+        <jacoco.version>0.8.14</jacoco.version>
     </properties>
 
     <repositories>
@@ -210,6 +212,13 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- ArchUnit: architecture rules (evaluated warn-only, see ArchitectureRulesTest) -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <version>${archunit.version}</version>
+            <scope>test</scope>
+        </dependency>
 
     </dependencies>
 
@@ -218,6 +227,32 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <!--
+                JaCoCo coverage. Measurement only: no `check` goal and no thresholds, so coverage
+                can never break the build. Report is produced during the `test` phase (after
+                surefire) into target/site/jacoco/.
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <executions>
+                    <execution>
+                        <id>jacoco-prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>jacoco-report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
