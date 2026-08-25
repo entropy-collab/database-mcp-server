@@ -27,7 +27,6 @@ import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -60,8 +59,9 @@ import static org.mockito.Mockito.when;
  * MCP tools surface to clients. Assertions run against a real H2 in-memory database so that
  * limit/offset behaviour is verified by actual SQL rather than a mocked JdbcTemplate.
  *
- * <p>Tests marked {@code @Disabled} record defects found while writing this suite: they
- * assert the <em>intended</em> behaviour, not today's, and turn green once fixed.</p>
+ * <p>Cursor handling is asserted against the <em>intended</em> contract, including the edge cases
+ * this suite originally uncovered: negative tokens, tokens past {@code Integer.MAX_VALUE}, a
+ * zero row request, and a negative row request.</p>
  */
 class DatabaseReadRepositoryTest {
 
@@ -220,11 +220,7 @@ class DatabaseReadRepositoryTest {
         }
 
         @Test
-        @Disabled("BUG-13: a negative continuation token corrupts pagination instead of being "
-            + "rejected. parseCursor() returns -5, the dialect drops the OFFSET clause (offset <= 0) "
-            + "so page 1 is returned again, and the next token is computed as offset + limit = -2 — "
-            + "a negative token that keeps re-serving page 1. A client following tokens never "
-            + "advances.")
+        @DisplayName("a negative token restarts at page one and yields a usable next token")
         void negativeTokenMustNotProduceANegativeToken() {
             PaginatedQueryResult page = repository(100, 10000).executeQuery(ORDERED_QUERY, 3, "-5");
 
@@ -233,10 +229,7 @@ class DatabaseReadRepositoryTest {
         }
 
         @Test
-        @Disabled("BUG-14: continuation tokens are parsed as long then narrowed with (int), so any "
-            + "token beyond Integer.MAX_VALUE silently wraps. Token 4294967296 (2^32) becomes "
-            + "offset 0 and re-serves page 1; token 2147483648 becomes a negative offset. A token "
-            + "that cannot be represented should be refused, not truncated.")
+        @DisplayName("tokens beyond int range are clamped, not wrapped back to page one")
         void tokensBeyondIntRangeMustNotWrap() {
             DatabaseReadRepository repo = repository(100, 10000);
 
@@ -286,11 +279,7 @@ class DatabaseReadRepositoryTest {
         }
 
         @Test
-        @Disabled("BUG-15: maxRows=0 produces an endless pagination loop. limit becomes 0, the query "
-            + "returns no rows, yet hasMore is `rows.size() == limit` — 0 == 0 — so hasMore is true "
-            + "and the next token is offset + 0, i.e. the same offset. A client following tokens "
-            + "requests the same empty page forever. A 0 request should either be rejected or "
-            + "terminate the cursor.")
+        @DisplayName("maxRows=0 terminates the cursor instead of looping on an empty page")
         void zeroMaxRowsMustNotLoopForever() {
             PaginatedQueryResult page = repository(100, 10000).executeQuery(ORDERED_QUERY, 0, null);
 
@@ -300,11 +289,7 @@ class DatabaseReadRepositoryTest {
         }
 
         @Test
-        @Disabled("BUG-16: a negative maxRows is passed straight into the generated SQL "
-            + "(`... LIMIT -5`), so the driver fails with DataIntegrityViolationException "
-            + "('Invalid value \"-5\" for parameter \"result FETCH\"') instead of the repository "
-            + "rejecting the argument or clamping it. Raw driver errors leak to the MCP client and "
-            + "differ per dialect.")
+        @DisplayName("a negative maxRows is refused before it reaches the driver")
         void negativeMaxRowsMustBeRejectedOrClamped() {
             DatabaseReadRepository repo = repository(100, 10000);
 

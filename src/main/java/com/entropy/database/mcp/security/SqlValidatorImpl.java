@@ -17,10 +17,34 @@ package com.entropy.database.mcp.security;
 
 import com.entropy.database.mcp.exception.McpSqlValidationException;
 import com.entropy.database.mcp.properties.DatabaseProperties;
+import net.sf.jsqlparser.expression.BinaryExpression;
+import net.sf.jsqlparser.expression.CaseExpression;
+import net.sf.jsqlparser.expression.CastExpression;
+import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.Function;
+import net.sf.jsqlparser.expression.LongValue;
+import net.sf.jsqlparser.expression.NotExpression;
+import net.sf.jsqlparser.expression.Parenthesis;
+import net.sf.jsqlparser.expression.SignedExpression;
+import net.sf.jsqlparser.expression.WhenClause;
+import net.sf.jsqlparser.expression.operators.relational.Between;
+import net.sf.jsqlparser.expression.operators.relational.ExistsExpression;
+import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.InExpression;
+import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.select.Fetch;
+import net.sf.jsqlparser.statement.select.FromItem;
+import net.sf.jsqlparser.statement.select.Join;
+import net.sf.jsqlparser.statement.select.Limit;
 import net.sf.jsqlparser.statement.select.ParenthesedSelect;
 import net.sf.jsqlparser.statement.select.PlainSelect;
+import net.sf.jsqlparser.statement.select.Select;
+import net.sf.jsqlparser.statement.select.SelectItem;
+import net.sf.jsqlparser.statement.select.SetOperationList;
+import net.sf.jsqlparser.statement.select.WithItem;
+import net.sf.jsqlparser.util.TablesNamesFinder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -32,6 +56,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class SqlValidatorImpl implements SqlValidator {
     private static final Logger log = LoggerFactory.getLogger(SqlValidatorImpl.class);
     private static final Set<String> ALLOWED_OPS = Set.of("SELECT", "DESCRIBE", "SHOW", "EXPLAIN");
+
+    /**
+     * MySQL/MariaDB executable comments. Everything inside {@code /*! ... }{@code *}{@code /} is
+     * stripped by the parser but executed by the server, so a statement that parses as a plain
+     * SELECT can carry a UNION, a write, or a version-gated payload past every rule below.
+     */
+    private static final String EXECUTABLE_COMMENT = "/*!";
 
     private final DatabaseProperties properties;
 
@@ -48,7 +79,7 @@ public class SqlValidatorImpl implements SqlValidator {
     public SqlValidatorImpl(DatabaseProperties properties) {
         this.properties = properties;
         this.allowedOperations = Collections.unmodifiableSet(new HashSet<>(ALLOWED_OPS));
-        this.allowedTables = new HashSet<>(properties.security().allowedTables());
+        this.allowedTables = normalizeTables(properties.security().allowedTables());
     }
 
     @Override
@@ -68,6 +99,8 @@ public class SqlValidatorImpl implements SqlValidator {
 
     private void validate(String sql, boolean isDdl) {
         if (sql == null || sql.isBlank()) throw new McpSqlValidationException(sql, "SQL is empty");
+        if (sql.contains(EXECUTABLE_COMMENT))
+            throw new McpSqlValidationException(sql, "Executable comments are not allowed");
         Statement stmt;
         try { stmt = CCJSqlParserUtil.parse(sql.trim()); }
         catch (Exception e) { throw new McpSqlValidationException(sql, "SQL validation error", e); }
@@ -78,9 +111,10 @@ public class SqlValidatorImpl implements SqlValidator {
         Set<String> currentTables;
         synchronized (tablesLock) { currentTables = allowedTables; }
         if (!currentTables.isEmpty() && isSelect(stmt)) {
-            Set<String> tables = extractTables(stmt);
-            Set<String> unauth = new HashSet<>(tables);
-            unauth.removeAll(currentTables);
+            Set<String> unauth = new LinkedHashSet<>();
+            for (String table : extractTables(sql, stmt)) {
+                if (!isWhitelisted(table, currentTables)) unauth.add(table);
+            }
             if (!unauth.isEmpty()) throw new McpSqlValidationException(sql, "Tables not allowed: " + unauth);
         }
         int joins = extractJoinCount(stmt);
@@ -101,90 +135,206 @@ public class SqlValidatorImpl implements SqlValidator {
     }
 
     private boolean isSelect(Statement stmt) {
-        return stmt instanceof PlainSelect || stmt.getClass().getSimpleName().contains("Select");
+        return stmt instanceof Select;
     }
 
-    private Set<String> extractTables(Statement stmt) {
-        Set<String> tables = new HashSet<>();
-        if (stmt instanceof PlainSelect) {
-            PlainSelect ps = (PlainSelect) stmt;
-            var from = ps.getFromItem();
-            if (from != null) {
-                String t = from.toString().split("\\.")[0];
-                if (!t.matches("\\d+")) tables.add(t.toUpperCase());
-            }
-            if (ps.getJoins() != null) {
-                for (var j : ps.getJoins()) {
-                    String t = j.getRightItem().toString().split("\\.")[0];
-                    if (!t.matches("\\d+")) tables.add(t.toUpperCase());
-                }
+    /**
+     * Collects every table the statement reads, including tables that only appear inside a
+     * derived table, a WHERE/SELECT-list subquery, a set operation or a CTE body. Delegating to
+     * {@link TablesNamesFinder} also strips aliases and skips CTE names, so a CTE cannot shadow a
+     * whitelisted name to smuggle in a different table.
+     *
+     * <p>Traversal failure is treated as a validation failure rather than an empty result: an
+     * unresolvable statement must not slip past the whitelist.</p>
+     */
+    private Set<String> extractTables(String sql, Statement stmt) {
+        Set<String> found;
+        try {
+            found = new TablesNamesFinder().getTables(stmt);
+        } catch (RuntimeException e) {
+            throw new McpSqlValidationException(sql, "Unable to resolve table names for whitelist check", e);
+        }
+        Set<String> normalized = new LinkedHashSet<>();
+        for (String name : found) {
+            if (name != null && !name.isBlank()) normalized.add(name.toUpperCase(Locale.ROOT));
+        }
+        return normalized;
+    }
+
+    /**
+     * A schema-qualified reference is matched on its table name as well as its full name, so
+     * {@code allowed-tables: [USERS]} accepts {@code app.users} while {@code allowed-tables: [APP]}
+     * does not silently grant every table in that schema.
+     */
+    private boolean isWhitelisted(String table, Set<String> allowed) {
+        if (allowed.contains(table)) return true;
+        int dot = table.lastIndexOf('.');
+        return dot >= 0 && dot + 1 < table.length() && allowed.contains(table.substring(dot + 1));
+    }
+
+    /** Whitelist entries are normalized so YAML may spell table names in any case. */
+    private static Set<String> normalizeTables(Collection<String> tables) {
+        Set<String> normalized = new HashSet<>();
+        if (tables != null) {
+            for (String t : tables) {
+                if (t != null && !t.isBlank()) normalized.add(t.trim().toUpperCase(Locale.ROOT));
             }
         }
-        return tables;
+        return normalized;
     }
 
+    /**
+     * Reads the row cap the client asked for, covering both {@code LIMIT n} and the ANSI/Oracle
+     * {@code FETCH FIRST n ROWS ONLY}. Oracle is this server's primary dialect and has no
+     * {@code LIMIT}, so ignoring FETCH would leave the rule inert there.
+     *
+     * @return the requested cap, or the configured maximum when the statement asks for no cap
+     */
     private int extractMaxRows(Statement stmt) {
-        if (stmt instanceof PlainSelect) {
-            PlainSelect ps = (PlainSelect) stmt;
-            if (ps.getLimit() != null && ps.getLimit().getRowCount() != null) {
-                Object rowCountObj = ps.getLimit().getRowCount();
-                if (rowCountObj instanceof Long) {
-                    return ((Long) rowCountObj).intValue();
-                }
-            }
-        }
-        return getMaxRows();
+        if (!(stmt instanceof Select select)) return getMaxRows();
+        Long requested = explicitRowLimit(select);
+        if (requested == null) return getMaxRows();
+        return requested > Integer.MAX_VALUE ? Integer.MAX_VALUE : requested.intValue();
     }
 
+    private Long explicitRowLimit(Select select) {
+        Limit limit = select.getLimit();
+        if (limit != null) {
+            Long value = longValueOf(limit.getRowCount());
+            if (value != null) return value;
+        }
+        Fetch fetch = select.getFetch();
+        if (fetch != null) {
+            Long value = longValueOf(fetch.getExpression());
+            if (value != null) return value;
+            if (fetch.getRowCount() > 0) return fetch.getRowCount();
+        }
+        if (select instanceof ParenthesedSelect parenthesed) return explicitRowLimit(parenthesed.getSelect());
+        return null;
+    }
+
+    private Long longValueOf(Expression expr) {
+        return expr instanceof LongValue value ? value.getValue() : null;
+    }
+
+    /** Total joins across the whole statement, so joins inside a subquery are not free. */
     private int extractJoinCount(Statement stmt) {
-        if (stmt instanceof PlainSelect ps) {
-            return ps.getJoins() != null ? ps.getJoins().size() : 0;
+        return stmt instanceof Select select ? joinCount(select) : 0;
+    }
+
+    private int joinCount(Select select) {
+        if (select instanceof ParenthesedSelect parenthesed) return joinCount(parenthesed.getSelect());
+        if (select instanceof SetOperationList operations) {
+            int total = 0;
+            if (operations.getSelects() != null) {
+                for (Select branch : operations.getSelects()) total += joinCount(branch);
+            }
+            return total;
+        }
+        if (select instanceof PlainSelect plain) {
+            int total = plain.getJoins() == null ? 0 : plain.getJoins().size();
+            total += nestedSelects(plain).stream().mapToInt(this::joinCount).sum();
+            return total;
         }
         return 0;
     }
 
+    /**
+     * Measures how deeply subqueries nest. Every parenthesised select reached from a FROM item, a
+     * JOIN, the WHERE/HAVING tree or the SELECT list counts as one level, so a chain of
+     * {@code IN (SELECT ...)} predicates behind {@code AND}/{@code OR} is counted rather than
+     * collapsing to zero.
+     */
     private int extractSubqueryDepth(Statement stmt) {
-        return extractSubqueryDepth(stmt, 0);
+        return stmt instanceof Select select ? selectDepth(select, 0) : 0;
     }
 
-    private int extractSubqueryDepth(Statement stmt, int currentDepth) {
-        if (stmt instanceof PlainSelect ps) {
-            if (ps.getFromItem() instanceof ParenthesedSelect parenthesed) {
-                Statement subStmt = (Statement) parenthesed.getSelectBody();
-                int subDepth = extractSubqueryDepth(subStmt, currentDepth + 1);
-                if (subDepth > currentDepth) currentDepth = subDepth;
+    private int selectDepth(Select select, int depth) {
+        if (select instanceof ParenthesedSelect parenthesed) return selectDepth(parenthesed.getSelect(), depth);
+        if (select instanceof SetOperationList operations) {
+            int max = depth;
+            if (operations.getSelects() != null) {
+                for (Select branch : operations.getSelects()) max = Math.max(max, selectDepth(branch, depth));
             }
-            if (ps.getWhere() != null) {
-                int whereDepth = extractSubqueryDepth(ps.getWhere(), currentDepth);
-                if (whereDepth > currentDepth) currentDepth = whereDepth;
-            }
-            if (ps.getJoins() != null) {
-                for (var join : ps.getJoins()) {
-                    if (join.getRightItem() instanceof ParenthesedSelect parenthesed) {
-                        Statement subStmt = (Statement) parenthesed.getSelectBody();
-                        int joinDepth = extractSubqueryDepth(subStmt, currentDepth + 1);
-                        if (joinDepth > currentDepth) currentDepth = joinDepth;
-                    }
+            return max;
+        }
+        if (select instanceof PlainSelect plain) {
+            int max = depth;
+            for (Select nested : nestedSelects(plain)) max = Math.max(max, selectDepth(nested, depth + 1));
+            max = Math.max(max, expressionDepth(plain.getWhere(), depth));
+            max = Math.max(max, expressionDepth(plain.getHaving(), depth));
+            if (plain.getSelectItems() != null) {
+                for (SelectItem<?> item : plain.getSelectItems()) {
+                    max = Math.max(max, expressionDepth(item.getExpression(), depth));
                 }
             }
+            return max;
         }
-        return currentDepth;
+        return depth;
     }
 
-    private int extractSubqueryDepth(net.sf.jsqlparser.expression.Expression expr, int currentDepth) {
-        if (expr instanceof net.sf.jsqlparser.expression.operators.relational.InExpression in) {
-            if (in.getRightExpression() instanceof ParenthesedSelect parenthesed) {
-                Statement subStmt = (Statement) parenthesed.getSelectBody();
-                return extractSubqueryDepth(subStmt, currentDepth + 1);
-            }
+    /** Selects nested directly under this select's FROM item, JOINs and WITH clause. */
+    private List<Select> nestedSelects(PlainSelect plain) {
+        List<Select> nested = new ArrayList<>();
+        addIfSelect(nested, plain.getFromItem());
+        if (plain.getJoins() != null) {
+            for (Join join : plain.getJoins()) addIfSelect(nested, join.getRightItem());
         }
-        if (expr instanceof net.sf.jsqlparser.expression.operators.relational.ExistsExpression exists) {
-            if (exists.getRightExpression() instanceof ParenthesedSelect parenthesed) {
-                Statement subStmt = (Statement) parenthesed.getSelectBody();
-                return extractSubqueryDepth(subStmt, currentDepth + 1);
-            }
+        if (plain.getWithItemsList() != null) {
+            for (WithItem with : plain.getWithItemsList()) nested.add(with.getSelect());
         }
-        return currentDepth;
+        return nested;
+    }
+
+    private void addIfSelect(List<Select> target, FromItem fromItem) {
+        if (fromItem instanceof ParenthesedSelect parenthesed) target.add(parenthesed.getSelect());
+    }
+
+    /**
+     * Walks the composite expression types that can hold a subquery. Unrecognised node types stop
+     * the walk, which under-counts rather than over-counts; the depth limit is a cost guard, and
+     * the table whitelist — the actual security boundary — uses {@link TablesNamesFinder} instead.
+     */
+    private int expressionDepth(Expression expr, int depth) {
+        if (expr == null) return depth;
+        if (expr instanceof Select nested) return selectDepth(nested, depth + 1);
+        if (expr instanceof BinaryExpression binary) {
+            return Math.max(expressionDepth(binary.getLeftExpression(), depth),
+                    expressionDepth(binary.getRightExpression(), depth));
+        }
+        if (expr instanceof InExpression in) {
+            return Math.max(expressionDepth(in.getLeftExpression(), depth),
+                    expressionDepth(in.getRightExpression(), depth));
+        }
+        if (expr instanceof ExistsExpression exists) return expressionDepth(exists.getRightExpression(), depth);
+        if (expr instanceof Parenthesis parenthesis) return expressionDepth(parenthesis.getExpression(), depth);
+        if (expr instanceof NotExpression not) return expressionDepth(not.getExpression(), depth);
+        if (expr instanceof SignedExpression signed) return expressionDepth(signed.getExpression(), depth);
+        if (expr instanceof IsNullExpression isNull) return expressionDepth(isNull.getLeftExpression(), depth);
+        if (expr instanceof CastExpression cast) return expressionDepth(cast.getLeftExpression(), depth);
+        if (expr instanceof Between between) {
+            int max = expressionDepth(between.getLeftExpression(), depth);
+            max = Math.max(max, expressionDepth(between.getBetweenExpressionStart(), depth));
+            return Math.max(max, expressionDepth(between.getBetweenExpressionEnd(), depth));
+        }
+        if (expr instanceof CaseExpression caseExpr) {
+            int max = expressionDepth(caseExpr.getSwitchExpression(), depth);
+            max = Math.max(max, expressionDepth(caseExpr.getElseExpression(), depth));
+            if (caseExpr.getWhenClauses() != null) {
+                for (WhenClause when : caseExpr.getWhenClauses()) {
+                    max = Math.max(max, expressionDepth(when.getWhenExpression(), depth));
+                    max = Math.max(max, expressionDepth(when.getThenExpression(), depth));
+                }
+            }
+            return max;
+        }
+        if (expr instanceof ExpressionList<?> list) {
+            int max = depth;
+            for (Expression item : list) max = Math.max(max, expressionDepth(item, depth));
+            return max;
+        }
+        if (expr instanceof Function function) return expressionDepth(function.getParameters(), depth);
+        return depth;
     }
 
     @Override
@@ -199,7 +349,7 @@ public class SqlValidatorImpl implements SqlValidator {
     }
     @Override
     public void setAllowedTables(Set<String> allowedTables) {
-        synchronized (tablesLock) { this.allowedTables = new HashSet<>(allowedTables); }
+        synchronized (tablesLock) { this.allowedTables = normalizeTables(allowedTables); }
     }
     @Override
     public Set<String> getAllowedOperations() { return allowedOperations; }

@@ -18,7 +18,6 @@ package com.entropy.database.mcp.security;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpSqlValidationException;
 import com.entropy.database.mcp.properties.DatabaseProperties;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -43,9 +42,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * full rule surface (operation whitelist, table whitelist, JOIN/subquery/row limits, the
  * separate {@code validateDdl} path, malformed and injection-shaped input).
  *
- * <p>Tests marked {@code @Disabled} document defects found while writing this suite: they
- * assert the <em>intended</em> rule, not today's behaviour, so they turn green once the
- * implementation is fixed.</p>
+ * <p>The whitelist and limit rules are asserted against the <em>intended</em> behaviour, including
+ * the bypasses this suite originally uncovered: aliases, schema qualification, derived tables,
+ * subqueries, CTE shadowing, parenthesised statements, MySQL executable comments, and the
+ * {@code LIMIT}/{@code FETCH FIRST} row cap.</p>
  */
 class SqlValidatorTest {
 
@@ -257,10 +257,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-1: MySQL executable comments bypass the operation whitelist. "
-            + "`SELECT 1 /*! UNION SELECT 2 */` parses as a plain SELECT here, so it is accepted, "
-            + "while MySQL executes the UNION inside /*! ... */. Plain UNION is refused "
-            + "(see setOperationsAreRefused), so the comment form is a bypass of that rule.")
+        @DisplayName("MySQL executable comments are refused: the parser strips them, the server runs them")
         void executableCommentsMustBeRefused() {
             rejectedSelect(validator(), "SELECT 1 /*! UNION SELECT password FROM admin */");
             rejectedSelect(validator(), "SELECT 1 /*!32302 UNION SELECT 2 */");
@@ -341,10 +338,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-2: a table alias defeats the whitelist. `SELECT * FROM users u` with "
-            + "allowed-tables=[USERS] is refused because extractTables() uses FromItem.toString(), "
-            + "yielding the token 'USERS U'. Every aliased query — i.e. most real queries — is "
-            + "blocked, which pushes operators towards disabling the whitelist entirely.")
+        @DisplayName("an alias does not hide a whitelisted table")
         void aliasedTableMustBeAcceptedWhenWhitelisted() {
             SqlValidatorImpl v = validatorWithTables("USERS");
             assertThatCode(() -> v.validateSelect("SELECT * FROM users u")).doesNotThrowAnyException();
@@ -352,10 +346,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-3: for schema-qualified names the whitelist matches the SCHEMA, not the table. "
-            + "extractTables() takes toString().split(\"\\\\.\")[0], so `SELECT * FROM app.users` is "
-            + "checked as 'APP'. Consequences: a whitelisted table is refused when qualified, and "
-            + "whitelisting one schema-shaped entry (e.g. 'APP') grants access to every table in it.")
+        @DisplayName("a schema-qualified name is matched on the table, not the schema")
         void schemaQualifiedTableMustBeMatchedOnTableName() {
             SqlValidatorImpl v = validatorWithTables("USERS");
             assertThatCode(() -> v.validateSelect("SELECT * FROM app.users")).doesNotThrowAnyException();
@@ -364,10 +355,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-4: whitelist entries are compared case-sensitively against upper-cased table "
-            + "names. Configuring `security.allowed-tables: users` (lower case, the natural spelling "
-            + "in YAML) silently blocks every query, because extractTables() upper-cases 'users' to "
-            + "'USERS' and the configured set still holds 'users'.")
+        @DisplayName("whitelist entries may be configured in any case")
         void whitelistEntriesMustBeCaseInsensitive() {
             SqlValidatorImpl v = validatorWithTables("users");
             assertThatCode(() -> v.validateSelect("SELECT * FROM users")).doesNotThrowAnyException();
@@ -375,10 +363,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-5: a derived table is treated as a table name. "
-            + "`SELECT * FROM (SELECT * FROM users) t` with allowed-tables=[USERS] is refused with "
-            + "'Tables not allowed: [(SELECT * FROM USERS) T]' — the inner, whitelisted table is "
-            + "never inspected.")
+        @DisplayName("a derived table is resolved to the tables it reads")
         void derivedTableMustBeResolvedToItsInnerTables() {
             SqlValidatorImpl v = validatorWithTables("USERS");
             assertThatCode(() -> v.validateSelect("SELECT * FROM (SELECT * FROM users) t"))
@@ -386,11 +371,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-6 (whitelist bypass): tables referenced only inside a subquery are never "
-            + "collected. With allowed-tables=[USERS], "
-            + "`SELECT * FROM users WHERE id IN (SELECT id FROM admin)` and "
-            + "`SELECT (SELECT MAX(password) FROM admin) AS p FROM users` are accepted, so data from "
-            + "a non-whitelisted table can be read.")
+        @DisplayName("tables referenced only inside a subquery are checked too")
         void subqueryTablesMustBeCheckedAgainstWhitelist() {
             SqlValidatorImpl v = validatorWithTables("USERS");
             rejectedSelect(v, "SELECT * FROM users WHERE id IN (SELECT id FROM admin)");
@@ -399,20 +380,14 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-7 (whitelist bypass): a CTE that shadows a whitelisted name is accepted. "
-            + "`WITH users AS (SELECT * FROM admin) SELECT * FROM users` passes with "
-            + "allowed-tables=[USERS] because only the outer FROM item ('USERS') is inspected, "
-            + "while the statement actually returns rows from ADMIN.")
+        @DisplayName("a CTE cannot shadow a whitelisted name to read another table")
         void cteShadowingMustNotBypassWhitelist() {
             rejectedSelect(validatorWithTables("USERS"),
                 "WITH users AS (SELECT * FROM admin) SELECT * FROM users");
         }
 
         @Test
-        @Disabled("BUG-8 (whitelist bypass): wrapping the statement in parentheses skips table "
-            + "extraction entirely. `(SELECT * FROM admin)` parses to ParenthesedSelect, which "
-            + "extractOp() maps to SELECT (allowed) but extractTables() ignores because it only "
-            + "handles PlainSelect — so it is accepted with allowed-tables=[USERS].")
+        @DisplayName("wrapping the statement in parentheses does not skip the whitelist")
         void parenthesisedSelectMustNotBypassWhitelist() {
             rejectedSelect(validatorWithTables("USERS"), "(SELECT * FROM admin)");
         }
@@ -465,11 +440,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-9: the subquery depth limit can never fire. extractSubqueryDepth() unwraps a "
-            + "ParenthesedSelect via getSelectBody(), which in JSQLParser 4.9 returns the "
-            + "ParenthesedSelect itself rather than the inner PlainSelect, so the recursion stops "
-            + "immediately and the measured depth is capped at 1 (verified for 1..8 nesting levels). "
-            + "With maxSubqueryDepth=5, 8 levels of nested FROM subqueries are still accepted.")
+        @DisplayName("nested FROM subqueries past the depth limit are refused")
         void enforcesMaxSubqueryDepthForNestedFrom() {
             SqlValidatorImpl v = validator();
             assertThat(rejectedSelect(v, nestedFromSubqueries(6)).getMessage())
@@ -478,11 +449,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-10: subqueries reached through a compound WHERE clause are not counted. "
-            + "extractSubqueryDepth(Expression) only inspects a top-level IN/EXISTS, so "
-            + "`WHERE 1=1 AND id IN (...)` measures depth 0, and a chain of six nested IN "
-            + "subqueries stays under the limit of 5. Scalar subqueries in the SELECT list are not "
-            + "counted either.")
+        @DisplayName("subqueries reached through a WHERE clause count towards the depth limit")
         void enforcesMaxSubqueryDepthForWhereSubqueries() {
             SqlValidatorImpl v = validator();
             assertThat(rejectedSelect(v, nestedInSubqueries(6)).getMessage())
@@ -523,10 +490,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-11: the 'explicit LIMIT above maxRows' rule is dead code. "
-            + "extractMaxRows() does `ps.getLimit().getRowCount() instanceof Long`, but JSQLParser "
-            + "returns an Expression (LongValue), so the branch is never taken and getMaxRows() is "
-            + "returned instead. `SELECT * FROM users LIMIT 999999` is accepted with maxRows=100.")
+        @DisplayName("an explicit LIMIT above maxRows is refused")
         void refusesLimitAboveMaxRows() {
             SqlValidatorImpl v = validator();
             assertThat(rejectedSelect(v, "SELECT * FROM users LIMIT 999999").getMessage())
@@ -535,10 +499,7 @@ class SqlValidatorTest {
         }
 
         @Test
-        @Disabled("BUG-12: the row rule only looks at LIMIT, so the ANSI/Oracle spelling is ignored. "
-            + "`SELECT * FROM users FETCH FIRST 999999 ROWS ONLY` is accepted with maxRows=100 — and "
-            + "Oracle is this server's default dialect, where LIMIT does not exist at all, so the "
-            + "rule is inert for the primary target database.")
+        @DisplayName("FETCH FIRST n ROWS ONLY above maxRows is refused (Oracle has no LIMIT)")
         void refusesFetchFirstAboveMaxRows() {
             rejectedSelect(validator(), "SELECT * FROM users FETCH FIRST 999999 ROWS ONLY");
         }

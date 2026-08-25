@@ -241,6 +241,11 @@ public class DatabaseReadRepository {
 
     @SuppressWarnings("unchecked")
     private PaginatedQueryResult executeQueryDirect(String sql, int maxRows, String continuationToken) {
+        if (maxRows < 0) {
+            throw new com.entropy.database.mcp.exception.McpQueryException(
+                com.entropy.database.mcp.exception.ErrorCode.QUERY_EXECUTION_FAILED,
+                "maxRows must not be negative: " + maxRows);
+        }
         // Inject SQLCommenter trace annotation for database-side query tracking
         String tracedSql = injectSqlComment(sql);
 
@@ -264,7 +269,7 @@ public class DatabaseReadRepository {
         }
 
         // Execute query with pagination
-        int offset = (int) parseCursor(continuationToken);
+        int offset = resolveOffset(continuationToken);
         String limitedSql = dialect.supportsLimit()
                 ? dialect.applyLimit(tracedSql, limit, offset)
                 : tracedSql;
@@ -298,10 +303,12 @@ public class DatabaseReadRepository {
                 "Query result exceeds max-result-rows limit: " + rows.size() + " > " + maxResultRows);
         }
 
-        boolean hasMore = rows.size() == limit;
+        // A limit of 0 returns no rows, so rows.size() == limit must not be read as "there is more":
+        // that would hand back the same offset again and loop the client over an empty page forever.
+        boolean hasMore = limit > 0 && rows.size() == limit;
         String nextToken = null;
         if (hasMore) {
-            nextToken = String.valueOf(offset + limit);
+            nextToken = String.valueOf((long) offset + limit);
         }
 
         PaginatedQueryResult result = PaginatedQueryResult.from(rows, nextToken, hasMore);
@@ -309,16 +316,12 @@ public class DatabaseReadRepository {
         // Apply data masking before caching and returning
         List<Map<String, Object>> maskedRows = maskingService.maskResults(rows, sqlValidator.getMaskColumns());
         if (maskedRows != rows) {
-            String maskedCacheKey = cacheKey + ":masked";
             result = new PaginatedQueryResult(result.columns(), maskedRows, nextToken, hasMore);
-            if (continuationToken == null || continuationToken.isBlank()) {
-                cache.putQuery(maskedCacheKey, result);
-                cache.getQueryBloomFilter().put(schema + "." + sql);
-            }
         }
 
-        // Cache first page results
-        if ((continuationToken == null || continuationToken.isBlank()) && maskedRows == rows) {
+        // Cache first page results. The masked variant is stored under the same key it is read
+        // from: a separate ":masked" key was never looked up, so masked pages never hit the cache.
+        if (continuationToken == null || continuationToken.isBlank()) {
             cache.putQuery(cacheKey, result);
             cache.getQueryBloomFilter().put(schema + "." + sql);
         }
@@ -370,6 +373,19 @@ public class DatabaseReadRepository {
         } catch (NumberFormatException e) {
             return 0L;
         }
+    }
+
+    /**
+     * Turns a continuation token into a row offset. A negative token is treated as the start of the
+     * result set — left as-is it would drop the OFFSET clause, re-serve page one and hand back an
+     * even more negative next token, so a client following tokens would never advance. A token past
+     * {@link Integer#MAX_VALUE} is clamped rather than narrowed, because the cast wraps: 2^32 would
+     * become offset 0 and re-serve page one.
+     */
+    private int resolveOffset(String token) {
+        long cursor = parseCursor(token);
+        if (cursor <= 0) return 0;
+        return cursor > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) cursor;
     }
 
     /**
