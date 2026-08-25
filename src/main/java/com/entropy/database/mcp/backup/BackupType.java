@@ -24,5 +24,13 @@ public enum BackupType {
     /** Incremental — captures only rows changed since last backup */
     INCREMENTAL,
     /** Snapshot — a point-in-time consistent copy (uses flashback/flashback query where available) */
-    SNAPSHOT
+    SNAPSHOT,
+    /**
+     * 只含建表 DDL、不含任何数据行的结构备份。
+     *
+     * <p>结构备份曾经也记成 {@link #FULL}，于是它和「整表数据备份」在元数据上无从分辨：用结构备份的 id
+     * 去调 quickRestore，会先 DELETE 全表、再回放 0 条 INSERT，把表清空并提交。数据恢复路径因此需要一个
+     * 能在元数据上就判定「这份备份没有数据」的类型。
+     */
+    SCHEMA
 }

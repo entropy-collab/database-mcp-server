@@ -29,9 +29,14 @@ import org.springframework.stereotype.Service;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.*;
 
 /**
@@ -69,6 +74,13 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
 
     // ─── Full Backup ────────────────────────────────────────────────────────
 
+    /**
+     * Backs up a table's DDL only.
+     *
+     * <p>The record is typed {@link BackupType#SCHEMA} rather than {@code FULL}: it carries no INSERT
+     * statements, and a data-restore path that cannot tell it apart from a data backup would clear the
+     * target table and replay nothing.
+     */
     @Override
     public Map<String, Object> backupSchema(String tableName, String connection) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
@@ -79,14 +91,14 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
 
         Instant now = Instant.now();
         BackupMetadata meta = BackupMetadata.create(connection, tableName, null,
-                BackupType.FULL, BackupStatus.COMPLETED, ddl, 0, 0).withTiming(now, now);
+                BackupType.SCHEMA, BackupStatus.COMPLETED, ddl, 0, 0).withTiming(now, now);
         String id = metadataRepository.save(meta);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("backupId", id);
         result.put("tableName", tableName);
         result.put("connection", connection);
-        result.put("type", "SCHEMA");
+        result.put("type", BackupType.SCHEMA.name());
         result.put("ddl", ddl);
         result.put("rowCount", 0);
         return result;
@@ -121,7 +133,9 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                                                      String watermarkColumn) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
+        // Bulk ceiling: the watermark-filtered SELECT below scans a real table, which is not work
+        // an interactive read timeout should be sized for.
+        JdbcTemplate jdbc = ctx.getEtlJdbcTemplate();
 
         List<String> columnNames = readColumnNames(jdbc, dialect, tableName, null);
         if (columnNames.isEmpty()) {
@@ -143,11 +157,15 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         }
 
         Instant watermark = resolveWatermark(connection, tableName);
+        int effectiveMaxRows = resolveMaxRows(maxRows);
 
+        // ORDER BY 是正确性要求，不是排版偏好：命中行数上限时，只有按水位排序才能保证被截断掉的是「水位最大
+        // 的那一段」，从而算出一个可以续上的水位。无序截断会让任意一批行落到水位之后，永远进不了下一次增量。
         String selectSql = "SELECT " + quoteAll(dialect, columnNames)
                 + " FROM " + dialect.quote(tableName)
-                + " WHERE " + dialect.quote(resolvedWatermarkColumn) + " > ?";
-        selectSql = dialect.applyLimit(selectSql, resolveMaxRows(maxRows), 0);
+                + " WHERE " + dialect.quote(resolvedWatermarkColumn) + " > ?"
+                + " ORDER BY " + dialect.quote(resolvedWatermarkColumn);
+        selectSql = dialect.applyLimit(selectSql, effectiveMaxRows, 0);
 
         List<Map<String, Object>> rows;
         try {
@@ -160,12 +178,16 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         }
 
         List<String> insertStatements = generateInsertStatements(tableName, columnNames, rows, dialect);
+        boolean truncated = rows.size() >= effectiveMaxRows;
+        Instant nextWatermark = advanceWatermark(rows, resolvedWatermarkColumn, watermark, truncated);
 
         Instant now = Instant.now();
         BackupMetadata meta = BackupMetadata.create(connection, tableName, null,
-                        BackupType.INCREMENTAL, BackupStatus.COMPLETED,
+                        BackupType.INCREMENTAL,
+                        truncated ? BackupStatus.PARTIAL : BackupStatus.COMPLETED,
                         String.join("\n", insertStatements), rows.size(), rows.size())
-                .withTiming(now, now);
+                .withTiming(now, now)
+                .withDataWatermark(nextWatermark);
         String id = metadataRepository.save(meta);
 
         Map<String, Object> result = new LinkedHashMap<>();
@@ -175,9 +197,55 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         result.put("type", "INCREMENTAL");
         result.put("watermarkColumn", resolvedWatermarkColumn);
         result.put("watermark", watermark.toString());
+        result.put("nextWatermark", nextWatermark.toString());
+        result.put("maxRows", effectiveMaxRows);
         result.put("rowsBackedUp", rows.size());
+        result.put("truncated", truncated);
+        if (truncated) {
+            result.put("status", BackupStatus.PARTIAL.name());
+            result.put("hint", "Hit the row ceiling of " + effectiveMaxRows + ", so this backup holds "
+                    + "only the oldest slice of the pending changes. The watermark was advanced only "
+                    + "to " + nextWatermark + ", so the remaining rows are picked up by the next "
+                    + "incremental run — repeat it until truncated is false. Raise maxRows to catch up "
+                    + "in fewer rounds.");
+        }
         result.put("statements", insertStatements);
         return result;
+    }
+
+    /**
+     * Watermark to hand to the next incremental run.
+     *
+     * <p>Never the backup's completion time: the rows that this run did not capture still carry an
+     * older watermark, and moving the mark to "now" hides them from every later incremental — a hole
+     * no retry can fill. The mark therefore only ever moves to a watermark value that was actually
+     * captured.
+     *
+     * <p>When the run was truncated the largest captured value is not safe either: rows sharing that
+     * value may sit on both sides of the cut, so the mark stops at the last <em>fully</em> captured
+     * value. If every captured row shares one value the mark cannot move at all — the ceiling is
+     * smaller than a single watermark group, and standing still (re-reading the same slice next time)
+     * is the only option that does not drop rows. Rows beyond the mark are replayed by a later
+     * incremental, so a restore may see them twice; duplicates are recoverable, holes are not.
+     */
+    private Instant advanceWatermark(List<Map<String, Object>> rows, String watermarkColumn,
+                                     Instant previousWatermark, boolean truncated) {
+        List<Instant> captured = rows.stream()
+                .map(row -> toInstant(caseInsensitive(row).get(watermarkColumn)))
+                .filter(Objects::nonNull)
+                .sorted()
+                .toList();
+        if (captured.isEmpty()) {
+            return previousWatermark;
+        }
+        Instant highest = captured.get(captured.size() - 1);
+        if (!truncated) {
+            return highest;
+        }
+        return captured.stream()
+                .filter(value -> value.isBefore(highest))
+                .reduce((a, b) -> b)
+                .orElse(previousWatermark);
     }
 
     /**
@@ -202,15 +270,30 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
     }
 
     /**
-     * Watermark of the previous backup.
+     * Starting watermark for this incremental run.
      *
-     * <p>{@code completedAt} is null on a record that was never timed, so it is only used when
-     * present; {@code createdAt} is never null. The old {@code watermark.toString()} on a null
-     * {@code completedAt} threw an NPE instead.
+     * <p>Preference order matters. A previous incremental records the highest watermark value it
+     * actually captured, and that is the only mark that is guaranteed not to skip a row: resuming from
+     * the previous backup's <em>completion time</em> jumps over every change the previous run left
+     * behind. The completion time is only used for a plain full backup, which captured the whole table
+     * anyway; {@code completedAt} can be null on a record that was never timed, hence the
+     * {@code createdAt} fallback.
+     *
+     * <p>A truncated full backup carries neither: it captured an arbitrary subset and no watermark, so
+     * the only safe mark is the epoch — rescan everything rather than assume the missing rows are old.
      */
     private Instant resolveWatermark(String connection, String tableName) {
         BackupMetadata lastBackup = metadataRepository.latestFor(connection, tableName);
         if (lastBackup == null) {
+            return Instant.EPOCH;
+        }
+        if (lastBackup.dataWatermark() != null) {
+            return lastBackup.dataWatermark();
+        }
+        if (lastBackup.isPartial()) {
+            log.info("Backup {} of {} is PARTIAL and carries no watermark; the next incremental "
+                            + "restarts from the epoch so the rows it never captured are not skipped",
+                    lastBackup.backupId(), tableName);
             return Instant.EPOCH;
         }
         return lastBackup.completedAt() != null ? lastBackup.completedAt() : lastBackup.createdAt();
@@ -258,8 +341,17 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                             + e.getMessage(), e);
         }
 
-        return new RestoreResult(backupId, meta.tableName(), connection, "COMPLETED",
-                statements.size(), restoredRows, startedAt, Instant.now()).asMap();
+        Map<String, Object> result = new LinkedHashMap<>(
+                new RestoreResult(backupId, meta.tableName(), connection, "COMPLETED",
+                        statements.size(), restoredRows, startedAt, Instant.now()).asMap());
+        if (meta.isPartial()) {
+            // 这条路径只追加、不清空，所以不必拒绝；但调用方必须知道它拿回来的不是完整表数据。
+            result.put("warning", "Backup " + backupId + " is PARTIAL: it hit the row ceiling and holds "
+                    + "only part of " + meta.tableName() + " (" + meta.backedUpRows() + " rows). The "
+                    + "table now contains just what this backup captured plus whatever was already "
+                    + "there — it is not a faithful copy of the source table.");
+        }
+        return result;
     }
 
     /**
@@ -270,6 +362,12 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
      * clear step irreversible — a subsequent insert failure would leave the table permanently
      * empty. {@code DELETE} participates in the transaction, so a failed replay restores the
      * original rows. The trade-off is speed on very large tables.
+     *
+     * <p>Because the clear step always runs, this entry point is only safe for a <em>complete data</em>
+     * backup, and it refuses anything else before touching the table. A schema backup or a zero-row
+     * backup replays no INSERT at all, so "clear then replay" used to mean "empty the table and commit"
+     * and still report {@code QUICK_RESTORE_COMPLETED}; a truncated backup would have replayed only the
+     * slice it captured, silently dropping the rest of the table.
      */
     @Override
     public Map<String, Object> quickRestore(String backupId, String connection) {
@@ -280,6 +378,26 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         if (meta.isFailed()) {
             return Map.of("error", "Backup was failed: " + meta.errorDetail());
         }
+        if (meta.isSchemaOnly()) {
+            return Map.of(
+                    "error", "Quick restore refused for backup " + backupId
+                            + ": this is a schema (DDL) backup, not a data backup — quickRestore only "
+                            + "accepts data backups",
+                    "backupType", meta.type().name(),
+                    "hint", "quickRestore clears " + meta.tableName() + " first and would replay no "
+                            + "INSERT, leaving the table empty. Use restoreBackup to replay the DDL, or "
+                            + "back the data up with backupTable and restore that.");
+        }
+        if (meta.isPartial()) {
+            return Map.of(
+                    "error", "Quick restore refused for backup " + backupId
+                            + ": this backup is incomplete (PARTIAL) — it hit the row ceiling and holds "
+                            + "only " + meta.backedUpRows() + " rows of " + meta.tableName(),
+                    "backupStatus", meta.status().name(),
+                    "hint", "quickRestore clears the table first, so restoring a partial backup would "
+                            + "drop the rows it never captured. Take a full backup with a higher maxRows, "
+                            + "or use restoreBackup to append what this backup does contain.");
+        }
 
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
@@ -289,6 +407,17 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         List<String> inserts = splitStatements(meta.sqlScript()).stream()
                 .filter(stmt -> stmt.toUpperCase(Locale.ROOT).startsWith("INSERT"))
                 .toList();
+        if (inserts.isEmpty()) {
+            return Map.of(
+                    "error", "Quick restore refused for backup " + backupId
+                            + ": the backup contains no INSERT statement, so it holds no data — "
+                            + "quickRestore only accepts data backups",
+                    "backupType", meta.type().name(),
+                    "backedUpRows", meta.backedUpRows(),
+                    "hint", "quickRestore clears " + tableName + " before replaying, so running it with "
+                            + "an empty backup would empty the table and commit. Check the backup with "
+                            + "getBackup, or take a fresh data backup with backupTable.");
+        }
 
         long restoredRows;
         try {
@@ -319,6 +448,10 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
             boolean originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try (Statement jdbcStatement = conn.createStatement()) {
+                // Raw connection, so no JdbcTemplate applies a ceiling here. A replay is a bulk
+                // write: without this a stalled restore holds both the connection and the request
+                // thread for as long as the driver is willing to wait.
+                applyBulkTimeout(jdbcStatement, ctx);
                 long affected = 0;
                 if (clearStatement != null) {
                     affected += jdbcStatement.executeUpdate(clearStatement);
@@ -342,6 +475,28 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                     log.warn("Failed to restore autoCommit after replay", restoreFailure);
                 }
             }
+        }
+    }
+
+    /**
+     * Apply the bulk statement ceiling, best effort.
+     *
+     * <p>A driver without {@code setQueryTimeout} support throws
+     * {@link SQLFeatureNotSupportedException}; refusing the restore over that would be worse than
+     * running it unbounded on such a driver.
+     */
+    private void applyBulkTimeout(Statement statement, ByokDataSourceContext ctx) {
+        int seconds = ctx.getStatementTimeouts().etlSeconds();
+        if (seconds <= 0) {
+            return;
+        }
+        try {
+            statement.setQueryTimeout(seconds);
+        } catch (SQLFeatureNotSupportedException e) {
+            log.debug("Driver for {} does not support setQueryTimeout; replay runs unbounded",
+                    ctx.getKey());
+        } catch (SQLException e) {
+            log.warn("Failed to set replay query timeout on {}: {}", ctx.getKey(), e.getMessage());
         }
     }
 
@@ -467,7 +622,7 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                                           int maxRows, BackupType type) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
+        JdbcTemplate jdbc = ctx.getEtlJdbcTemplate();
 
         List<String> columnNames = readColumnNames(jdbc, dialect, tableName, schema);
         if (columnNames.isEmpty()) {
@@ -481,10 +636,14 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         List<Map<String, Object>> rows = jdbc.queryForList(selectSql);
         List<String> insertStatements = generateInsertStatements(tableName, columnNames, rows, dialect);
         String sqlScript = String.join("\n", insertStatements);
+        boolean truncated = rows.size() >= effectiveMaxRows;
 
+        // 截断这件事必须留在元数据里：只写在本次返回值里，listBackups/getBackup 之后只看到 COMPLETED，
+        // 拿它做「先清空再灌回」的整表还原会静默丢掉没备到的那部分行。
         Instant now = Instant.now();
         BackupMetadata meta = BackupMetadata.create(connection, tableName, schema,
-                type, BackupStatus.COMPLETED, sqlScript, rows.size(), rows.size())
+                type, truncated ? BackupStatus.PARTIAL : BackupStatus.COMPLETED,
+                sqlScript, rows.size(), rows.size())
                 .withTiming(now, now);
         String id = metadataRepository.save(meta);
 
@@ -493,10 +652,17 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         result.put("tableName", tableName);
         result.put("connection", connection);
         result.put("type", type.name());
+        result.put("status", meta.status().name());
         result.put("maxRows", effectiveMaxRows);
         result.put("totalRows", rows.size());
         result.put("rowCount", rows.size());
-        result.put("truncated", rows.size() >= effectiveMaxRows);
+        result.put("truncated", truncated);
+        if (truncated) {
+            result.put("hint", "Hit the row ceiling of " + effectiveMaxRows + ", so this backup is a "
+                    + "partial copy of " + tableName + " and is recorded as PARTIAL. quickRestore "
+                    + "refuses it, because clearing the table and replaying only this slice would drop "
+                    + "the rest. Raise maxRows (or the configured ceiling) for a complete backup.");
+        }
         result.put("statements", insertStatements);
         return result;
     }
@@ -519,19 +685,25 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         return Math.min(requested, ceiling);
     }
 
+    /**
+     * Column names of a table, as spelled by its catalog.
+     *
+     * <p>Per the dialect contract a single-table metadata query declares exactly one placeholder — the
+     * table name, already normalised by the dialect — and resolves the schema internally. Counting
+     * placeholders to guess the argument list is what broke Oracle: its {@code columnsQuery} declared
+     * {@code (owner, table_name)}, every caller here passes {@code schema == null}, so {@code owner} was
+     * bound to NULL, no column came back and the backup reported "Table not found".
+     */
     private List<String> readColumnNames(JdbcTemplate jdbc, DatabaseDialect dialect,
                                           String tableName, String schema) {
         String columnsSql = dialect.columnsQuery(tableName, schema);
-        Object schemaArg = schema != null ? dialect.normalizeTableName(schema) : null;
         List<Map<String, Object>> columnInfo = jdbc.queryForList(columnsSql,
-                schemaAndTableArgs(columnsSql, schemaArg, dialect.normalizeTableName(tableName)));
+                dialect.normalizeTableName(tableName));
 
         List<String> columnNames = new ArrayList<>();
         for (Map<String, Object> col : columnInfo) {
-            Object name = col.get("column_name");
-            if (name == null) {
-                name = col.get("COLUMN_NAME");
-            }
+            // Oracle/H2 报 COLUMN_NAME，MySQL/PG 报 column_name：按大小写不敏感取，否则整表列清单为空。
+            Object name = caseInsensitive(col).get("column_name");
             if (name != null) {
                 columnNames.add(String.valueOf(name));
             }
@@ -540,31 +712,38 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
     }
 
     /**
-     * Binds the arguments a dialect's {@code columnsQuery} actually declares.
+     * Case-insensitive view of one result row.
      *
-     * <p>Most dialects emit two placeholders (schema, table), but those that cannot filter by schema
-     * emit only the table one. Passing a fixed pair of arguments to a single-placeholder statement
-     * fails with a parameter-count mismatch before the backup even starts, so the argument list
-     * follows the SQL rather than the other way round.
+     * <p>Column labels come back in whatever case the driver reports — uppercase on Oracle and H2,
+     * lowercase on MySQL and PostgreSQL — so every lookup keyed by a fixed spelling has to be
+     * case-insensitive. Getting this wrong is silent: the value reads as null and the backup happily
+     * writes NULL into the restore script.
      */
-    private static Object[] schemaAndTableArgs(String sql, Object schemaArg, Object tableArg) {
-        return countPlaceholders(sql) <= 1
-                ? new Object[]{tableArg}
-                : new Object[]{schemaArg, tableArg};
+    private static Map<String, Object> caseInsensitive(Map<String, Object> row) {
+        Map<String, Object> normalized = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        normalized.putAll(row);
+        return normalized;
     }
 
-    private static int countPlaceholders(String sql) {
-        int count = 0;
-        boolean inLiteral = false;
-        for (int i = 0; i < sql.length(); i++) {
-            char c = sql.charAt(i);
-            if (c == '\'') {
-                inLiteral = !inLiteral;
-            } else if (c == '?' && !inLiteral) {
-                count++;
-            }
-        }
-        return count;
+    /**
+     * Interprets a watermark column value as an instant.
+     *
+     * <p>Drivers hand back a date/time column as any of these types depending on vendor and JDBC
+     * version. {@code null} means "cannot be interpreted", and the caller then leaves the watermark
+     * where it was rather than inventing one.
+     */
+    private static Instant toInstant(Object value) {
+        return switch (value) {
+            case null -> null;
+            case Instant instant -> instant;
+            case Timestamp timestamp -> timestamp.toInstant();
+            case LocalDateTime localDateTime -> localDateTime.atZone(ZoneId.systemDefault()).toInstant();
+            case OffsetDateTime offsetDateTime -> offsetDateTime.toInstant();
+            case ZonedDateTime zonedDateTime -> zonedDateTime.toInstant();
+            // java.sql.Date/Time 覆写了 toInstant() 直接抛异常，只能走毫秒值。
+            case java.util.Date date -> Instant.ofEpochMilli(date.getTime());
+            default -> null;
+        };
     }
 
     private String quoteAll(DatabaseDialect dialect, List<String> columnNames) {
@@ -580,9 +759,9 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
             sb.append(quoteAll(dialect, columnNames));
             sb.append(") VALUES (");
             List<String> values = new ArrayList<>();
+            Map<String, Object> lookup = caseInsensitive(row);
             for (String col : columnNames) {
-                Object val = row.containsKey(col) ? row.get(col) : row.get(col.toUpperCase(Locale.ROOT));
-                values.add(formatValue(val));
+                values.add(formatValue(lookup.get(col)));
             }
             sb.append(String.join(", ", values)).append(");");
             statements.add(sb.toString());
@@ -603,11 +782,10 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         try {
             String columnsSql = dialect.columnsQuery(tableName, null);
             List<Map<String, Object>> columns = jdbc.queryForList(columnsSql,
-                    schemaAndTableArgs(columnsSql, null, dialect.normalizeTableName(tableName)));
+                    dialect.normalizeTableName(tableName));
             Map<String, Map<String, Object>> result = new LinkedHashMap<>();
             for (Map<String, Object> col : columns) {
-                Object name = col.get("column_name") != null
-                        ? col.get("column_name") : col.get("COLUMN_NAME");
+                Object name = caseInsensitive(col).get("column_name");
                 if (name != null) {
                     result.put(String.valueOf(name), col);
                 }

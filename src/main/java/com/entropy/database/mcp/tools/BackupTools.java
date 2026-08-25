@@ -51,7 +51,8 @@ public class BackupTools extends McpToolBase {
             【备份单表数据】把一张表的数据导出为可回放的 INSERT 语句，并在服务端登记一条备份记录。
             前置条件：先调用 createNamedConnection 注册数据库连接。备份记录只存在内存中（最多 200 条、最长保留 7 天），过期或被挤出后无法再用于恢复，重要备份请及时取走 sqlStatements 自行落盘。
             使用场景：改数据或跑 DDL 之前先留一份可回滚的数据快照。
-            返回字段：format 省略或为 sql 时返回 backupType、backupId、rowCount、sqlStatements；format=json 返回 backupId、tableName、connection、type、maxRows、totalRows、rowCount、truncated、statements；format=text 返回 backupType 与 result（内层同 json）。
+            返回字段：format 省略或为 sql 时返回 backupType、backupId、rowCount、sqlStatements；format=json 返回 backupId、tableName、connection、type、status、maxRows、totalRows、rowCount、truncated（命中行数上限时为 true）、statements，截断时另有 hint；INCREMENTAL 额外返回 watermarkColumn、watermark、nextWatermark、rowsBackedUp；format=text 返回 backupType 与 result（内层同 json）。
+            注意：truncated=true 表示只备到了一部分，备份记录状态记为 PARTIAL，这样的备份会被 quickRestore 拒绝（它会先清空表，用不完整备份还原等于丢数据）；增量备份被截断时水位只推进到已捕获的最大水位，重复调用即可续备剩余变更。
             不要用于：备份表结构（用 backupSchema，导出的是 DDL 而非数据）；恢复数据（用 restoreBackup 或 quickRestore）。本工具一次只处理一张表，没有整库备份能力。
             标签：[write, backup, table, data, export]
             """,
@@ -77,6 +78,7 @@ public class BackupTools extends McpToolBase {
             前置条件：先调用 createNamedConnection 注册连接。依赖方言提供 DDL 提取语句，目前只有 Oracle 实现（DBMS_METADATA.GET_DDL，需要相应权限），其他方言会因取不到 DDL 语句而失败。
             使用场景：改表结构前留存原始 DDL、或把表结构搬到另一套环境。
             返回字段：backupId、tableName、connection、type（固定为 SCHEMA）、ddl（建表语句文本）、rowCount（固定为 0）。
+            注意：结构备份记录的 type 是 SCHEMA，只能用 restoreBackup 回放 DDL；用它的 backupId 调 quickRestore 会被拒绝，因为 quickRestore 先清空表、而结构备份里没有任何 INSERT。
             不要用于：备份表里的数据（用 backupTable）；对比两张表的结构差异（用 diffSchema）。名字里的 Schema 指「表结构」，不是整个数据库 Schema——本工具一次只导出一张表。
             标签：[write, backup, schema, ddl, export]
             """,
@@ -91,7 +93,7 @@ public class BackupTools extends McpToolBase {
             【回放备份脚本恢复】在单个事务中回放备份记录里保存的全部 SQL 语句，把数据追加回目标库。
             前置条件：需要先有 backupId（用 listBackups 找、用 getBackup 确认）。恢复前不会清空目标表，因此已存在的主键会导致冲突报错；任一语句失败则整个事务回滚，表保持原样，备份记录不会被改动、可以重试。
             使用场景：目标表为空或需要把备份数据追加进去；或备份内容不只是 INSERT（例如 backupSchema 产生的 DDL），需要原样回放。
-            返回字段：backupId、tableName、connection、statementsApplied、restoredRows、status（COMPLETED）、restoreStartedAt、restoreCompletedAt、restoreDurationMs。
+            返回字段：backupId、tableName、connection、statementsApplied、restoredRows、status（COMPLETED）、restoreStartedAt、restoreCompletedAt、restoreDurationMs；备份本身不完整（PARTIAL）时额外返回 warning，说明回放进去的只是原表的一部分。
             不要用于：需要「先清空再灌回」的整表还原（用 quickRestore：它会先 DELETE 全表，再只回放 INSERT 语句）。
             标签：[write, restore, backup, transaction]
             """,
@@ -104,10 +106,10 @@ public class BackupTools extends McpToolBase {
 
     @McpTool(description = """
             【整表还原】先清空目标表，再回放备份中的 INSERT 语句，把表还原成备份时的状态。
-            前置条件：需要先有 backupId（用 listBackups 找、用 getBackup 确认）。清空用的是 DELETE 而非 TRUNCATE，因此整个过程在一个事务内：失败会回滚，原有数据不丢；代价是超大表较慢。备份脚本中的非 INSERT 语句会被跳过。
+            前置条件：需要先有 backupId（用 listBackups 找、用 getBackup 确认）。只接受「完整的数据备份」：type=SCHEMA 的结构备份、status=PARTIAL 的截断备份、以及不含任何 INSERT 的备份都会返回 error 并且不动目标表——否则清空之后无可回放内容，等于把表清空并提交。清空用的是 DELETE 而非 TRUNCATE，因此整个过程在一个事务内：失败会回滚，原有数据不丢；代价是超大表较慢。备份脚本中的非 INSERT 语句会被跳过。
             使用场景：目标表数据已被写坏，需要丢弃现有数据、整表回到备份时点。
-            返回字段：backupId、tableName、connection、statementsApplied（实际回放的 INSERT 条数）、restoredRows（含 DELETE 影响的行数）、status（QUICK_RESTORE_COMPLETED）、restoreStartedAt、restoreCompletedAt、restoreDurationMs。
-            不要用于：只想把备份数据追加进表、不想清空现有数据（用 restoreBackup）；回放 DDL 类备份（用 restoreBackup，本工具只回放 INSERT）。
+            返回字段：backupId、tableName、connection、statementsApplied（实际回放的 INSERT 条数）、restoredRows（含 DELETE 影响的行数）、status（QUICK_RESTORE_COMPLETED）、restoreStartedAt、restoreCompletedAt、restoreDurationMs；被拒绝时返回 error 与 hint（附带 backupType 或 backupStatus）。
+            不要用于：只想把备份数据追加进表、不想清空现有数据（用 restoreBackup）；回放 DDL 类备份或不完整备份（用 restoreBackup，本工具只回放 INSERT 且要求备份完整）。
             标签：[write, restore, backup, truncate, destructive]
             """,
              annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
@@ -120,7 +122,7 @@ public class BackupTools extends McpToolBase {
     @McpTool(description = """
             【列出备份记录】按连接、表名、类型筛选备份记录清单。
             使用场景：恢复前先找到目标 backupId、或盘点当前留存了哪些备份。
-            返回字段：total（本次返回条数）、storageTotal（服务端当前留存的备份总数）、records（数组，每项含 backupId、tableName、connection、type、status、createdAt、totalRows、backedUpRows、restoredRows、durationMs，若有则附带 completedAt、errorDetail）。
+            返回字段：total（本次返回条数）、storageTotal（服务端当前留存的备份总数）、records（数组，每项含 backupId、tableName、connection、type、status、createdAt、totalRows、backedUpRows、restoredRows、durationMs，若有则附带 completedAt、errorDetail）。status=PARTIAL 表示该备份命中行数上限、只备了一部分，不能用于 quickRestore。
             不要用于：查看某条备份的完整信息含 SQL 脚本预览（用 getBackup 按 id 取详情，列表里不含 sqlScriptPreview 与 startedAt）。
             标签：[read, backup, list]
             """,
@@ -129,7 +131,7 @@ public class BackupTools extends McpToolBase {
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "按表名精确过滤（区分大小写），省略则不过滤", required = false) String tableName,
             @McpToolParam(description = "返回条数上限，省略或传非正数时默认 50", required = false) Integer limit,
-            @McpToolParam(description = "按备份类型过滤，取值 FULL 或 INCREMENTAL；省略则返回全部，传其他值会报参数校验错误", required = false) String typeFilter) {
+            @McpToolParam(description = "按备份类型过滤，取值 FULL、INCREMENTAL 或 SCHEMA（结构备份）；省略则返回全部，传其他值会报参数校验错误", required = false) String typeFilter) {
         return safeExecute(() -> {
             int lim = limit != null && limit > 0 ? limit : 50;
             List<BackupMetadata> records = metadataRepository.list(connectionName, tableName, lim);
@@ -155,7 +157,7 @@ public class BackupTools extends McpToolBase {
             【查看单条备份详情】按 backupId 取一条备份记录的完整信息。
             前置条件：需要已知 backupId；不确定时先用 listBackups 检索。备份记录会因过期或容量上限被淘汰，找不到时返回 NOT_FOUND 错误，说明该备份已不可用于恢复。
             使用场景：恢复前确认这条备份的表名、行数、状态与脚本内容是否符合预期。
-            返回字段：backupId、tableName、connection、type、status、createdAt、totalRows、backedUpRows、restoredRows、durationMs，以及（存在时）startedAt、completedAt、errorDetail、sqlScriptPreview（SQL 脚本前 500 字符预览）。
+            返回字段：backupId、tableName、connection、type、status、createdAt、totalRows、backedUpRows、restoredRows、durationMs，以及（存在时）startedAt、completedAt、errorDetail、sqlScriptPreview（SQL 脚本前 500 字符预览）。type=SCHEMA 表示只含 DDL、没有数据；status=PARTIAL 表示只备到了一部分，这两种备份都不能用于 quickRestore。
             不要用于：按条件检索多条记录（用 listBackups）。
             标签：[read, backup, detail]
             """,

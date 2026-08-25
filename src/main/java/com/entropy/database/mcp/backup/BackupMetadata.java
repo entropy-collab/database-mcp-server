@@ -19,6 +19,10 @@ import java.time.Instant;
 
 /**
  * Metadata record for a backup task.
+ *
+ * @param dataWatermark 本次实际捕获到的最大水位值（增量备份专用，其它类型为 {@code null}）。
+ *                      下一次增量必须从这里续，而不是从备份完成时刻续：备份完成时刻会把「本次没来得及
+ *                      捕获的变更行」永久跳过。
  */
 public record BackupMetadata(
     String backupId,
@@ -35,7 +39,8 @@ public record BackupMetadata(
     long backedUpRows,
     long restoredRows,
     String sqlScript,
-    String errorDetail
+    String errorDetail,
+    Instant dataWatermark
 ) {
     public BackupMetadata {
         if (createdAt == null) createdAt = Instant.now();
@@ -45,6 +50,12 @@ public record BackupMetadata(
     public boolean isFailed()    { return status == BackupStatus.FAILED; }
     public boolean isRunning()   { return status == BackupStatus.RUNNING; }
     public boolean hasError()    { return errorDetail != null && !errorDetail.isBlank(); }
+
+    /** 命中行数上限、只捕获了表的一部分：不能用于「先清空再灌回」的整表还原。 */
+    public boolean isPartial()   { return status == BackupStatus.PARTIAL; }
+
+    /** 只含 DDL 的结构备份：数据恢复路径必须拒绝它，否则会把目标表清空成 0 行。 */
+    public boolean isSchemaOnly() { return type == BackupType.SCHEMA; }
 
     public long durationMs() {
         if (startedAt == null || completedAt == null) return -1;
@@ -56,31 +67,37 @@ public record BackupMetadata(
     public BackupMetadata withBackupId(String id) {
         return new BackupMetadata(id, connectionKey, tableName, schema, type,
                 status, targetTable, createdAt, startedAt, completedAt,
-                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail);
+                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail, dataWatermark);
     }
 
     public BackupMetadata withStatus(BackupStatus status) {
         return new BackupMetadata(backupId, connectionKey, tableName, schema, type,
                 status, targetTable, createdAt, startedAt, completedAt,
-                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail);
+                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail, dataWatermark);
     }
 
     public BackupMetadata withTiming(Instant startedAt, Instant completedAt) {
         return new BackupMetadata(backupId, connectionKey, tableName, schema, type,
                 status, targetTable, createdAt, startedAt, completedAt,
-                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail);
+                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail, dataWatermark);
     }
 
     public BackupMetadata withRestoredRows(long restoredRows) {
         return new BackupMetadata(backupId, connectionKey, tableName, schema, type,
                 status, targetTable, createdAt, startedAt, completedAt,
-                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail);
+                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail, dataWatermark);
+    }
+
+    public BackupMetadata withDataWatermark(Instant dataWatermark) {
+        return new BackupMetadata(backupId, connectionKey, tableName, schema, type,
+                status, targetTable, createdAt, startedAt, completedAt,
+                totalRows, backedUpRows, restoredRows, sqlScript, errorDetail, dataWatermark);
     }
 
     public BackupMetadata withError(String error) {
         return new BackupMetadata(backupId, connectionKey, tableName, schema, type,
                 BackupStatus.FAILED, targetTable, createdAt, startedAt, completedAt,
-                totalRows, backedUpRows, restoredRows, sqlScript, error);
+                totalRows, backedUpRows, restoredRows, sqlScript, error, dataWatermark);
     }
 
     // ─── Static factories ─────────────────────────────────────────────────
@@ -92,7 +109,7 @@ public record BackupMetadata(
                 java.util.UUID.randomUUID().toString(),
                 connectionKey, tableName, schema, type, status, null,
                 Instant.now(), null, null,
-                totalRows, backedUpRows, 0, sqlScript, null);
+                totalRows, backedUpRows, 0, sqlScript, null, null);
     }
 
     public static BackupMetadata updated(BackupMetadata original, BackupStatus status,
@@ -103,6 +120,6 @@ public record BackupMetadata(
                 original.type(), status, original.targetTable(),
                 original.createdAt(), startedAt, completedAt,
                 original.totalRows(), original.backedUpRows(), restoredRows,
-                original.sqlScript(), errorDetail);
+                original.sqlScript(), errorDetail, original.dataWatermark());
     }
 }

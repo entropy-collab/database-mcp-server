@@ -22,6 +22,14 @@ public enum BackupStatus {
     PENDING,
     RUNNING,
     COMPLETED,
+    /**
+     * 备份成功执行，但因为命中行数上限而只捕获了表的一部分。
+     *
+     * <p>被截断的备份记成 COMPLETED 时，{@code listBackups}/{@code getBackup} 看不出缺行，拿它做「先清空
+     * 再灌回」的整表还原就会静默丢掉未被捕获的那部分数据。单独一个状态让不完整这件事留在元数据里，恢复
+     * 路径才有机会拒绝或告警。
+     */
+    PARTIAL,
     FAILED,
     ROLLED_BACK
 }

@@ -76,11 +76,17 @@ public class BackupMetadataRepository {
                 .toList();
     }
 
+    /**
+     * 最近一条「成功执行过」的备份记录，用于推导下一次增量的起始水位。
+     *
+     * <p>{@link BackupStatus#PARTIAL} 也算：被截断的备份同样捕获了一段真实数据，把它排除掉会让水位退回到
+     * 更早的记录，重复备份已经拿到的行。至于它的水位能推进到哪里，由调用方按 {@code dataWatermark} 判断。
+     */
     public BackupMetadata latestFor(String connectionKey, String tableName) {
         return store.values().stream()
                 .filter(m -> connectionKey.equals(m.connectionKey()))
                 .filter(m -> tableName.equals(m.tableName()))
-                .filter(m -> m.status() == BackupStatus.COMPLETED)
+                .filter(m -> m.status() == BackupStatus.COMPLETED || m.status() == BackupStatus.PARTIAL)
                 .sorted(Comparator.comparing(BackupMetadata::createdAt).reversed())
                 .findFirst()
                 .orElse(null);
@@ -115,7 +121,7 @@ public class BackupMetadataRepository {
         return new BackupMetadata(
                 null, connectionKey, tableName, schema, type, status,
                 null, Instant.now(), null, null,
-                totalRows, backedUpRows, 0, sqlScript, null);
+                totalRows, backedUpRows, 0, sqlScript, null, null);
     }
 
     public static BackupMetadata updated(BackupMetadata original, BackupStatus status,
@@ -126,6 +132,6 @@ public class BackupMetadataRepository {
                 original.type(), status, original.targetTable(),
                 original.createdAt(), startedAt, completedAt,
                 original.totalRows(), original.backedUpRows(), restoredRows,
-                original.sqlScript(), error);
+                original.sqlScript(), error, original.dataWatermark());
     }
 }

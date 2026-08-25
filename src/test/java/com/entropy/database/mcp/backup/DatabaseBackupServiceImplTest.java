@@ -18,6 +18,9 @@ package com.entropy.database.mcp.backup;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.ByokInfrastructure;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.byok.StatementTemplates;
+import com.entropy.database.mcp.properties.StatementTimeouts;
+import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.H2Dialect;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.properties.BackupProperties;
@@ -25,8 +28,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -82,8 +90,14 @@ class DatabaseBackupServiceImplTest {
     // ─── Fixtures ─────────────────────────────────────────────────────────
 
     private DatabaseBackupServiceImpl service(int maxBackupRows) {
+        return service(maxBackupRows, new DdlAwareH2Dialect());
+    }
+
+    private DatabaseBackupServiceImpl service(int maxBackupRows, DatabaseDialect dialect) {
         ByokDataSourceContext ctx = new ByokDataSourceContext(CONNECTION,
-                jdbcTemplate.getDataSource(), new SchemaAwareH2Dialect(), jdbcTemplate,
+                jdbcTemplate.getDataSource(), dialect,
+                StatementTemplates.over(jdbcTemplate.getDataSource(), jdbcTemplate,
+                        StatementTimeouts.defaults()),
                 new ByokInfrastructure(null, null, null, null, null, null));
         DynamicDataSourceManager manager = mock(DynamicDataSourceManager.class);
         when(manager.acquire(anyString())).thenReturn(ctx);
@@ -95,6 +109,17 @@ class DatabaseBackupServiceImplTest {
     private long rowCount() {
         Long count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM PEOPLE", Long.class);
         return count == null ? -1 : count;
+    }
+
+    /** 三行各自一个水位值，这样截断的边界落在行与行之间，能验证水位推进到哪一行。 */
+    private void spreadWatermarks() {
+        jdbcTemplate.update("UPDATE PEOPLE SET UPDATED_AT = TIMESTAMP '2020-01-01 00:00:00' WHERE ID = 1");
+        jdbcTemplate.update("UPDATE PEOPLE SET UPDATED_AT = TIMESTAMP '2021-01-01 00:00:00' WHERE ID = 2");
+        jdbcTemplate.update("UPDATE PEOPLE SET UPDATED_AT = TIMESTAMP '2022-01-01 00:00:00' WHERE ID = 3");
+    }
+
+    private static Instant at(String timestamp) {
+        return Timestamp.valueOf(timestamp).toInstant();
     }
 
     // ─── Restore isolation ────────────────────────────────────────────────
@@ -269,21 +294,193 @@ class DatabaseBackupServiceImplTest {
         assertThat(result.get("watermark")).isNotNull();
     }
 
-    // ─── Test dialect ─────────────────────────────────────────────────────
+    // ─── 数据恢复路径只接受「完整的数据备份」 ──────────────────────────────
+
+    @Test
+    @DisplayName("a schema backup's id is refused by quick restore and the rows survive")
+    void schemaBackupIsRefusedByQuickRestore() {
+        DatabaseBackupServiceImpl service = service(1000);
+        Map<String, Object> schemaBackup = service.backupSchema("PEOPLE", CONNECTION);
+        String backupId = (String) schemaBackup.get("backupId");
+
+        assertThat(repository.get(backupId).type()).isEqualTo(BackupType.SCHEMA);
+
+        Map<String, Object> refusal = service.quickRestore(backupId, CONNECTION);
+
+        assertThat((String) refusal.get("error")).contains("schema (DDL) backup", "only accepts data");
+        assertThat(refusal).doesNotContainKey("status");
+        assertThat(rowCount()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("a zero-row data backup is refused by quick restore instead of emptying the table")
+    void emptyDataBackupIsRefusedByQuickRestore() {
+        DatabaseBackupServiceImpl service = service(1000);
+        jdbcTemplate.execute("DELETE FROM PEOPLE");
+        String backupId = (String) service.backupData("PEOPLE", 0, CONNECTION).get("backupId");
+        for (int i = 1; i <= 3; i++) {
+            jdbcTemplate.update("INSERT INTO PEOPLE VALUES (?, ?, TIMESTAMP '2020-01-01 00:00:00')",
+                    i, "person" + i);
+        }
+
+        Map<String, Object> refusal = service.quickRestore(backupId, CONNECTION);
+
+        assertThat((String) refusal.get("error")).contains("no INSERT statement");
+        assertThat(rowCount()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("a truncated full backup is recorded PARTIAL and refused by quick restore")
+    void truncatedFullBackupIsPartialAndRefusedByQuickRestore() {
+        DatabaseBackupServiceImpl service = service(2);
+        Map<String, Object> backup = service.backupData("PEOPLE", 0, CONNECTION);
+        String backupId = (String) backup.get("backupId");
+
+        assertThat(backup.get("truncated")).isEqualTo(true);
+        assertThat(backup.get("status")).isEqualTo("PARTIAL");
+        assertThat(repository.get(backupId).status()).isEqualTo(BackupStatus.PARTIAL);
+
+        Map<String, Object> refusal = service.quickRestore(backupId, CONNECTION);
+
+        assertThat((String) refusal.get("error")).contains("incomplete (PARTIAL)");
+        assertThat(refusal).containsEntry("backupStatus", "PARTIAL");
+        assertThat(rowCount()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("restoring a partial backup is allowed but says so in the result")
+    void restoringAPartialBackupWarns() {
+        DatabaseBackupServiceImpl service = service(2);
+        String backupId = (String) service.backupData("PEOPLE", 0, CONNECTION).get("backupId");
+        jdbcTemplate.execute("DELETE FROM PEOPLE");
+
+        Map<String, Object> result = service.restoreBackup(backupId, CONNECTION);
+
+        assertThat(result.get("status")).isEqualTo("COMPLETED");
+        assertThat((String) result.get("warning")).contains("PARTIAL", "not a faithful copy");
+        assertThat(rowCount()).isEqualTo(2);
+    }
+
+    // ─── 方言契约：单表元数据查询只绑一个「归一化后的表名」 ─────────────────
+
+    @Test
+    @DisplayName("an Oracle-shaped columnsQuery — one placeholder, schema resolved inside — yields columns")
+    void oracleShapedColumnsQueryYieldsColumns() {
+        Map<String, Object> backup = service(1000, new OracleShapedH2Dialect())
+                .backupData("people", 0, CONNECTION);
+
+        assertThat(backup).doesNotContainKey("error");
+        assertThat(backup.get("rowCount")).isEqualTo(3);
+        @SuppressWarnings("unchecked")
+        List<String> statements = (List<String>) backup.get("statements");
+        assertThat(statements).hasSize(3);
+        // 列名与列值都取到了，才说明「一个占位符 + 大小写不敏感取列名」两件事都对。
+        assertThat(statements.getFirst()).contains("ID, NAME, UPDATED_AT").contains("'person1'");
+    }
+
+    @Test
+    @DisplayName("a two-placeholder columnsQuery fails loudly instead of reporting 'Table not found'")
+    void outOfContractColumnsQueryFailsLoudly() {
+        DatabaseBackupServiceImpl service = service(1000, new TwoPlaceholderH2Dialect());
+
+        // 旧实现按占位符个数猜参数，把 schema 绑成 NULL，于是查不到列、返回 "Table not found"——
+        // 一个存在的表被说成不存在，备份静默失效。现在参数个数由契约固定，不匹配就直接报错。
+        assertThrows(DataAccessException.class, () -> service.backupData("PEOPLE", 0, CONNECTION));
+    }
+
+    // ─── 增量备份的水位不能跳过没备到的行 ──────────────────────────────────
+
+    @Test
+    @DisplayName("a truncated incremental reports truncated and only advances to the rows it captured")
+    void truncatedIncrementalKeepsTheWatermarkResumable() {
+        spreadWatermarks();
+
+        Map<String, Object> first = service(2).backupDataIncremental("PEOPLE", 0, CONNECTION);
+
+        assertThat(first.get("rowsBackedUp")).isEqualTo(2);
+        assertThat(first.get("truncated")).isEqualTo(true);
+        assertThat(first.get("status")).isEqualTo("PARTIAL");
+        // 水位停在「完整捕获的最后一个水位值」，绝不是备份时刻：2021 那批可能被切成两半。
+        assertThat(first.get("nextWatermark")).isEqualTo(at("2020-01-01 00:00:00").toString());
+        assertThat(repository.get((String) first.get("backupId")).dataWatermark())
+                .isEqualTo(at("2020-01-01 00:00:00"));
+
+        Map<String, Object> second = service(1000).backupDataIncremental("PEOPLE", 0, CONNECTION);
+
+        assertThat(second.get("watermark")).isEqualTo(at("2020-01-01 00:00:00").toString());
+        assertThat(second.get("truncated")).isEqualTo(false);
+        assertThat(second.get("rowsBackedUp")).isEqualTo(2);
+        @SuppressWarnings("unchecked")
+        List<String> statements = (List<String>) second.get("statements");
+        // ID=3 是第一次被截掉的那行：它必须出现在下一次增量里，否则就是永久空洞。
+        assertThat(String.join("\n", statements)).contains("'person3'").contains("'person2'");
+        assertThat(second.get("nextWatermark")).isEqualTo(at("2022-01-01 00:00:00").toString());
+    }
+
+    @Test
+    @DisplayName("when every captured row shares one watermark the mark stands still rather than skipping rows")
+    void truncatedIncrementalOnOneWatermarkGroupDoesNotAdvance() {
+        // 三行同水位、上限 2：无论怎么切都无法判断这个水位值是否已经取完，只能原地不动重跑。
+        Map<String, Object> first = service(2).backupDataIncremental("PEOPLE", 0, CONNECTION);
+
+        assertThat(first.get("truncated")).isEqualTo(true);
+        assertThat(first.get("nextWatermark")).isEqualTo(Instant.EPOCH.toString());
+
+        Map<String, Object> second = service(1000).backupDataIncremental("PEOPLE", 0, CONNECTION);
+
+        assertThat(second.get("rowsBackedUp")).isEqualTo(3);
+    }
+
+    // ─── Test dialects ────────────────────────────────────────────────────
 
     /**
-     * {@link H2Dialect#columnsQuery} filters on {@code TABLE_SCHEMA IS NULL} when no schema is
-     * given, which matches nothing in H2, and declares a single placeholder. The test supplies a
-     * two-placeholder variant that defaults to {@code PUBLIC}, since fixing the dialect is out of
-     * scope here.
+     * H2 已符合方言契约：{@link H2Dialect#columnsQuery} 用 {@code CURRENT_SCHEMA} 解析 schema，只留一个表名
+     * 占位符。这里只补一条 H2 没有的 DDL 提取语句（形状跟 Oracle 一样吃两个参数），好让 backupSchema 跑通。
      */
-    private static final class SchemaAwareH2Dialect extends H2Dialect {
+    private static class DdlAwareH2Dialect extends H2Dialect {
+        @Override
+        public String getTableDdlQuery(String tableName, String schema) {
+            return "SELECT 'CREATE TABLE PEOPLE (ID INT)' AS DDL FROM DUAL "
+                    + "WHERE CAST(? AS VARCHAR) IS NOT NULL AND CAST(? AS VARCHAR) IS NULL";
+        }
+    }
+
+    /**
+     * 契约落地后的 Oracle 形态：owner 由方言内部解析、只剩一个表名占位符，表名先经
+     * {@code normalizeTableName} 折叠成大写，列名标签则用小写（MySQL/PG 的报法）以验证取列名不区分大小写。
+     */
+    private static final class OracleShapedH2Dialect extends H2Dialect {
         @Override
         public String columnsQuery(String table, String schema) {
             return """
-                    SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+                    SELECT COLUMN_NAME AS "column_name", DATA_TYPE AS "data_type"
                     FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_SCHEMA = COALESCE(?, 'PUBLIC')
+                    WHERE TABLE_SCHEMA = CURRENT_SCHEMA
+                      AND TABLE_NAME = ?
+                    ORDER BY ORDINAL_POSITION
+                    """;
+        }
+
+        @Override
+        public String normalizeTableName(String table) {
+            return table.toUpperCase(Locale.ROOT);
+        }
+
+        /** Oracle 的未加引号标识符会折叠成大写；H2 里加引号的小写名字反而找不到表，所以跟着折叠。 */
+        @Override
+        public String quote(String name) {
+            return name.toUpperCase(Locale.ROOT);
+        }
+    }
+
+    /** 违反契约的旧形状：两个占位符（schema, table）。备份不再替它猜参数。 */
+    private static final class TwoPlaceholderH2Dialect extends H2Dialect {
+        @Override
+        public String columnsQuery(String table, String schema) {
+            return """
+                    SELECT COLUMN_NAME
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = COALESCE(CAST(? AS VARCHAR), CURRENT_SCHEMA)
                       AND TABLE_NAME = ?
                     ORDER BY ORDINAL_POSITION
                     """;
