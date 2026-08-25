@@ -13,10 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.tools;
+package com.entropy.database.mcp.repository;
 
 import com.entropy.database.mcp.exception.ErrorCode;
-import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.exception.McpValidationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -28,9 +27,12 @@ import java.util.Map;
 import java.util.function.BiFunction;
 
 /**
- * Shared batch-insert helper extracted from EtlTools.
- * Eliminates duplicated batchUpdate boilerplate across insertData, insertQueryResult,
- * transformAndInsert, upsertData, and exportQueryToTable.
+ * Shared batch-insert helper: builds the INSERT statement, binds row values by column and runs the
+ * {@code batchUpdate} call, so no write path has to repeat that boilerplate.
+ *
+ * <p>Lives beside {@link DatabaseReadRepository} because it is a JDBC-level primitive. Keeping it
+ * out of {@code tools} is deliberate: {@code tools} is the MCP-facing layer, so a dependency from
+ * {@code facade} into it would invert the intended direction and create a package cycle.</p>
  */
 public final class BatchInsertHelper {
 

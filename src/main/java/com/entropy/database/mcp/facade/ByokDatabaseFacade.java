@@ -22,7 +22,7 @@ import com.entropy.database.mcp.domain.PlanAnalysis;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.exception.McpValidationException;
-import com.entropy.database.mcp.tools.BatchInsertHelper;
+import com.entropy.database.mcp.repository.BatchInsertHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;

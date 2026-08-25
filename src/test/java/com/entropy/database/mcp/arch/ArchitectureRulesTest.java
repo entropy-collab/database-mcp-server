@@ -126,33 +126,28 @@ class ArchitectureRulesTest {
     // ---------------------------------------------------------------------------------------------
 
     /**
-     * R1 - tools depending on JDBC infrastructure. Both remaining violations are
-     * {@code tools.BatchInsertHelper}, which takes a {@code JdbcTemplate} parameter and calls
-     * {@code batchUpdate} on it: it is a JDBC helper that lives in {@code tools} but is only used by
-     * {@code facade.ByokDatabaseFacade}, so it belongs below the facade, not next to the MCP tools.
+     * R1 - tools depending on JDBC infrastructure. Enforced at 0: the last violation was
+     * {@code BatchInsertHelper}, which has moved to {@code repository} where a {@code JdbcTemplate}
+     * dependency belongs.
      */
-    private static final int R1_BASELINE = 2;
+    private static final int R1_BASELINE = 0;
     /**
      * R2 - tools depending on the BYOK connection registry. Zero outside the two documented
      * management-plane exceptions, so this rule is effectively enforced.
      */
     private static final int R2_BASELINE = 0;
-    /**
-     * R3 - lower layers depending back on tools. Zero: {@code gateway.FederatedQueryGateway} still has
-     * an {@code import com.entropy.database.mcp.tools.McpToolUtils}, but the type is never used, so the
-     * import leaves no trace in the bytecode ArchUnit analyses. Deleting that dead import would touch
-     * production code; the rule is already at 0 and guards against a real reverse dependency.
-     */
+    /** R3 - lower layers depending back on tools. Enforced at 0. */
     private static final int R3_BASELINE = 0;
     /** R4 - facade contract interfaces depending on Spring JDBC / pool types. Enforced at 0. */
     private static final int R4_BASELINE = 0;
     /**
-     * R5 - package cycles. 25 cycles today; the dominant edge is {@code facade -> tools} caused by
-     * {@code ByokDatabaseFacade -> tools.BatchInsertHelper} (see R1), which drags {@code tools} into
-     * cycles with {@code facade}, {@code quality}, {@code gateway}, {@code config} and others. Moving
-     * {@code BatchInsertHelper} out of {@code tools} should cut this number sharply.
+     * R5 - package cycles. Down from 25 to 10 once {@code BatchInsertHelper} left {@code tools}: the
+     * {@code facade -> tools} edge was pulling {@code tools} into cycles with {@code facade},
+     * {@code quality}, {@code gateway} and {@code config}. What remains is rooted in
+     * {@code backup}, {@code byok} and {@code config}, where configuration records and wiring live
+     * in the same package as the classes they configure.
      */
-    private static final int R5_BASELINE = 25;
+    private static final int R5_BASELINE = 10;
 
     private static JavaClasses productionClasses;
 
