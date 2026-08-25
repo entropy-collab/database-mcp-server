@@ -28,7 +28,6 @@ import org.slf4j.LoggerFactory;
  * <p>This class maintains request-scoped metadata for each thread, enabling:
  * <ul>
  *   <li><b>Parallel query isolation</b> — each concurrent tool call has its own context</li>
- *   <li><b>Session tracking</b> — correlate multiple tool calls to the same MCP session</li>
  *   <li><b>Request metadata</b> — store correlation IDs, timestamps, and audit info</li>
  *   <li><b>Resource lifecycle</b> — attach cleanup hooks per request</li>
  * </ul>
@@ -44,19 +43,41 @@ import org.slf4j.LoggerFactory;
  * }
  * }</pre>
  *
- * <p>Session IDs are shared between {@link McpToolContext} and {@link MultiSessionContext}
- * to enable cross-session data sharing.
+ * <h2>Why {@link #sessionId()} is not an MCP session</h2>
+ * <p>This server runs {@code spring.ai.mcp.server.protocol: STATELESS} on
+ * {@code spring-ai-starter-mcp-server-webmvc}. In that mode the MCP protocol has no session:
+ * {@code HttpServletStatelessServerTransport} never issues or reads an {@code Mcp-Session-Id},
+ * the stateless server handler has no {@code McpSyncServerExchange}, and the only per-request
+ * object reaching application code is {@link io.modelcontextprotocol.common.McpTransportContext},
+ * an opaque key/value bag filled from the HTTP request by a {@code McpTransportContextExtractor}.
+ * There is therefore nothing at the protocol layer to derive a stable, cross-call session identity
+ * from.
+ *
+ * <p>So {@code sessionId} is deliberately <em>call-scoped</em>: it is derived from this
+ * invocation's correlation ID and changes on every tool call. It used to be
+ * {@code System.currentTimeMillis()}, which was worse in both directions — two calls of one client
+ * got different values (so {@link MultiSessionContext} never found what a previous call wrote), and
+ * two calls of <em>different</em> clients landing in the same millisecond got the same value (so
+ * one tenant could read another tenant's namespace). A clock or a random number cannot manufacture
+ * a session that the transport does not have; the honest options are a caller-supplied scope key
+ * ({@link #create(String, String)}) or single-call scope, and single-call scope is the default.
  */
 public class McpToolContext {
 
     private static final Logger log = LoggerFactory.getLogger(McpToolContext.class);
     private static final ThreadLocal<McpToolContext> HOLDER = new ThreadLocal<>();
-    private static final ThreadLocal<Long> SESSION_ID_HOLDER = new ThreadLocal<>();
+    private static final ThreadLocal<String> SESSION_ID_HOLDER = new ThreadLocal<>();
+
+    /** Prefix marking a scope id that covers exactly one tool invocation. */
+    private static final String CALL_SCOPE_PREFIX = "call:";
 
     /** Correlation ID for tracking requests across tools. */
     private final String correlationId;
-    /** Session ID shared with {@link MultiSessionContext}. */
-    private final long sessionId;
+    /**
+     * Scope key shared with {@link MultiSessionContext}. Call-scoped unless the caller supplied
+     * one explicitly — see the class javadoc.
+     */
+    private final String sessionId;
     /** Tool name being executed. */
     private String toolName;
     /** Connection being used. */
@@ -68,7 +89,7 @@ public class McpToolContext {
     /** Cleanup hooks registered by tools. */
     private final java.util.LinkedList<Runnable> onCloseHooks = new java.util.LinkedList<>();
 
-    private McpToolContext(String correlationId, long sessionId) {
+    private McpToolContext(String correlationId, String sessionId) {
         this.correlationId = correlationId;
         this.sessionId = sessionId;
         this.startTime = System.currentTimeMillis();
@@ -80,22 +101,50 @@ public class McpToolContext {
         return create(UUID.randomUUID().toString());
     }
 
+    /**
+     * Create a context whose session scope covers this invocation only.
+     */
     public static McpToolContext create(String correlationId) {
-        return create(correlationId, System.currentTimeMillis());
-    }
-
-    public static McpToolContext create(String correlationId, long sessionId) {
-        McpToolContext ctx = new McpToolContext(correlationId, sessionId);
-        HOLDER.set(ctx);
-        SESSION_ID_HOLDER.set(sessionId);
-        return ctx;
+        return create(correlationId, callScopeId(correlationId));
     }
 
     /**
-     * Initialize session ID for current thread (used by {@link MultiSessionContext}).
+     * Create a context bound to an explicitly supplied scope key.
+     *
+     * <p>The only way to get cross-call sharing out of {@link MultiSessionContext} on a stateless
+     * transport: the key has to come from the caller (an MCP tool parameter, or a header lifted
+     * into the transport context by a {@code McpTransportContextExtractor}), because the protocol
+     * does not provide one. A blank key falls back to call scope rather than silently pooling
+     * every anonymous caller into one namespace.
      */
-    public static void initSession(long sessionId) {
+    public static McpToolContext create(String correlationId, String sessionId) {
+        String scope = (sessionId == null || sessionId.isBlank())
+                ? callScopeId(correlationId)
+                : sessionId;
+        McpToolContext ctx = new McpToolContext(correlationId, scope);
+        HOLDER.set(ctx);
+        SESSION_ID_HOLDER.set(scope);
+        return ctx;
+    }
+
+    private static String callScopeId(String correlationId) {
+        return CALL_SCOPE_PREFIX + (correlationId == null ? UUID.randomUUID() : correlationId);
+    }
+
+    /**
+     * Initialize the session scope key for the current thread (used by
+     * {@link MultiSessionContext} when no context has been created).
+     */
+    public static void initSession(String sessionId) {
         SESSION_ID_HOLDER.set(sessionId);
+    }
+
+    /**
+     * Whether {@code sessionId} denotes a single tool invocation rather than a caller-supplied
+     * session. Lets callers tell "this store will not survive my next call" from "it will".
+     */
+    public static boolean isCallScoped(String sessionId) {
+        return sessionId != null && sessionId.startsWith(CALL_SCOPE_PREFIX);
     }
 
     /**
@@ -120,7 +169,7 @@ public class McpToolContext {
         return Optional.ofNullable(HOLDER.get());
     }
 
-    public static Optional<Long> currentSessionId() {
+    public static Optional<String> currentSessionId() {
         return Optional.ofNullable(SESSION_ID_HOLDER.get());
     }
 
@@ -128,7 +177,7 @@ public class McpToolContext {
         return correlationId;
     }
 
-    public long sessionId() {
+    public String sessionId() {
         return sessionId;
     }
 

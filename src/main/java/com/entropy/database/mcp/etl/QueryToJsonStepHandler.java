@@ -20,7 +20,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Handles QUERY_TO_JSON steps: executes SQL and returns rows as JSON.
+ * Handles QUERY_TO_JSON steps: executes SQL and reports how many rows it produced.
+ *
+ * <p>Streams rather than collecting: the step only ever returned the row count, so holding the
+ * whole result in memory bought nothing.
  */
 public class QueryToJsonStepHandler implements StepHandler {
 
@@ -34,8 +37,10 @@ public class QueryToJsonStepHandler implements StepHandler {
     @Override
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
-        var rows = source.getJdbcTemplate().queryForList(step.sourceSql());
-        log.info("Query to JSON: {} rows", rows.size());
-        return rows.size();
+        engine.validateSourceSql(step.sourceSql());
+        long rows = EtlRowStream.countRows(source.getJdbcTemplate(), step.sourceSql(),
+                engine.batchSize(step), engine.maxSourceRows(step));
+        log.info("Query to JSON: {} rows", rows);
+        return rows;
     }
 }

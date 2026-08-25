@@ -18,12 +18,11 @@ package com.entropy.database.mcp.etl;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
-
 /**
  * Handles QUERY_TO_TABLE steps: executes a source SQL and inserts results into a target table.
+ *
+ * <p>Reads the source in batches rather than into one list: this is the bulk data-movement step,
+ * so the source table's size must not decide peak heap usage.
  */
 public class QueryToTableStepHandler implements StepHandler {
 
@@ -39,22 +38,17 @@ public class QueryToTableStepHandler implements StepHandler {
         JdbcTemplate targetJdbc = target.getJdbcTemplate();
         var dialect = target.getDialect();
 
+        engine.validateSourceSql(step.sourceSql());
+
         String targetTable = dialect.normalizeTableName(step.targetTable());
-        List<Map<String, Object>> rows = sourceJdbc.queryForList(step.sourceSql());
-        if (rows.isEmpty()) return 0;
+        int batchSize = engine.batchSize(step);
 
-        List<String> columns = new java.util.ArrayList<>(rows.get(0).keySet());
-        String columnList = String.join(", ", columns.stream().map(dialect::quote).toList());
-        String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
-        String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
-
-        int batchSize = engine.getIntParam(step, "batchSize", 1000);
-        int[][] updateCounts = targetJdbc.batchUpdate(insertSql, rows, batchSize, (ps, row) -> {
-            for (int i = 0; i < columns.size(); i++) {
-                ps.setObject(i + 1, row.get(columns.get(i)));
-            }
-        });
-
-        return Arrays.stream(updateCounts).flatMapToInt(Arrays::stream).sum();
+        return EtlRowStream.copyInBatches(sourceJdbc, step.sourceSql(), batchSize,
+                engine.maxSourceRows(step),
+                (columns, batch) -> {
+                    String insertSql = EtlSql.insertInto(dialect, targetTable, columns);
+                    return EtlSql.sum(targetJdbc.batchUpdate(insertSql, batch, batch.size(),
+                            EtlSql.bindColumns(columns)));
+                });
     }
 }

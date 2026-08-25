@@ -21,6 +21,10 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Handles READ steps: executes a SELECT and counts rows.
+ *
+ * <p>Counts while streaming: the row count was the only thing the previous
+ * {@code queryForList(...).size()} needed, and materialising the whole source table to get it was
+ * the most wasteful version of this step imaginable.
  */
 public class ReadStepHandler implements StepHandler {
 
@@ -34,8 +38,10 @@ public class ReadStepHandler implements StepHandler {
     @Override
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
-        var rows = source.getJdbcTemplate().queryForList(step.sourceSql());
-        log.info("Read step: {} rows", rows.size());
-        return rows.size();
+        engine.validateSourceSql(step.sourceSql());
+        long rows = EtlRowStream.countRows(source.getJdbcTemplate(), step.sourceSql(),
+                engine.batchSize(step), engine.maxSourceRows(step));
+        log.info("Read step: {} rows", rows);
+        return rows;
     }
 }

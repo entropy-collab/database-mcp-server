@@ -15,17 +15,17 @@
  */
 package com.entropy.database.mcp.etl;
 
-import com.entropy.database.mcp.config.DatabaseConstants;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Handles TRANSFORM steps: applies column mappings and transforms, then inserts into target table.
+ *
+ * <p>Note: the insert runs on the <em>source</em> context, matching the behaviour this handler has
+ * always had; {@code targetConnection} is not honoured for TRANSFORM.
  */
 public class TransformStepHandler implements StepHandler {
 
@@ -42,6 +42,8 @@ public class TransformStepHandler implements StepHandler {
 
         JdbcTemplate jdbcTemplate = source.getJdbcTemplate();
         var dialect = source.getDialect();
+
+        engine.validateSourceSql(step.sourceSql());
 
         List<String> sourceColumns = new ArrayList<>();
         List<String> targetColumns = new ArrayList<>();
@@ -77,21 +79,17 @@ public class TransformStepHandler implements StepHandler {
             selectSql.append(" WHERE ").append(whereClause);
         }
 
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql.toString());
-        if (rows.isEmpty()) return 0;
-
         String targetTable = dialect.normalizeTableName(step.targetTable());
-        String columnList = String.join(", ", targetColumns.stream().map(dialect::quote).toList());
-        String placeholderList = String.join(", ", targetColumns.stream().map(c -> "?").toList());
-        String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
+        int batchSize = engine.batchSize(step);
 
-        int batchSize = engine.getIntParam(step, "batchSize", DatabaseConstants.DEFAULT_BATCH_SIZE);
-        int[][] updateCounts = jdbcTemplate.batchUpdate(insertSql, rows, batchSize, (ps, row) -> {
-            for (int i = 0; i < targetColumns.size(); i++) {
-                ps.setObject(i + 1, row.get(targetColumns.get(i)));
-            }
-        });
-
-        return Arrays.stream(updateCounts).flatMapToInt(Arrays::stream).sum();
+        // Column labels come from the SELECT above, which aliases every expression to its target
+        // column, so the batch keys are exactly the columns the INSERT names.
+        return EtlRowStream.copyInBatches(jdbcTemplate, selectSql.toString(), batchSize,
+                engine.maxSourceRows(step),
+                (columns, batch) -> {
+                    String insertSql = EtlSql.insertInto(dialect, targetTable, columns);
+                    return EtlSql.sum(jdbcTemplate.batchUpdate(insertSql, batch, batch.size(),
+                            EtlSql.bindColumns(columns)));
+                });
     }
 }

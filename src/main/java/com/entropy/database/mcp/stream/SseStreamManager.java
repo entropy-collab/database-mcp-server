@@ -61,25 +61,62 @@ public class SseStreamManager {
     /** Default chunk size for row streaming. */
     public static final int DEFAULT_CHUNK_SIZE = 100;
 
+    /**
+     * Default ceiling on how many chunks one {@code streamWithChunks} call accumulates.
+     *
+     * <p>The accumulated result is held in memory, so something has to bound it. Stopping at the
+     * ceiling is also the only case where {@code hasMore} can honestly be true.
+     */
+    public static final int DEFAULT_MAX_CHUNKS = 1000;
+
     // ─── Chunked Streaming ──────────────────────────────────────────────────
 
     /**
-     * Execute a query and stream results in configurable chunks.
+     * Execute a query and stream results in configurable chunks, up to
+     * {@link #DEFAULT_MAX_CHUNKS} chunks.
      *
-     * @param fetchChunk a function that returns the next chunk of rows (may be partial)
-     * @param chunkSize  maximum rows per chunk
-     * @param columns    column names
-     * @param onComplete callback invoked with each completed chunk (can be null)
-     * @return the fully accumulated streaming result
+     * @see #streamWithChunks(Function, int, List, Consumer, int)
      */
     public StreamingQueryResult streamWithChunks(
             Function<Integer, List<Map<String, Object>>> fetchChunk,
             int chunkSize,
             List<String> columns,
             Consumer<StreamingChunk> onComplete) {
+        return streamWithChunks(fetchChunk, chunkSize, columns, onComplete, DEFAULT_MAX_CHUNKS);
+    }
+
+    /**
+     * Execute a query and stream results in configurable chunks.
+     *
+     * <p>{@code fetchChunk} is assumed to advance a cursor: every call consumes rows. So it is
+     * called only to produce chunks that end up in the result, never speculatively. {@code hasMore}
+     * is true exactly when {@code maxChunks} stopped the loop, i.e. when rows may still be sitting
+     * behind the cursor — it is never inferred by fetching a batch and throwing it away, which was
+     * how the previous implementation lost a whole chunk of rows: the discarded batch appeared
+     * neither in {@code chunks} nor in {@code totalRows}.
+     *
+     * <p>A fetch failure propagates. It is not "no more rows": reporting a truncated result as
+     * complete is the same silent data loss with a different cause.
+     *
+     * @param fetchChunk a function that returns the next chunk of rows (may be partial)
+     * @param chunkSize  maximum rows per chunk
+     * @param columns    column names
+     * @param onComplete callback invoked with each completed chunk (can be null)
+     * @param maxChunks  ceiling on accumulated chunks, since the result is held in memory
+     * @return the accumulated streaming result
+     */
+    public StreamingQueryResult streamWithChunks(
+            Function<Integer, List<Map<String, Object>>> fetchChunk,
+            int chunkSize,
+            List<String> columns,
+            Consumer<StreamingChunk> onComplete,
+            int maxChunks) {
+        if (chunkSize <= 0) chunkSize = DEFAULT_CHUNK_SIZE;
+        int chunkCeiling = maxChunks > 0 ? maxChunks : DEFAULT_MAX_CHUNKS;
         List<StreamingChunk> chunks = new ArrayList<>();
         int totalRows = 0;
         int pageNum = 0;
+        boolean stoppedAtCeiling = false;
 
         while (true) {
             List<Map<String, Object>> chunk = fetchChunk.apply(chunkSize);
@@ -93,10 +130,18 @@ public class SseStreamManager {
                 onComplete.accept(sc);
             }
 
+            // A short chunk means the source is exhausted. A full one says nothing either way, so
+            // the loop keeps going until the source says it is done or the ceiling stops us.
             if (chunk.size() < chunkSize) break;
+            if (chunks.size() >= chunkCeiling) {
+                stoppedAtCeiling = true;
+                log.warn("Stopped streaming at the {}-chunk ceiling after {} rows; more rows may remain",
+                        chunkCeiling, totalRows);
+                break;
+            }
         }
 
-        return new StreamingQueryResult(columns, chunks, totalRows, hasMore(totalRows, fetchChunk, chunkSize));
+        return new StreamingQueryResult(columns, chunks, totalRows, stoppedAtCeiling);
     }
 
     /**
@@ -145,17 +190,6 @@ public class SseStreamManager {
      */
     public StreamBuilder newBuilder() {
         return new StreamBuilder();
-    }
-
-    // ─── Private helpers ────────────────────────────────────────────────────
-
-    private boolean hasMore(int totalRows, Function<Integer, List<Map<String, Object>>> fetchFn, int chunkSize) {
-        try {
-            List<Map<String, Object>> extra = fetchFn.apply(chunkSize);
-            return extra != null && !extra.isEmpty();
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     // ─── Nested types ───────────────────────────────────────────────────────

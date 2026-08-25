@@ -15,12 +15,10 @@
  */
 package com.entropy.database.mcp.etl;
 
-import com.entropy.database.mcp.config.DatabaseConstants;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * Handles UPSERT steps using dialect-specific buildUpsertSql.
@@ -40,25 +38,22 @@ public class UpsertStepHandler implements StepHandler {
         List<String> keyColumns = engine.getListParam(step, "keyColumns", List.of());
         String tableName = dialect.normalizeTableName(step.targetTable());
 
-        // Upsert data is passed via step.sourceSql as rows in the params or directly
-        // For step-based execution, reuse the source to read rows then upsert into target
-        List<Map<String, Object>> rows = source.getJdbcTemplate().queryForList(step.sourceSql());
-        if (rows.isEmpty()) return 0;
+        engine.validateSourceSql(step.sourceSql());
 
-        List<String> allColumns = new java.util.ArrayList<>(rows.get(0).keySet());
-        String upsertSql = dialect.buildUpsertSql(tableName, allColumns, keyColumns);
-        if (upsertSql == null) {
-            throw new UnsupportedOperationException(
-                    "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName());
-        }
+        int batchSize = engine.batchSize(step);
 
-        int batchSize = engine.getIntParam(step, "batchSize", DatabaseConstants.DEFAULT_BATCH_SIZE);
-        int[][] updateCounts = jdbc.batchUpdate(upsertSql, rows, batchSize, (ps, row) -> {
-            for (int i = 0; i < allColumns.size(); i++) {
-                ps.setObject(i + 1, row.get(allColumns.get(i)));
-            }
-        });
-
-        return java.util.Arrays.stream(updateCounts).flatMapToInt(java.util.Arrays::stream).sum();
+        // Read the source in batches and upsert each batch; the column list is identical for every
+        // batch, so the statement is rebuilt from the batch's own columns without drifting.
+        return EtlRowStream.copyInBatches(source.getJdbcTemplate(), step.sourceSql(), batchSize,
+                engine.maxSourceRows(step),
+                (columns, batch) -> {
+                    String upsertSql = dialect.buildUpsertSql(tableName, columns, keyColumns);
+                    if (upsertSql == null) {
+                        throw new UnsupportedOperationException(
+                                "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName());
+                    }
+                    return EtlSql.sum(jdbc.batchUpdate(upsertSql, batch, batch.size(),
+                            EtlSql.bindColumns(columns)));
+                });
     }
 }

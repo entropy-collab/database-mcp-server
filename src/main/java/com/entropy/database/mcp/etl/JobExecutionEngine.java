@@ -17,7 +17,6 @@ package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
-import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.security.SqlValidator;
@@ -25,12 +24,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.core.task.TaskExecutor;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -48,6 +47,23 @@ public class JobExecutionEngine implements DisposableBean {
     private static final Logger log = LoggerFactory.getLogger(JobExecutionEngine.class);
     private static final int DEFAULT_ETL_THREADS = 4;
     private static final int DEFAULT_BATCH_SIZE = 1000;
+
+    /**
+     * Ceiling on how many source rows one step may read.
+     *
+     * <p>ETL is the highest-volume path in this server and {@code SqlValidator.validateSelect}
+     * only checks syntax, so without a ceiling a single {@code SELECT * FROM big_table} decides
+     * the heap budget. Overridable per step via the {@code maxSourceRows} param, or process-wide
+     * through {@link #JobExecutionEngine(DynamicDataSourceManager, McpMetricsCollector, EtlConfig,
+     * TaskExecutor, SqlValidator, int)}.
+     */
+    public static final int DEFAULT_MAX_SOURCE_ROWS = 1_000_000;
+
+    /** Single-quoted literals in a driver message: the part most likely to carry row data. */
+    private static final Pattern SQL_LITERAL = Pattern.compile("'[^']*'");
+
+    /** Upper bound on the error text stored per step and handed to the LLM. */
+    private static final int MAX_STEP_ERROR_LENGTH = 500;
 
     private final DynamicDataSourceManager dataSourceManager;
     private final SqlValidator sqlValidator;
@@ -67,6 +83,16 @@ public class JobExecutionEngine implements DisposableBean {
     private final TaskExecutor taskExecutor;
     private final EtlConfig etlConfig;
     private final McpMetricsCollector metricsCollector;
+    private final int maxSourceRows;
+
+    /**
+     * One handler instance per step type, built once.
+     *
+     * <p>{@link StepHandler} implementations are stateless and are not Spring beans, so they are
+     * instantiated here rather than injected — but only once per engine instead of once per step,
+     * which is what the previous {@code switch}-with-{@code new} did.
+     */
+    private final Map<StepType, StepHandler> handlers;
 
     public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                               McpMetricsCollector metricsCollector) {
@@ -85,17 +111,49 @@ public class JobExecutionEngine implements DisposableBean {
                               EtlConfig etlConfig,
                               TaskExecutor taskExecutor,
                               SqlValidator sqlValidator) {
+        this(dataSourceManager, metricsCollector, etlConfig, taskExecutor, sqlValidator,
+                DEFAULT_MAX_SOURCE_ROWS);
+    }
+
+    public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
+                              McpMetricsCollector metricsCollector,
+                              EtlConfig etlConfig,
+                              TaskExecutor taskExecutor,
+                              SqlValidator sqlValidator,
+                              int maxSourceRows) {
         this.dataSourceManager = dataSourceManager;
         this.sqlValidator = sqlValidator;
         this.etlConfig = etlConfig;
         this.metricsCollector = metricsCollector;
         this.taskExecutor = taskExecutor;
+        this.maxSourceRows = maxSourceRows > 0 ? maxSourceRows : DEFAULT_MAX_SOURCE_ROWS;
+        this.handlers = buildHandlers();
     }
 
     public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                               ExecutorService executor,
                               McpMetricsCollector metricsCollector) {
         this(dataSourceManager, metricsCollector, null, executor::submit);
+    }
+
+    private static Map<StepType, StepHandler> buildHandlers() {
+        List<StepHandler> all = List.of(
+                new QueryToTableStepHandler(),
+                new TransformStepHandler(),
+                new DdlStepHandler(),
+                new UpsertStepHandler(),
+                new QueryToJsonStepHandler(),
+                new ReadStepHandler(),
+                new ExportStepHandler());
+        Map<StepType, StepHandler> byType = new EnumMap<>(StepType.class);
+        for (StepHandler handler : all) {
+            StepHandler previous = byType.put(handler.supports(), handler);
+            if (previous != null) {
+                throw new IllegalStateException("Two handlers claim step type " + handler.supports()
+                        + ": " + previous.getClass().getName() + " and " + handler.getClass().getName());
+            }
+        }
+        return Collections.unmodifiableMap(byType);
     }
 
     // ─── Job Lifecycle ───────────────────────────────────────────────────────
@@ -166,10 +224,10 @@ public class JobExecutionEngine implements DisposableBean {
 
             // Execute steps in order
             for (Step step : sortedSteps) {
-                // Check if any dependency failed
-                List<String> failedDeps = getFailedDependencies(step, execution);
-                if (!failedDeps.isEmpty()) {
-                    log.warn("Skipping step {} due to failed dependencies: {}", step.id(), failedDeps);
+                // A dependency that did not complete means this step's input does not exist
+                List<String> blockedDeps = blockingDependencies(step, execution);
+                if (!blockedDeps.isEmpty()) {
+                    log.warn("Skipping step {}: dependencies did not complete: {}", step.id(), blockedDeps);
                     updateStepState(execution, step.id(),
                             StepExecutionState.skipped(step.id()));
                     continue;
@@ -245,147 +303,84 @@ public class JobExecutionEngine implements DisposableBean {
 
         } catch (Exception e) {
             log.error("Step {} failed", step.id(), e);
-            updateStepState(execution, step.id(), StepExecutionState.failed(step.id(), "执行失败"));
+            // Keep the real reason: getJobStatus hands state.error() straight to the LLM, and a
+            // fixed "执行失败" left the caller with nothing to act on. Redacted and truncated,
+            // because driver messages quote the failing statement and its literals.
+            updateStepState(execution, step.id(),
+                    StepExecutionState.failed(step.id(), describeFailure(e, step)));
         }
+    }
+
+    /**
+     * Render a step failure as a short, redacted, actionable string.
+     *
+     * <p>Uses the root cause — the wrapper is usually {@code DataAccessException}, the cause is
+     * what actually went wrong — and strips single-quoted literals, which is where row data shows
+     * up in driver messages, plus the step's own SQL if the message echoes it.
+     */
+    private String describeFailure(Throwable failure, Step step) {
+        Throwable root = rootCause(failure);
+        String message = root.getMessage() == null ? "" : root.getMessage();
+        message = redact(message, step.sourceSql());
+        String description = root.getClass().getSimpleName() + (message.isBlank() ? "" : ": " + message);
+        description = description.replaceAll("\\s+", " ").trim();
+        return description.length() > MAX_STEP_ERROR_LENGTH
+                ? description.substring(0, MAX_STEP_ERROR_LENGTH) + "...(truncated)"
+                : description;
+    }
+
+    private String redact(String message, String sourceSql) {
+        String redacted = message;
+        if (sourceSql != null && !sourceSql.isBlank()) {
+            redacted = redacted.replace(sourceSql, "[sql omitted]");
+        }
+        return SQL_LITERAL.matcher(redacted).replaceAll("'?'");
+    }
+
+    private Throwable rootCause(Throwable failure) {
+        Throwable root = failure;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        return root;
     }
 
     private StepHandler findHandler(StepType type) {
-        return switch (type) {
-            case QUERY_TO_TABLE -> new QueryToTableStepHandler();
-            case TRANSFORM -> new TransformStepHandler();
-            case DDL -> new DdlStepHandler();
-            case UPSERT -> new UpsertStepHandler();
-            case QUERY_TO_JSON -> new QueryToJsonStepHandler();
-            case READ -> new ReadStepHandler();
-            case EXPORT -> new ExportStepHandler();
-        };
-    }
-
-    // ─── Step Executors (exposed as protected for StepHandler reuse) ─────────
-
-    protected long executeQueryToTable(ByokDataSourceContext source, ByokDataSourceContext target,
-                                       Step step) {
-        JdbcTemplate sourceJdbc = source.getJdbcTemplate();
-        JdbcTemplate targetJdbc = target.getJdbcTemplate();
-        DatabaseDialect dialect = target.getDialect();
-
-        String targetTable = dialect.normalizeTableName(step.targetTable());
-        if (sqlValidator != null) {
-            sqlValidator.validateSelect(step.sourceSql());
+        StepHandler handler = handlers.get(type);
+        if (handler == null) {
+            throw new IllegalStateException("No StepHandler registered for step type " + type);
         }
-        List<Map<String, Object>> rows = sourceJdbc.queryForList(step.sourceSql());
-        if (rows.isEmpty()) return 0;
-
-        List<String> columns = new ArrayList<>(rows.get(0).keySet());
-        String columnList = String.join(", ", columns.stream().map(dialect::quote).toList());
-        String placeholderList = String.join(", ", columns.stream().map(c -> "?").toList());
-        String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
-
-        int batchSize = getIntParam(step, "batchSize", etlConfig != null ? etlConfig.batchSize() : DEFAULT_BATCH_SIZE);
-        int[][] updateCounts = targetJdbc.batchUpdate(insertSql, rows, batchSize, (ps, row) -> {
-            for (int i = 0; i < columns.size(); i++) {
-                ps.setObject(i + 1, row.get(columns.get(i)));
-            }
-        });
-
-        return Arrays.stream(updateCounts).flatMapToInt(Arrays::stream).sum();
+        return handler;
     }
 
-    protected long executeTransform(ByokDataSourceContext source, ByokDataSourceContext target,
-                                    Step step) {
-        List<String> columnMapping = getListParam(step, "columnMapping", List.of());
-        String whereClause = getStringParam(step, "whereClause", null);
+    // ─── Step execution support (used by StepHandler implementations) ─────────
 
-        JdbcTemplate jdbcTemplate = source.getJdbcTemplate();
-        DatabaseDialect dialect = source.getDialect();
-
-        if (sqlValidator != null) {
-            sqlValidator.validateSelect(step.sourceSql());
+    /**
+     * Validate a step's source SQL when a validator is configured.
+     *
+     * <p>Handlers call this before reading: they run the SQL a caller supplied, and the engine owns
+     * the validator. A null validator means validation is disabled for this engine instance.
+     */
+    public void validateSourceSql(String sql) {
+        if (sqlValidator != null && sql != null && !sql.isBlank()) {
+            sqlValidator.validateSelect(sql);
         }
-
-        List<String> sourceColumns = new ArrayList<>();
-        List<String> targetColumns = new ArrayList<>();
-        List<String> transforms = new ArrayList<>();
-
-        for (String mapping : columnMapping) {
-            String[] parts = mapping.split(":");
-            sourceColumns.add(parts[0]);
-            targetColumns.add(parts[1]);
-            transforms.add(parts.length >= 3 ? parts[2] : "none");
-        }
-
-        StringBuilder selectSql = new StringBuilder("SELECT ");
-        List<String> selectExprs = new ArrayList<>();
-        for (int i = 0; i < sourceColumns.size(); i++) {
-            String src = sourceColumns.get(i);
-            String transform = transforms.get(i);
-            String expr = switch (transform) {
-                case "upper" -> "UPPER(" + src + ")";
-                case "lower" -> "LOWER(" + src + ")";
-                case "trim" -> "TRIM(" + src + ")";
-                case "int" -> "CAST(" + src + " AS INTEGER)";
-                case "long" -> "CAST(" + src + " AS BIGINT)";
-                case "double" -> "CAST(" + src + " AS DOUBLE)";
-                default -> src;
-            };
-            selectExprs.add(expr + " AS " + dialect.quote(targetColumns.get(i)));
-        }
-        selectSql.append(String.join(", ", selectExprs));
-        selectSql.append(" FROM (").append(step.sourceSql()).append(") AS _src");
-        if (whereClause != null && !whereClause.isBlank()) {
-            selectSql.append(" WHERE ").append(whereClause);
-        }
-
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList(selectSql.toString());
-        if (rows.isEmpty()) return 0;
-
-        String targetTable = dialect.normalizeTableName(step.targetTable());
-        String columnList = String.join(", ", targetColumns.stream().map(dialect::quote).toList());
-        String placeholderList = String.join(", ", targetColumns.stream().map(c -> "?").toList());
-        String insertSql = "INSERT INTO " + targetTable + " (" + columnList + ") VALUES (" + placeholderList + ")";
-
-        int batchSize = getIntParam(step, "batchSize", DEFAULT_BATCH_SIZE);
-        int[][] updateCounts = jdbcTemplate.batchUpdate(insertSql, rows, batchSize, (ps, row) -> {
-            for (int i = 0; i < targetColumns.size(); i++) {
-                ps.setObject(i + 1, row.get(targetColumns.get(i)));
-            }
-        });
-
-        return Arrays.stream(updateCounts).flatMapToInt(Arrays::stream).sum();
     }
 
-    protected long executeDdl(ByokDataSourceContext context, Step step) {
-        JdbcTemplate jdbcTemplate = context.getJdbcTemplate();
-        List<String> statements = getListParam(step, "statements", List.of());
-
-        int totalAffected = 0;
-        for (String ddl : statements) {
-            totalAffected += jdbcTemplate.update(ddl);
-        }
-        return totalAffected;
+    /**
+     * Rows a step may read from its source, {@code maxSourceRows} param overriding the engine-wide
+     * ceiling.
+     */
+    public int maxSourceRows(Step step) {
+        return getIntParam(step, "maxSourceRows", maxSourceRows);
     }
 
-    protected long executeUpsert(ByokDataSourceContext context, ByokDataSourceContext target,
-                                 Step step) {
-        // Delegates to dialect-specific buildUpsertSql via UpsertStepHandler
-        return executeQueryToTable(context, target, step);
-    }
-
-    protected long executeQueryToJson(ByokDataSourceContext context, Step step) {
-        List<Map<String, Object>> rows = context.getJdbcTemplate().queryForList(step.sourceSql());
-        log.info("Query to JSON: {} rows", rows.size());
-        return rows.size();
-    }
-
-    protected long executeRead(ByokDataSourceContext context, Step step) {
-        List<Map<String, Object>> rows = context.getJdbcTemplate().queryForList(step.sourceSql());
-        log.info("Read step: {} rows", rows.size());
-        return rows.size();
-    }
-
-    protected long executeExport(ByokDataSourceContext context, Step step) {
-        log.info("Export step: {}", step.id());
-        return 0;
+    /**
+     * Rows per batch when writing to a target, {@code batchSize} param overriding the configured
+     * default.
+     */
+    public int batchSize(Step step) {
+        return getIntParam(step, "batchSize", etlConfig != null ? etlConfig.batchSize() : DEFAULT_BATCH_SIZE);
     }
 
     // ─── Helper Methods ─────────────────────────────────────────────────────
@@ -435,11 +430,24 @@ public class JobExecutionEngine implements DisposableBean {
         result.add(step);
     }
 
-    private List<String> getFailedDependencies(Step step, JobExecution execution) {
+    /**
+     * Dependencies of {@code step} that did not complete, and therefore block it.
+     *
+     * <p>Only {@link StepStatus#COMPLETED} clears a dependency. Looking at {@code FAILED} alone
+     * let a failure escape one hop: A fails, B (depending on A) is marked {@code SKIPPED}, and C
+     * (depending on B) saw no {@code FAILED} dependency and ran anyway — a {@code QUERY_TO_TABLE}
+     * step then wrote whatever the never-produced source yielded into the target table, and
+     * {@code getFailedStepIds()} showed nothing about C. {@code PENDING}/{@code RUNNING} block for
+     * the same reason: the input is not there yet.
+     *
+     * <p>A dependency id with no recorded state is not treated as blocking: job validation rejects
+     * unknown dependency ids, so this can only be a step outside this execution.
+     */
+    private List<String> blockingDependencies(Step step, JobExecution execution) {
         return step.dependsOn().stream()
                 .filter(depId -> {
                     StepExecutionState depState = execution.stepStates().get(depId);
-                    return depState != null && depState.status() == StepStatus.FAILED;
+                    return depState != null && depState.status() != StepStatus.COMPLETED;
                 })
                 .toList();
     }

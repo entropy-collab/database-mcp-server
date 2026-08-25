@@ -24,36 +24,43 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.stereotype.Component;
 
 /**
- * Cross-session context store for sharing data between MCP tool calls across different sessions.
+ * Scope-partitioned context store for sharing data between MCP tool calls.
  *
  * <p>This provides a shared, thread-safe key-value store where tools can store and retrieve
- * contextual data that persists beyond a single tool invocation. For example:
+ * contextual data. For example:
  * <ul>
  *   <li>Save query results from one tool to be used by another</li>
  *   <li>Share connection preferences across tools</li>
  *   <li>Store intermediate ETL pipeline state</li>
  * </ul>
  *
- * <p>Data is organized under session-scoped namespaces to prevent collisions between
- * concurrent MCP sessions. Entries automatically expire after {@link #DEFAULT_TTL_MINUTES} minutes.
+ * <p>Data is organized under scope-keyed namespaces to prevent collisions between concurrent
+ * callers. Entries automatically expire after {@link #DEFAULT_TTL_MINUTES} minutes.
+ *
+ * <h2>Scope, and why it is not an MCP session</h2>
+ * <p>The store is partitioned by whatever {@link McpToolContext#sessionId()} reports. Under this
+ * server's deployment shape — {@code spring.ai.mcp.server.protocol: STATELESS} — the MCP protocol
+ * has no session identity to partition by (see the {@link McpToolContext} class javadoc for what
+ * the transport does and does not expose). The default scope is therefore <b>one tool
+ * invocation</b>: a value written by {@code sessionStore} is <em>not</em> visible to the next
+ * {@code sessionGet}, and the TTL only bounds how long an abandoned partition lingers.
+ *
+ * <p>Cross-call sharing requires the caller to supply the scope key explicitly, via the
+ * {@code scope}-taking overloads here (or {@link McpToolContext#create(String, String)} plus an MCP
+ * tool parameter carrying the key). That is the only correct option on a stateless transport:
+ * deriving the partition from a clock — the previous behaviour — both broke sharing for one caller
+ * and merged the namespaces of two different callers that arrived in the same millisecond, which
+ * under BYOK multi-tenancy is cross-tenant data visibility.
  *
  * <p>Usage:
  * <pre>{@code
- * // Store a value
+ * // Store a value in the current (call-scoped) partition
  * multiSession.set("user-queries", "my-table-data", resultRows);
  *
- * // Retrieve a value
- * var data = multiSession.get("user-queries", "my-table-data");
- *
- * // Remove a value
- * multiSession.remove("user-queries", "my-table-data");
- *
- * // Clear all values for a namespace
- * multiSession.clearNamespace("user-queries");
+ * // Store a value under a caller-supplied scope so a later call can read it
+ * multiSession.set(callerScope, "user-queries", "my-table-data", resultRows);
+ * var data = multiSession.get(callerScope, "user-queries", "my-table-data");
  * }</pre>
- *
- * <p>This follows the same pattern as Spring's {@code RequestContextHolder} but scoped
- * to the MCP protocol's session model.
  */
 @Component
 public class MultiSessionContext {
@@ -73,28 +80,46 @@ public class MultiSessionContext {
     /** Namespace for temporary scratch data. */
     public static final String NAMESPACE_SCRATCH = "scratch";
 
-    private static final AtomicLong sessionIdCounter = new AtomicLong(0);
+    /**
+     * Counter for the fallback scope handed out when no {@link McpToolContext} exists (background
+     * tasks, direct programmatic use). Deliberately a per-thread scope rather than one shared
+     * bucket: an unidentified caller must not land in a partition another caller can read.
+     */
+    private static final AtomicLong fallbackScopeCounter = new AtomicLong(0);
 
     /**
-     * Session-scoped storage: sessionId -> namespace -> key -> CacheEntry.
+     * Scope-partitioned storage: scope -> namespace -> key -> CacheEntry.
      */
-    private final ConcurrentHashMap<Long, ConcurrentHashMap<String, ConcurrentHashMap<String, CacheEntry>>> store
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<String, CacheEntry>>> store
             = new ConcurrentHashMap<>();
 
     /**
-     * Get or create the current session ID.
+     * The scope key the no-scope overloads write to and read from.
+     *
+     * <p>Normally the current tool invocation's scope. Falls back to a fresh thread-local scope
+     * when there is no {@link McpToolContext} at all, so that a caller outside the MCP request path
+     * still gets isolation rather than sharing a global partition.
      */
-    public long currentSessionId() {
-        Long sid = McpToolContext.currentSessionId().orElse(null);
-        if (sid == null) {
-            sid = sessionIdCounter.incrementAndGet();
-            McpToolContext.initSession(sid);
+    public String currentSessionId() {
+        String scope = McpToolContext.currentSessionId().orElse(null);
+        if (scope == null) {
+            scope = "thread:" + Thread.currentThread().threadId()
+                    + ":" + fallbackScopeCounter.incrementAndGet();
+            McpToolContext.initSession(scope);
         }
-        return sid;
+        return scope;
     }
 
     /**
-     * Store a value under the current session's namespace.
+     * Whether the current scope disappears at the end of this tool call, i.e. whether anything
+     * written now can be read back later. False only when the caller supplied a scope key.
+     */
+    public boolean currentScopeIsCallScoped() {
+        return McpToolContext.isCallScoped(currentSessionId());
+    }
+
+    /**
+     * Store a value under the current scope's namespace.
      *
      * @param namespace the namespace (e.g., {@link #NAMESPACE_QUERIES})
      * @param key       the key within the namespace
@@ -105,22 +130,22 @@ public class MultiSessionContext {
     }
 
     /**
-     * Store a value under a specific session's namespace.
+     * Store a value under an explicit scope's namespace.
      *
-     * @param sessionId the session ID
+     * @param scope     the scope key (see the class javadoc)
      * @param namespace the namespace
      * @param key       the key
      * @param value     the value
      */
-    public void set(long sessionId, String namespace, String key, Object value) {
+    public void set(String scope, String namespace, String key, Object value) {
         store
-                .computeIfAbsent(sessionId, k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(scope, k -> new ConcurrentHashMap<>())
                 .computeIfAbsent(namespace, k -> new ConcurrentHashMap<>())
                 .put(key, new CacheEntry(value, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(DEFAULT_TTL_MINUTES)));
     }
 
     /**
-     * Retrieve a value from the current session's namespace.
+     * Retrieve a value from the current scope's namespace.
      *
      * @param namespace the namespace
      * @param key       the key
@@ -132,15 +157,15 @@ public class MultiSessionContext {
     }
 
     /**
-     * Retrieve a value from a specific session's namespace.
+     * Retrieve a value from an explicit scope's namespace.
      */
     @SuppressWarnings("unchecked")
-    public <T> T get(long sessionId, String namespace, String key) {
-        return (T) doGet(sessionId, namespace, key);
+    public <T> T getInScope(String scope, String namespace, String key) {
+        return (T) doGet(scope, namespace, key);
     }
 
-    private Object doGet(long sessionId, String namespace, String key) {
-        var nsMap = store.get(sessionId);
+    private Object doGet(String scope, String namespace, String key) {
+        var nsMap = store.get(scope);
         if (nsMap == null) return null;
         var keyMap = nsMap.get(namespace);
         if (keyMap == null) return null;
@@ -157,30 +182,30 @@ public class MultiSessionContext {
      * Remove a specific entry.
      */
     public void remove(String namespace, String key) {
-        remove(currentSessionId(), namespace, key);
+        removeInScope(currentSessionId(), namespace, key);
     }
 
-    public void remove(long sessionId, String namespace, String key) {
-        var nsMap = store.get(sessionId);
+    public void removeInScope(String scope, String namespace, String key) {
+        var nsMap = store.get(scope);
         if (nsMap == null) return;
         var keyMap = nsMap.get(namespace);
         if (keyMap != null) keyMap.remove(key);
     }
 
     /**
-     * Clear all entries in a namespace for the current session.
+     * Clear all entries in a namespace for the current scope.
      */
     public void clearNamespace(String namespace) {
-        clearNamespace(currentSessionId(), namespace);
+        clearNamespaceInScope(currentSessionId(), namespace);
     }
 
-    public void clearNamespace(long sessionId, String namespace) {
-        var nsMap = store.get(sessionId);
+    public void clearNamespaceInScope(String scope, String namespace) {
+        var nsMap = store.get(scope);
         if (nsMap != null) nsMap.remove(namespace);
     }
 
     /**
-     * Get all keys in a namespace for the current session.
+     * Get all keys in a namespace for the current scope.
      */
     public java.util.Set<String> keys(String namespace) {
         var nsMap = store.get(currentSessionId());
@@ -190,9 +215,9 @@ public class MultiSessionContext {
     }
 
     /**
-     * Purge all expired entries across all sessions.
+     * Purge all expired entries across all scopes.
      *
-     * <p>Scheduled rather than relying on the lazy check in {@link #doGet}: a session that is
+     * <p>Scheduled rather than relying on the lazy check in {@link #doGet}: a scope that is
      * written to and never read again would otherwise retain its payload for the process
      * lifetime, since nothing ever evaluates its expiry.
      */
@@ -206,12 +231,12 @@ public class MultiSessionContext {
         // Clean up empty namespace maps
         store.values().forEach(nsMap ->
                 nsMap.entrySet().removeIf(e -> e.getValue().isEmpty()));
-        // Clean up empty sessions
+        // Clean up empty scopes
         store.entrySet().removeIf(e -> e.getValue().isEmpty());
     }
 
     /**
-     * Get the number of active sessions.
+     * Get the number of active scopes.
      */
     public int sessionCount() {
         return store.size();

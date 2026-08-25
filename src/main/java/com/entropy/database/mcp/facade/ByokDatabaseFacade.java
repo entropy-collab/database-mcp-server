@@ -254,10 +254,32 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
         }
     }
 
+    /**
+     * Run {@code work} inside one transaction on one connection.
+     *
+     * <p>The invariant this method has to hold is "a caller that receives an exception did not get
+     * a commit". Two things threaten it, and both are handled here rather than in
+     * {@link #restoreAndClose}:
+     *
+     * <ul>
+     *   <li>Restoring {@code autoCommit} while a transaction is still open <em>commits</em> it
+     *       (JDBC 4.3, {@code Connection#setAutoCommit}). So the restore only happens once the
+     *       transaction is settled — committed, or rolled back successfully. {@code settled}
+     *       tracks exactly that, and {@link #restoreAndClose} rolls back first when it is false.</li>
+     *   <li>An {@link Error} — {@code OutOfMemoryError}, {@code StackOverflowError} — is not an
+     *       {@link Exception}, so a {@code catch (Exception)} here would let it reach the
+     *       {@code finally} with the transaction still open and get it committed. The catch is
+     *       therefore on {@link Throwable}; an {@code Error} is rolled back and rethrown as-is
+     *       rather than wrapped, because it describes VM state, not a failed tool call.</li>
+     * </ul>
+     */
     @Override
     public <T> T inTransaction(String connection, TransactionalWork<T> work) {
         Connection conn = null;
         boolean originalAutoCommit = true;
+        // Whether the transaction has reached a definite end: committed, or rolled back with a
+        // rollback() that returned normally. Anything else means work may still be pending.
+        boolean settled = false;
         try {
             conn = context.getConnection();
             originalAutoCommit = conn.getAutoCommit();
@@ -265,41 +287,62 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
             T result;
             try {
                 result = work.execute(new JdbcTransactionContext(conn));
-            } catch (Exception e) {
-                rollbackQuietly(conn, e);
-                throw wrap(e, "Transaction rolled back");
+            } catch (Throwable t) {
+                settled = rollbackQuietly(conn, t);
+                if (t instanceof Error error) {
+                    throw error;
+                }
+                throw wrap(t, "Transaction rolled back");
             }
             conn.commit();
+            settled = true;
             return result;
         } catch (SQLException e) {
+            // Reached when getConnection/getAutoCommit/setAutoCommit/commit fail. A failed commit
+            // leaves settled == false, so the finally below rolls back before touching autoCommit.
             throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
                     "Transaction failed: " + e.getMessage(), e, context.getKey());
         } finally {
             if (conn != null) {
-                restoreAndClose(conn, originalAutoCommit);
+                restoreAndClose(conn, originalAutoCommit, settled);
             }
         }
     }
 
     /**
-     * Attach a rollback failure to the original error rather than replacing it: the reason the
-     * work failed is what the caller needs, the rollback failure is secondary evidence.
+     * Roll back, attaching a rollback failure to the original error rather than replacing it: the
+     * reason the work failed is what the caller needs, the rollback failure is secondary evidence.
+     *
+     * @return {@code true} when {@code rollback()} returned normally, i.e. nothing is left pending
+     *         on the connection. {@code false} means the transaction is still open and autoCommit
+     *         must not be restored.
      */
-    private void rollbackQuietly(Connection conn, Exception cause) {
+    private boolean rollbackQuietly(Connection conn, Throwable cause) {
         try {
             conn.rollback();
+            return true;
         } catch (SQLException rollbackFailure) {
             cause.addSuppressed(rollbackFailure);
+            return false;
         }
     }
 
-    private void restoreAndClose(Connection conn, boolean originalAutoCommit) {
-        try {
-            conn.setAutoCommit(originalAutoCommit);
-        } catch (SQLException e) {
-            // The connection is about to go back to the pool; leaving autoCommit flipped would
-            // silently change behaviour for the next borrower, so this is worth a warning.
-            log.warn("Failed to restore autoCommit on {}: {}", context.getKey(), e.getMessage());
+    private void restoreAndClose(Connection conn, boolean originalAutoCommit, boolean settled) {
+        boolean safeToRestore = settled || rollbackBeforeRestore(conn);
+        if (safeToRestore) {
+            try {
+                conn.setAutoCommit(originalAutoCommit);
+            } catch (SQLException e) {
+                // The connection is about to go back to the pool; leaving autoCommit flipped would
+                // silently change behaviour for the next borrower, so this is worth a warning.
+                log.warn("Failed to restore autoCommit on {}: {}", context.getKey(), e.getMessage());
+            }
+        } else {
+            // Restoring autoCommit here would commit the very work the caller is being told failed.
+            // Closing without restoring is the lesser evil: the pool discards or resets the
+            // connection, and an uncommitted transaction dies with it.
+            log.error("Leaving autoCommit unrestored on {}: the transaction could not be rolled "
+                    + "back and switching autoCommit back on would commit it", context.getKey());
         }
         try {
             conn.close();
@@ -308,7 +351,22 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
         }
     }
 
-    private McpToolException wrap(Exception e, String what) {
+    /**
+     * Last-resort rollback for paths that reached the {@code finally} without settling the
+     * transaction — a failed {@code commit()}, or an {@link Error} thrown by the work.
+     */
+    private boolean rollbackBeforeRestore(Connection conn) {
+        try {
+            conn.rollback();
+            return true;
+        } catch (SQLException e) {
+            log.error("Rollback failed on {} while closing an unsettled transaction: {}",
+                    context.getKey(), e.getMessage());
+            return false;
+        }
+    }
+
+    private McpToolException wrap(Throwable e, String what) {
         if (e instanceof McpToolException mcp) {
             return mcp;
         }
