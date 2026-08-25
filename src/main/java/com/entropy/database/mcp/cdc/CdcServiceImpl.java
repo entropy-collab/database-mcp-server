@@ -18,43 +18,42 @@ package com.entropy.database.mcp.cdc;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpQueryException;
+import com.entropy.database.mcp.exception.McpValidationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Function;
 
 /**
  * CDC service implementation using database-specific change capture mechanisms.
  *
  * <p>Strategy selection per dialect:
  * <ul>
- *   <li>Oracle — Flashback Query (SCN-based)</li>
+ *   <li>Oracle — Flashback Version Query (VERSIONS BETWEEN SCN, real I/U/D per row version)</li>
  *   <li>MySQL — Trigger-based audit tables (binlog requires Debezium)</li>
- *   <li>PostgreSQL — pglogical / trigger-based audit (WAL LSN)</li>
+ *   <li>PostgreSQL — trigger-based audit with WAL LSN watermark</li>
  * </ul>
  *
- * <p>Uses a functional {@link LsnExtractor} strategy pattern to normalize
- * the heterogeneous LSN/SCN/binlog-position values each dialect returns into
- * a single {@code long} type.
+ * <p>Failure semantics: every read either returns the changes it found or throws. Returning an
+ * empty list (or {@code 0} for a watermark) on error is not allowed, because the caller cannot tell
+ * that apart from "the table did not change".
  */
 @Service
 public class CdcServiceImpl implements CdcService {
 
     private static final Logger log = LoggerFactory.getLogger(CdcServiceImpl.class);
 
-    /** Function that extracts a normalized long LSN from a dialect-specific query result map. */
-    @FunctionalInterface
-    private interface LsnExtractor {
-        long extract(Map<String, Object> row);
-    }
+    /** Sentinel reported by {@link #getStatus} when the watermark could not be read. */
+    static final long LSN_UNAVAILABLE = -1L;
 
     private final DynamicDataSourceManager dataSourceManager;
     private final ConcurrentHashMap<String, CdcSubscription> subscriptions = new ConcurrentHashMap<>();
@@ -85,38 +84,52 @@ public class CdcServiceImpl implements CdcService {
 
     @Override
     public List<CdcChangeEvent> readChanges(String connection, String schema, String table, long fromLsn) {
-        List<CdcChangeEvent> events = new ArrayList<>();
-        ByokDataSourceContext ctx = null;
+        ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+        DatabaseDialect dialect = ctx.getDialect();
+        JdbcTemplate jdbc = ctx.getJdbcTemplate();
+
+        // The read SQL interpolates schema/table, so whitelist them before they reach the driver.
+        requireIdentifier(dialect, table, "table");
+        if (schema != null && !schema.isBlank()) {
+            requireIdentifier(dialect, schema, "schema");
+        }
+
+        String sql = dialect.cdcReadChangesSql(schema, table, fromLsn);
+        if (sql == null) {
+            throw new McpQueryException(ErrorCode.QUERY_EXECUTION_FAILED,
+                    "CDC read is not supported for dialect '%s' (connection=%s)"
+                            .formatted(dialect.getDialectName(), connection));
+        }
+
+        List<Map<String, Object>> rows;
         try {
-            ctx = dataSourceManager.acquire(connection);
-            DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
+            rows = jdbc.queryForList(sql, dialect.cdcLsnParameter(fromLsn));
+        } catch (DataAccessException e) {
+            // Never degrade a failed read to "no changes": the caller would treat it as an
+            // up-to-date table and advance its watermark past changes it never saw.
+            throw new McpQueryException(ErrorCode.QUERY_EXECUTION_FAILED,
+                    "Failed to read CDC changes for %s.%s (connection=%s, fromLsn=%d): %s"
+                            .formatted(schema, table, connection, fromLsn, e.getMessage()), e);
+        }
 
-            String sql = dialect.cdcReadChangesSql(schema, table, fromLsn);
-            if (sql == null) {
-                log.warn("CDC read not supported for dialect '{}'", dialect.getDialectName());
-                return List.of();
-            }
+        List<CdcChangeEvent> events = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            // fromCodeOrUnknown warns once per unrecognized code and keeps the event instead of
+            // dropping it, so a dialect/enum mismatch can no longer hide changes.
+            CdcChangeType changeType = CdcChangeType.fromCodeOrUnknown((String) row.get("change_type"));
 
-            for (Map<String, Object> row : jdbc.queryForList(sql, fromLsn)) {
-                CdcChangeType changeType = CdcChangeType.fromCode((String) row.get("change_type"));
-                if (changeType == null) continue;
+            Instant changeTime = extractTimestamp(row.get("change_time"));
+            String primaryKeys = toStringOrEmpty(row.get("primary_keys"));
+            String beforeJson = (String) row.get("before_json");
+            String afterJson = (String) row.get("after_json");
+            Long txId = toLongOrNull(row.get("transaction_id"));
 
-                Instant changeTime = extractTimestamp(row.get("change_time"));
-                String primaryKeys = toStringOrEmpty(row.get("primary_keys"));
-                String beforeJson = (String) row.get("before_json");
-                String afterJson = (String) row.get("after_json");
-                Long txId = toLongOrNull(row.get("transaction_id"));
-
-                events.add(new CdcChangeEvent(connection, schema, table, changeType,
-                        changeTime, primaryKeys, beforeJson, afterJson, txId, CdcEventStatus.PROCESSED));
-            }
-            eventCounters.merge(connection, (long) events.size(), Long::sum);
-            if (!events.isEmpty()) {
-                lastEventTimes.put(connection, System.currentTimeMillis());
-            }
-        } catch (Exception e) {
-            log.warn("Failed to read CDC changes for {}.{}: {}", schema, table, e.getMessage(), e);
+            events.add(new CdcChangeEvent(connection, schema, table, changeType,
+                    changeTime, primaryKeys, beforeJson, afterJson, txId, CdcEventStatus.PROCESSED));
+        }
+        eventCounters.merge(connection, (long) events.size(), Long::sum);
+        if (!events.isEmpty()) {
+            lastEventTimes.put(connection, System.currentTimeMillis());
         }
         return events;
     }
@@ -124,54 +137,28 @@ public class CdcServiceImpl implements CdcService {
     // ─── Last LSN ─────────────────────────────────────────────────────────
 
     /**
-     * Extract the current LSN for a connection using dialect-specific extraction strategies.
-     * Falls back to a hash of the string representation for non-numeric LSN formats.
+     * Reads the current watermark and normalizes it through the dialect. Throws instead of returning
+     * {@code 0}, which would be indistinguishable from genuinely sitting at position 0.
      */
     @Override
     public long getLastLsn(String connection) {
-        try {
-            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-            DatabaseDialect dialect = ctx.getDialect();
-            String sql = dialect.cdcGetLastLsnSql();
-            if (sql == null) return 0L;
-
-            Map<String, Object> row = ctx.getJdbcTemplate().queryForMap(sql);
-            return extractLsn(row, dialect);
-        } catch (Exception e) {
-            log.debug("Failed to get LSN for '{}': {}", connection, e.getMessage());
-            return 0L;
+        ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+        DatabaseDialect dialect = ctx.getDialect();
+        String sql = dialect.cdcGetLastLsnSql();
+        if (sql == null) {
+            throw new McpQueryException(ErrorCode.QUERY_EXECUTION_FAILED,
+                    "Dialect '%s' does not expose a CDC watermark (connection=%s)"
+                            .formatted(dialect.getDialectName(), connection));
         }
-    }
 
-    /**
-     * Strategy pattern: selects the appropriate LSN extractor based on dialect column names.
-     */
-    private long extractLsn(Map<String, Object> row, DatabaseDialect dialect) {
-        return List.of(
-                        Map.entry("current_scn", (Function<Object, Long>) v -> toLongOrNull(v)),
-                        Map.entry("lsn", (Function<Object, Long>) v -> toLongOrNull(v)),
-                        Map.entry("current_lsn", (Function<Object, Long>) v -> toLongOrNull(v)),
-                        Map.entry("File", (Function<Object, Long>) v -> toLongOrNull(v)),
-                        Map.entry("position", (Function<Object, Long>) v -> toLongOrNull(v))
-                )
-                .stream()
-                .map(e -> {
-                    Long v = e.getValue().apply(row.get(e.getKey()));
-                    return v != null && v > 0 ? v : null;
-                })
-                .filter(v -> v != null && v > 0)
-                .findFirst()
-                .orElseGet(() -> (long) hashFallback(row));
-    }
-
-    private long hashFallback(Map<String, Object> row) {
-        // Fall back to hashing the first non-null value for string-based LSN formats (e.g., PostgreSQL WAL LSN)
-        return row.values().stream()
-                .filter(v -> v != null)
-                .map(Object::toString)
-                .findFirst()
-                .map(s -> s.isEmpty() ? 0L : Math.floorMod(s.hashCode(), Long.MAX_VALUE))
-                .orElse(0L);
+        Map<String, Object> row;
+        try {
+            row = ctx.getJdbcTemplate().queryForMap(sql);
+        } catch (DataAccessException e) {
+            throw new McpQueryException(ErrorCode.QUERY_EXECUTION_FAILED,
+                    "Failed to read the CDC watermark for '%s': %s".formatted(connection, e.getMessage()), e);
+        }
+        return dialect.parseLsn(row);
     }
 
     // ─── Mirror Table ─────────────────────────────────────────────────────
@@ -183,14 +170,40 @@ public class CdcServiceImpl implements CdcService {
         DatabaseDialect dialect = ctx.getDialect();
         JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
+        // This DDL runs on the raw JdbcTemplate, i.e. outside SqlValidationAspect, so the
+        // identifiers are whitelisted here before any of them reaches a SQL string.
+        requireIdentifier(dialect, sourceTable, "sourceTable");
+        requireIdentifier(dialect, targetSchema, "targetSchema");
+        requireIdentifier(dialect, targetTable, "targetTable");
+        if (sourceSchema != null && !sourceSchema.isBlank()) {
+            requireIdentifier(dialect, sourceSchema, "sourceSchema");
+        }
+
+        String qualifiedSource = sourceSchema == null || sourceSchema.isBlank()
+                ? dialect.quote(sourceTable)
+                : dialect.quote(sourceSchema) + "." + dialect.quote(sourceTable);
+
         String sql = dialect.cdcCreateMirrorTableSql(targetSchema, targetTable,
-                "SELECT * FROM " + dialect.quote(sourceTable));
+                "SELECT * FROM " + qualifiedSource);
         if (sql == null) {
             throw new UnsupportedOperationException(
                     "Mirror table creation not supported for dialect: " + dialect.getDialectName());
         }
         jdbc.execute(sql);
         log.info("Created mirror table {}.{} from {}.{}", targetSchema, targetTable, sourceSchema, sourceTable);
+    }
+
+    /**
+     * Whitelist check for an identifier that is interpolated into SQL.
+     *
+     * @throws McpValidationException when the value is not a plain identifier for this dialect
+     */
+    private static void requireIdentifier(DatabaseDialect dialect, String value, String paramName) {
+        if (!dialect.isValidIdentifier(value)) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "%s '%s' is not a valid %s identifier: only unquoted identifier characters are accepted here"
+                            .formatted(paramName, value, dialect.getDialectName()));
+        }
     }
 
     // ─── Subscription Management ──────────────────────────────────────────
@@ -219,13 +232,26 @@ public class CdcServiceImpl implements CdcService {
     @Override
     public CdcStatus getStatus(String connection) {
         boolean supported = isCdcSupported(connection);
-        long lsn = supported ? getLastLsn(connection) : 0L;
+        long lsn = supported ? readLsnForStatus(connection) : 0L;
         long totalEvents = eventCounters.getOrDefault(connection, 0L);
         long lastEvent = lastEventTimes.getOrDefault(connection, 0L);
         int activeSubs = (int) subscriptions.values().stream()
                 .filter(s -> s.connection().equals(connection) && s.active())
                 .count();
         return new CdcStatus(connection, supported, lsn, activeSubs, totalEvents, lastEvent);
+    }
+
+    /**
+     * Status is a diagnostics view and must stay readable even when the watermark query fails, so
+     * the failure is reported as {@link #LSN_UNAVAILABLE} rather than as the plausible value 0.
+     */
+    private long readLsnForStatus(String connection) {
+        try {
+            return getLastLsn(connection);
+        } catch (RuntimeException e) {
+            log.warn("CDC watermark unavailable for '{}': {}", connection, e.getMessage());
+            return LSN_UNAVAILABLE;
+        }
     }
 
     // ─── Private Helpers ──────────────────────────────────────────────────

@@ -18,6 +18,44 @@ package com.entropy.database.mcp.dialect;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.zaxxer.hikari.HikariConfig;
 
+/**
+ * Per-dialect SQL vocabulary.
+ *
+ * <h2>Bind-parameter contract of the metadata queries</h2>
+ * Callers used to derive the argument list by counting {@code ?} in the returned SQL, because each
+ * dialect named the table a different number of times. That guess cannot distinguish "the table
+ * name twice" from "the table name and then the schema", so it bound the wrong value as soon as two
+ * different parameters were involved. The count is therefore fixed per method, and every
+ * single-table metadata query declares <strong>exactly one {@code ?}, bound with the
+ * dialect-normalized table name</strong>:
+ *
+ * <ul>
+ *   <li>{@link #columnCommentsQuery(String, String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #candidateColumnsForIndexSql(String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #listTableIndexesSql(String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #estimateTableSizeSql(String, String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #foreignKeyUpstreamQuery(String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #foreignKeyDownstreamQuery(String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #getTableRowCountEstimateSql(String, String)} - 1 placeholder: {@code (tableName)}</li>
+ *   <li>{@link #tableCommentQuery(String, String)} - 1 placeholder: {@code (tableName)}</li>
+ * </ul>
+ *
+ * These carry <strong>no placeholder at all</strong>, because the table name appears as an
+ * identifier in a {@code FROM} clause, where SQL does not allow a bind parameter; implementations
+ * must run it through {@link #qualifiedTableName(String, String)}:
+ *
+ * <ul>
+ *   <li>{@link #getTableRowCountSql(String, String)} - 0 placeholders</li>
+ *   <li>{@link #tableCommentsQuery()} / {@link #tableCommentsQuery(String)} - 0 placeholders</li>
+ *   <li>{@link #foreignKeyAllEdgesQuery(String)} - 0 placeholders</li>
+ * </ul>
+ *
+ * <p>A {@code schema} argument is never a placeholder: the dialect resolves it internally, falling
+ * back to the session's current schema when it is {@code null}. Generating an {@code IS NULL}
+ * comparison instead is what made H2 metadata lookups match nothing, since
+ * {@code INFORMATION_SCHEMA.COLUMNS.TABLE_SCHEMA} is never null. Non-null schema names are
+ * validated with {@link #isValidIdentifier(String)} before being rendered, so they cannot carry SQL.
+ */
 public interface DatabaseDialect {
     String quote(String name);
     String tablesQuery(String schema);
@@ -74,11 +112,55 @@ public interface DatabaseDialect {
     String getExplainPlanSql(String sql);
 
     /**
-     * Get table row count SQL for the given table name.
-     * Returns null if not supported.
+     * SQL that counts the rows of {@code tableName} <em>exactly</em>.
+     *
+     * <p>Contract: <strong>no {@code ?} placeholder</strong> - the table name is an identifier in a
+     * {@code FROM} clause, which cannot be bound, so implementations quote it into the SQL with
+     * {@link #qualifiedTableName(String, String)}. The single result column holds the count.
+     *
+     * <p>Exact by design: the callers use the value for "is this table big?" decisions, and an
+     * optimizer estimate is {@code NULL} until statistics have been gathered (Oracle
+     * {@code all_tables.num_rows}) or off by a wide margin (InnoDB {@code table_rows}), which would
+     * make the warning fire at random. Use {@link #getTableRowCountEstimateSql(String, String)} when
+     * the caller prefers a cheap answer over an accurate one.
+     *
+     * @param schema the schema to qualify the table with, or {@code null} for the current one
+     * @return the SQL, or {@code null} when the dialect cannot count rows
      */
-    default String getTableRowCountSql(String tableName) {
+    default String getTableRowCountSql(String schema, String tableName) {
         return null;
+    }
+
+    /** {@link #getTableRowCountSql(String, String)} against the current schema. */
+    default String getTableRowCountSql(String tableName) {
+        return getTableRowCountSql(null, tableName);
+    }
+
+    /**
+     * SQL that reads the optimizer's <em>estimated</em> row count of {@code tableName} from the
+     * catalog, avoiding a full scan of a large table.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name; the schema is
+     * resolved inside the dialect. The single result column holds the estimate, which may be
+     * {@code NULL} or negative when statistics have never been gathered - callers must then fall back
+     * to {@link #getTableRowCountSql(String, String)}.
+     *
+     * @return the SQL, or {@code null} when the dialect exposes no estimate
+     */
+    default String getTableRowCountEstimateSql(String schema, String tableName) {
+        return null;
+    }
+
+    /** {@link #getTableRowCountEstimateSql(String, String)} against the current schema. */
+    default String getTableRowCountEstimateSql(String tableName) {
+        return getTableRowCountEstimateSql(null, tableName);
+    }
+
+    /** Quotes {@code schema.table}, omitting the schema when it is absent. */
+    default String qualifiedTableName(String schema, String tableName) {
+        return schema == null || schema.isBlank()
+                ? quote(tableName)
+                : quote(schema) + "." + quote(tableName);
     }
 
     /**
@@ -233,7 +315,18 @@ public interface DatabaseDialect {
     }
 
     /**
-     * SQL to estimate table size in MB. Returns SQL with ? placeholders for tableName and schema.
+     * SQL that reports the on-disk size of one table.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name. The
+     * {@code schema} is resolved inside the dialect - the current schema when {@code null} - so the
+     * placeholder count does not depend on it. Result columns: {@code segment_name},
+     * {@code segment_type}, {@code size_mb}, {@code extents}, with {@code size_mb} first among the
+     * numeric ones the callers read.
+     *
+     * <p>Single documented deviation: {@link GenericDialect} has no size source at all and returns a
+     * constant row with no placeholder.
+     *
+     * @return the SQL, or {@code null} when the dialect exposes no size information
      */
     default String estimateTableSizeSql(String tableName, String schema) {
         return null;
@@ -289,27 +382,67 @@ public interface DatabaseDialect {
     }
 
     /**
-     * SQL to get foreign key constraints where the given table is the referenced (parent) table.
-     * Returns rows with columns: source_table, target_table, source_column, target_column.
-     * Returns null if not supported.
+     * SQL for the foreign keys that make {@code tableName} the <em>parent</em>: the queried table is
+     * the referenced side, and the rows describe the child tables that point at it - its
+     * <strong>downstream</strong>.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name, and the
+     * {@code WHERE} clause must constrain the <em>referenced</em> (parent) side with it.
+     *
+     * <p>Result columns, with a fixed meaning that does not depend on the direction:
+     * {@code source_table} / {@code source_column} are always the <strong>parent</strong> (referenced)
+     * side, {@code target_table} / {@code target_column} always the <strong>child</strong>
+     * (referencing) side. An edge therefore always reads "source feeds target", so this query returns
+     * {@code queried -> child} and {@link #foreignKeyUpstreamQuery(String)} returns
+     * {@code parent -> queried}. Orienting the two queries the other way round is what made MySQL
+     * report a table's children as its ancestors.
+     *
+     * @return the SQL, or {@code null} when the dialect cannot report foreign keys
      */
     default String foreignKeyDownstreamQuery(String tableName) {
         return null;
     }
 
     /**
-     * SQL to get foreign key constraints where the given table is the referencing (child) table.
-     * Returns rows with columns: source_table, target_table, source_column, target_column.
-     * Returns null if not supported.
+     * SQL for the foreign keys that make {@code tableName} the <em>child</em>: the queried table is
+     * the referencing side, and the rows describe the parent tables it points at - its
+     * <strong>upstream</strong>.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name, and the
+     * {@code WHERE} clause must constrain the <em>referencing</em> (child) side with it.
+     *
+     * <p>Result columns as in {@link #foreignKeyDownstreamQuery(String)}: {@code source_*} is the
+     * parent, {@code target_*} the child, so this query yields {@code parent -> queried}.
+     *
+     * @return the SQL, or {@code null} when the dialect cannot report foreign keys
      */
     default String foreignKeyUpstreamQuery(String tableName) {
         return null;
     }
 
     /**
+     * SQL for <em>every</em> foreign key of one schema in a single round trip.
+     *
+     * <p>Contract: no {@code ?} placeholder - the schema is resolved inside the dialect, the current
+     * one when {@code null}. Result columns are the same as
+     * {@link #foreignKeyDownstreamQuery(String)}: {@code source_*} is the parent, {@code target_*}
+     * the child.
+     *
+     * <p>Exists so that a full-graph export does not need one query per table; a thousand-table
+     * schema cost a thousand round trips. Returning {@code null} is a valid answer and makes the
+     * caller fall back to the per-table queries.
+     */
+    default String foreignKeyAllEdgesQuery(String schema) {
+        return null;
+    }
+
+    /**
      * SQL to list existing indexes for a table.
-     * Returns rows with columns: index_name, column_name, uniqueness.
-     * Returns null if not supported.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name.
+     * Result columns: {@code index_name}, {@code column_name}, {@code uniqueness}.
+     *
+     * @return the SQL, or {@code null} when not supported
      */
     default String listTableIndexesSql(String tableName) {
         return null;
@@ -317,29 +450,73 @@ public interface DatabaseDialect {
 
     /**
      * SQL to identify candidate columns for missing indexes based on table statistics and constraints.
-     * Returns rows with columns: column_name, is_nullable, distinct_count.
-     * Returns null if not supported.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name.
+     * The only result column every dialect provides is {@code column_name}; a dialect adds whatever
+     * of {@code is_nullable} / {@code nullable} and the cardinality hint {@code num_distinct} its
+     * catalog exposes, and callers must treat those as optional.
+     *
+     * @return the SQL, or {@code null} when not supported
      */
     default String candidateColumnsForIndexSql(String tableName) {
         return null;
     }
 
     /**
-     * SQL to get table-level comments/descriptions.
-     * Returns rows with columns: table_name, table_comment.
-     * Returns null if not supported.
+     * SQL for the table comments of the current schema.
+     *
+     * <p>Contract: no {@code ?} placeholder. Result columns: {@code table_name},
+     * {@code table_comment}.
+     *
+     * @return the SQL, or {@code null} when the dialect stores no table comments
      */
     default String tableCommentsQuery() {
+        return tableCommentsQuery(null);
+    }
+
+    /**
+     * SQL for the table comments of one schema.
+     *
+     * <p>Contract: no {@code ?} placeholder; the schema is resolved inside the dialect, the current
+     * one when {@code null}. Result columns as in {@link #tableCommentsQuery()}.
+     *
+     * @return the SQL, or {@code null} when the dialect stores no table comments
+     */
+    default String tableCommentsQuery(String schema) {
         return null;
     }
 
     /**
-     * SQL to get column-level comments/descriptions for a table.
-     * Returns rows with columns: column_name, data_type, nullable, column_comment.
-     * Returns null if not supported.
+     * SQL for the comment of a <em>single</em> table.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name; the schema is
+     * resolved inside the dialect. Result columns as in {@link #tableCommentsQuery()}.
+     *
+     * <p>Exists so that cataloguing one table does not have to read the comments of the whole
+     * database and throw all but one row away.
+     *
+     * @return the SQL, or {@code null} when the dialect stores no table comments
      */
-    default String columnCommentsQuery(String tableName) {
+    default String tableCommentQuery(String schema, String tableName) {
         return null;
+    }
+
+    /**
+     * SQL for the column comments of one table.
+     *
+     * <p>Contract: exactly one {@code ?}, bound with the dialect-normalized table name; the schema is
+     * resolved inside the dialect, the current one when {@code null}. Result columns:
+     * {@code column_name}, {@code data_type}, {@code nullable}, {@code column_comment}.
+     *
+     * @return the SQL, or {@code null} when the dialect stores no column comments
+     */
+    default String columnCommentsQuery(String schema, String tableName) {
+        return null;
+    }
+
+    /** {@link #columnCommentsQuery(String, String)} against the current schema. */
+    default String columnCommentsQuery(String tableName) {
+        return columnCommentsQuery(null, tableName);
     }
 
     /**
@@ -363,9 +540,13 @@ public interface DatabaseDialect {
 
     /**
      * SQL to read change events from the database's CDC infrastructure.
-     * Oracle: uses LOGMNRC or AUDIT_TRAIL; MySQL: uses binlog position; PostgreSQL: uses WAL/LSN.
+     * Oracle: Flashback Version Query (VERSIONS BETWEEN SCN); MySQL/PostgreSQL: trigger audit table.
      * Returns rows with columns: change_type, change_time, primary_keys, before_json, after_json, transaction_id.
      * Returns null if CDC is not supported for this dialect.
+     *
+     * <p>The returned SQL must contain exactly one {@code ?} placeholder, bound with
+     * {@link #cdcLsnParameter(long)}. Values in {@code change_type} must be codes that
+     * {@code CdcChangeType.fromCode} recognizes.
      */
     default String cdcReadChangesSql(String schema, String table, long fromLsn) {
         return null;
@@ -390,8 +571,34 @@ public interface DatabaseDialect {
     /**
      * SQL to create a mirror/snapshot table from source table (CREATE TABLE ... AS SELECT).
      * Returns null if not supported.
+     *
+     * <p>Implementations must run every identifier through {@link #quote(String)}; callers are
+     * additionally expected to have whitelisted them with {@link #isValidIdentifier(String)},
+     * because this SQL is executed as DDL outside the SQL-validation aspect.
      */
     default String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
         return null;
+    }
+
+    /**
+     * Normalizes the dialect-specific watermark row returned by {@link #cdcGetLastLsnSql()} into a
+     * single {@code long}.
+     *
+     * <p>Must never guess: a value that cannot be parsed has to raise an error rather than degrade
+     * to a hash or to {@code 0}, both of which are indistinguishable from a genuine position and
+     * make incremental reads skip or replay changes.
+     *
+     * @throws com.entropy.database.mcp.exception.McpValidationException when the row holds no parseable watermark
+     */
+    default long parseLsn(java.util.Map<String, Object> row) {
+        return DialectUtils.requireNumericLsn(row, getDialectName());
+    }
+
+    /**
+     * Converts a normalized watermark back into the bind value that the {@code ?} placeholder of
+     * {@link #cdcReadChangesSql(String, String, long)} expects. Default: the {@code long} itself.
+     */
+    default Object cdcLsnParameter(long lsn) {
+        return lsn;
     }
 }

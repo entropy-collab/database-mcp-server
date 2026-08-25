@@ -22,33 +22,72 @@ import java.util.List;
 
 public class MySqlDialect extends AbstractDatabaseDialect {
 
+    /**
+     * Quotes an identifier, escaping any embedded backtick by doubling it so that a
+     * delimiter inside {@code name} can never terminate the identifier context.
+     */
     @Override
     public String quote(String name) {
-        return "`" + name + "`";
+        return "`" + name.replace("`", "``") + "`";
+    }
+
+    /** Resolves the schema side of a metadata predicate without spending a placeholder on it. */
+    private String schemaExpression(String schema) {
+        return DialectUtils.schemaExpression(schema, "DATABASE()");
     }
 
     @Override
-    public String tableCommentsQuery() {
+    public String tableCommentsQuery(String schema) {
         return """
             SELECT table_name, table_comment
             FROM information_schema.tables
-            WHERE table_schema = DATABASE()
+            WHERE table_schema = %s
               AND table_type = 'BASE TABLE'
             ORDER BY table_name
-            """;
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
-    public String columnCommentsQuery(String tableName) {
+    public String tableCommentQuery(String schema, String tableName) {
+        return """
+            SELECT table_name, table_comment
+            FROM information_schema.tables
+            WHERE table_schema = %s
+              AND table_type = 'BASE TABLE'
+              AND table_name = ?
+            """.formatted(schemaExpression(schema));
+    }
+
+    @Override
+    public String getTableRowCountSql(String schema, String tableName) {
+        return "SELECT COUNT(*) AS row_count FROM " + qualifiedTableName(schema, tableName);
+    }
+
+    /**
+     * {@code information_schema.tables.table_rows} is an InnoDB sampling estimate that can be off by
+     * half, so it is the estimate variant only.
+     */
+    @Override
+    public String getTableRowCountEstimateSql(String schema, String tableName) {
+        return """
+            SELECT table_rows AS row_count
+            FROM information_schema.tables
+            WHERE table_schema = %s
+              AND table_name = ?
+            """.formatted(schemaExpression(schema));
+    }
+
+    @Override
+    public String columnCommentsQuery(String schema, String tableName) {
         return """
             SELECT column_name, column_type AS data_type,
                    CASE WHEN is_nullable = 'YES' THEN 1 ELSE 0 END AS nullable,
                    column_comment
             FROM information_schema.columns
-            WHERE table_schema = DATABASE()
+            WHERE table_schema = %s
               AND table_name = ?
             ORDER BY ordinal_position
-            """;
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -214,6 +253,11 @@ public class MySqlDialect extends AbstractDatabaseDialect {
                 """;
     }
 
+    /**
+     * One placeholder (the table name); the schema is resolved here instead of being bound. It used
+     * to be a second {@code ?}, and every caller bound the table name into it, so the
+     * {@code table_schema} predicate never matched and the size came back as -1 on MySQL.
+     */
     @Override
     public String estimateTableSizeSql(String tableName, String schema) {
         return """
@@ -222,9 +266,9 @@ public class MySqlDialect extends AbstractDatabaseDialect {
                        count(*) AS extents
                 FROM information_schema.tables
                 WHERE table_name = ?
-                  AND table_schema = COALESCE(?, DATABASE())
+                  AND table_schema = %s
                 GROUP BY table_name
-                """;
+                """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -240,7 +284,9 @@ public class MySqlDialect extends AbstractDatabaseDialect {
 
     @Override
     public String gatherTableStatsSql(String tableName, String schema) {
-        return "ANALYZE TABLE ? COALESCE(?, '')";
+        // ANALYZE TABLE cannot bind an object name, so the identifiers are inlined. Callers
+        // whitelist them with ValidationUtils.validateIdentifier first.
+        return "ANALYZE TABLE " + qualifiedTableName(schema, tableName);
     }
 
     @Override
@@ -301,46 +347,52 @@ public class MySqlDialect extends AbstractDatabaseDialect {
                 tableName, columnList, placeholderList, updateSet);
     }
 
+    /**
+     * {@code key_column_usage} already carries both ends of a foreign key, so the three-way join
+     * through {@code referential_constraints} is unnecessary. {@code source_*} is the referenced
+     * (parent) side and {@code target_*} the referencing (child) side, as the interface requires.
+     */
+    private static final String FK_PROJECTION = """
+            SELECT kcu.referenced_table_name  AS source_table,
+                   kcu.table_name             AS target_table,
+                   kcu.referenced_column_name AS source_column,
+                   kcu.column_name            AS target_column
+            FROM information_schema.key_column_usage kcu
+            WHERE kcu.referenced_table_name IS NOT NULL
+            """;
+
+    /** The queried table is the parent, so the placeholder constrains {@code referenced_table_name}. */
     @Override
     public String foreignKeyDownstreamQuery(String tableName) {
-        return """
-            SELECT kcu2.table_name AS source_table,
-                   kcu1.table_name AS target_table,
-                   kcu1.column_name AS source_column,
-                   kcu2.column_name AS target_column
-            FROM information_schema.key_column_usage kcu1
-            JOIN information_schema.referential_constraints rc
-              ON rc.constraint_schema = kcu1.table_schema
-             AND rc.constraint_name = kcu1.constraint_name
-            JOIN information_schema.key_column_usage kcu2
-              ON kcu2.constraint_schema = kcu1.table_schema
-             AND kcu2.ordinal_position = kcu1.ordinal_position
-             AND kcu2.constraint_name = rc.unique_constraint_name
-            WHERE kcu1.table_name = ?
-              AND kcu1.table_schema = DATABASE()
-            ORDER BY kcu2.table_name, kcu1.column_name
+        return FK_PROJECTION + """
+              AND kcu.table_schema = DATABASE()
+              AND kcu.referenced_table_name = ?
+            ORDER BY kcu.table_name, kcu.column_name
+            """;
+    }
+
+    /**
+     * The queried table is the child, so the placeholder constrains {@code table_name}.
+     *
+     * <p>It used to constrain the referenced side instead, which returned the tables that point
+     * <em>at</em> the queried one: every upstream lookup on MySQL answered with the downstream graph
+     * and vice versa.
+     */
+    @Override
+    public String foreignKeyUpstreamQuery(String tableName) {
+        return FK_PROJECTION + """
+              AND kcu.table_schema = DATABASE()
+              AND kcu.table_name = ?
+            ORDER BY kcu.referenced_table_name, kcu.referenced_column_name
             """;
     }
 
     @Override
-    public String foreignKeyUpstreamQuery(String tableName) {
-        return """
-            SELECT kcu1.table_name AS source_table,
-                   kcu2.table_name AS target_table,
-                   kcu1.column_name AS source_column,
-                   kcu2.column_name AS target_column
-            FROM information_schema.key_column_usage kcu1
-            JOIN information_schema.referential_constraints rc
-              ON rc.constraint_schema = kcu1.table_schema
-             AND rc.constraint_name = kcu1.constraint_name
-            JOIN information_schema.key_column_usage kcu2
-              ON kcu2.constraint_schema = kcu1.table_schema
-             AND kcu2.ordinal_position = kcu1.ordinal_position
-             AND kcu2.constraint_name = rc.unique_constraint_name
-            WHERE kcu2.table_name = ?
-              AND kcu2.table_schema = DATABASE()
-            ORDER BY kcu1.table_name, kcu2.column_name
-            """;
+    public String foreignKeyAllEdgesQuery(String schema) {
+        return FK_PROJECTION + """
+              AND kcu.table_schema = %s
+            ORDER BY kcu.referenced_table_name, kcu.table_name, kcu.column_name
+            """.formatted(schemaExpression(schema));
     }
 
     @Override
@@ -377,8 +429,12 @@ public class MySqlDialect extends AbstractDatabaseDialect {
 
     @Override
     public String cdcReadChangesSql(String schema, String table, long fromLsn) {
-        // MySQL: read from performance_schema or use binlog coordinates via SHOW MASTER STATUS
-        // Simplified: use INFORMATION_SCHEMA to detect last change time via trigger-based audit table
+        // MySQL has no queryable per-row change log: the binary log is only reachable through a
+        // replication client (Debezium). What is left is the project's trigger audit table
+        // convention `<table>_audit`, which records *that* a key changed (event_time per key) but
+        // carries no operation column, so the operation type genuinely cannot be derived here.
+        // It is therefore reported as the explicit CdcChangeType.TRIGGER_AUDIT code rather than a
+        // value no enum knows about.
         return """
             SELECT 'TRIGGER_AUDIT' AS change_type,
                    MAX(event_time) AS change_time,
@@ -386,15 +442,30 @@ public class MySqlDialect extends AbstractDatabaseDialect {
                    NULL AS before_json,
                    NULL AS after_json,
                    NULL AS transaction_id
-            FROM %s.%s_audit
+            FROM %s
             WHERE event_time > FROM_UNIXTIME(?)
             GROUP BY primary_key_col
-            """.formatted(schema != null ? schema : "CURRENT_SCHEMA()", table);
+            """.formatted(auditTableName(schema, table));
     }
 
     @Override
     public String cdcGetLastLsnSql() {
         return "SHOW MASTER STATUS";
+    }
+
+    /**
+     * {@code SHOW MASTER STATUS} returns a binlog coordinate ({@code File}, {@code Position}) and no
+     * single number, so the two are packed into one monotonic long: file sequence in the high 32
+     * bits, in-file offset in the low 32 bits.
+     */
+    @Override
+    public long parseLsn(java.util.Map<String, Object> row) {
+        Object file = firstNonNull(row, "File", "file", "FILE");
+        Object position = firstNonNull(row, "Position", "position", "POSITION");
+        if (file == null && position == null) {
+            return DialectUtils.requireNumericLsn(row, getDialectName());
+        }
+        return DialectUtils.parseMySqlBinlogLsn(file, position);
     }
 
     @Override
@@ -409,7 +480,28 @@ public class MySqlDialect extends AbstractDatabaseDialect {
 
     @Override
     public String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
-        return "CREATE TABLE `%s`.`%s` AS %s".formatted(
-                targetSchema != null ? targetSchema : "CURRENT_SCHEMA()", targetTable, sourceQuery);
+        String target = targetSchema == null || targetSchema.isBlank()
+                ? quote(targetTable)
+                : quote(targetSchema) + "." + quote(targetTable);
+        return "CREATE TABLE %s AS %s".formatted(target, sourceQuery);
+    }
+
+    /** Quotes the {@code <table>_audit} companion table, schema-qualified when a schema is given. */
+    private String auditTableName(String schema, String table) {
+        String audit = quote(table + "_audit");
+        return schema == null || schema.isBlank() ? audit : quote(schema) + "." + audit;
+    }
+
+    private static Object firstNonNull(java.util.Map<String, Object> row, String... keys) {
+        if (row == null) {
+            return null;
+        }
+        for (String key : keys) {
+            Object value = row.get(key);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
     }
 }

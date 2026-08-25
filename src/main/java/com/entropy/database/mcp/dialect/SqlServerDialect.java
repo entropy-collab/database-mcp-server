@@ -20,9 +20,13 @@ import com.zaxxer.hikari.HikariConfig;
 
 public class SqlServerDialect extends AbstractDatabaseDialect {
 
+    /**
+     * Quotes an identifier, escaping any embedded closing bracket by doubling it so that a
+     * delimiter inside {@code name} can never terminate the identifier context.
+     */
     @Override
     public String quote(String name) {
-        return "[" + name + "]";
+        return "[" + name.replace("]", "]]") + "]";
     }
 
     @Override
@@ -135,6 +139,23 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
             config.addDataSourceProperty("prepStmtCacheSize", String.valueOf(properties.preparedStatement().cacheSize()));
             config.addDataSourceProperty("prepStmtCacheSqlLimit", String.valueOf(properties.preparedStatement().sqlLimit()));
         }
+    }
+
+    @Override
+    public String getTableRowCountSql(String schema, String tableName) {
+        return "SELECT COUNT(*) AS row_count FROM " + qualifiedTableName(schema, tableName);
+    }
+
+    /** {@code sys.dm_db_partition_stats.row_count} is maintained per partition, hence the SUM. */
+    @Override
+    public String getTableRowCountEstimateSql(String schema, String tableName) {
+        return """
+            SELECT SUM(ps.row_count) AS row_count
+            FROM sys.dm_db_partition_stats ps
+            JOIN sys.tables t ON t.object_id = ps.object_id
+            WHERE ps.index_id IN (0, 1)
+              AND t.name = ?
+            """;
     }
 
     @Override

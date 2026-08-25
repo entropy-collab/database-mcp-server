@@ -17,9 +17,13 @@ package com.entropy.database.mcp.dialect;
 
 public class GenericDialect extends AbstractDatabaseDialect {
 
+    /**
+     * Quotes an identifier, escaping any embedded backtick by doubling it so that a
+     * delimiter inside {@code name} can never terminate the identifier context.
+     */
     @Override
     public String quote(String name) {
-        return "`" + name + "`";
+        return "`" + name.replace("`", "``") + "`";
     }
 
     @Override
@@ -121,8 +125,26 @@ public class GenericDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String getTableRowCountSql(String schema, String tableName) {
+        return "SELECT COUNT(*) AS row_count FROM " + qualifiedTableName(schema, tableName);
+    }
+
+    /**
+     * The generic dialect has no portable size source, so it echoes a zero-sized row with the shape
+     * the callers expect.
+     *
+     * <p>Deviates from the one-placeholder contract of
+     * {@link DatabaseDialect#estimateTableSizeSql(String, String)}: there is nothing to filter, so
+     * the row is a constant and declares no bind parameter. The name is still checked with
+     * {@link DialectUtils#isPlainIdentifier(String)} before being concatenated - it used to be
+     * spliced into a string literal unchecked, where a single quote in the table name escaped the
+     * literal.
+     */
+    @Override
     public String estimateTableSizeSql(String tableName, String schema) {
-        return "SELECT '" + tableName + "' AS segment_name, 'TABLE' AS segment_type, 0 AS size_mb, 0 AS extents";
+        String name = DialectUtils.isPlainIdentifier(tableName) ? tableName.trim() : "unknown";
+        return "SELECT '" + name + "' AS segment_name, 'TABLE' AS segment_type, "
+                + "0 AS size_mb, 0 AS extents";
     }
 
     @Override

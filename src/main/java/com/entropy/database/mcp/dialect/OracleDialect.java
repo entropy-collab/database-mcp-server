@@ -25,31 +25,86 @@ import java.util.List;
  */
 public class OracleDialect extends AbstractDatabaseDialect {
 
+    /**
+     * Quotes an identifier, escaping any embedded double quote by doubling it so that a
+     * delimiter inside {@code name} can never terminate the identifier context.
+     * Oracle folds unquoted identifiers to upper case, so the name is upper-cased first.
+     */
     @Override
     public String quote(String name) {
-        return "\"" + name.toUpperCase() + "\"";
+        return "\"" + name.toUpperCase().replace("\"", "\"\"") + "\"";
+    }
+
+    /** Oracle folds identifiers to upper case, so a requested schema is the owner in upper case. */
+    private String ownerExpression(String schema) {
+        return DialectUtils.schemaExpression(
+                schema == null ? null : schema.toUpperCase(), "USER");
     }
 
     @Override
-    public String tableCommentsQuery() {
+    public String tableCommentsQuery(String schema) {
         return """
             SELECT table_name, comments AS table_comment
-            FROM user_tab_comments
+            FROM all_tab_comments
             WHERE table_type = 'TABLE'
+              AND owner = %s
             ORDER BY table_name
-            """;
+            """.formatted(ownerExpression(schema));
     }
 
     @Override
-    public String columnCommentsQuery(String tableName) {
+    public String tableCommentQuery(String schema, String tableName) {
         return """
-            SELECT column_name, data_type,
-                   CASE WHEN nullable = 'N' THEN 0 ELSE 1 END AS nullable,
-                   comments AS column_comment
-            FROM user_col_comments
-            WHERE table_name = ?
-            ORDER BY column_id
-            """;
+            SELECT table_name, comments AS table_comment
+            FROM all_tab_comments
+            WHERE table_type = 'TABLE'
+              AND owner = %s
+              AND table_name = ?
+            """.formatted(ownerExpression(schema));
+    }
+
+    /**
+     * {@code all_col_comments} carries only owner/table/column/comments, so the data type and the
+     * nullability have to come from {@code all_tab_columns}; selecting them straight off the comment
+     * view failed with ORA-00904 and, because the caller treats a failed lookup as "no columns",
+     * silently disabled data classification on Oracle altogether.
+     */
+    @Override
+    public String columnCommentsQuery(String schema, String tableName) {
+        return """
+            SELECT c.column_name,
+                   c.data_type,
+                   CASE WHEN c.nullable = 'N' THEN 0 ELSE 1 END AS nullable,
+                   cc.comments AS column_comment
+            FROM all_tab_columns c
+            LEFT JOIN all_col_comments cc
+              ON cc.owner = c.owner
+             AND cc.table_name = c.table_name
+             AND cc.column_name = c.column_name
+            WHERE c.owner = %s
+              AND c.table_name = ?
+            ORDER BY c.column_id
+            """.formatted(ownerExpression(schema));
+    }
+
+    /**
+     * Exact count. {@code all_tables.num_rows} is {@code NULL} until {@code DBMS_STATS} has run and
+     * stale afterwards, which is why it is offered separately as
+     * {@link #getTableRowCountEstimateSql(String, String)} instead of being the default.
+     */
+    @Override
+    public String getTableRowCountSql(String schema, String tableName) {
+        return "SELECT COUNT(*) AS row_count FROM " + qualifiedTableName(schema, tableName);
+    }
+
+    @Override
+    public String getTableRowCountEstimateSql(String schema, String tableName) {
+        return """
+            SELECT num_rows AS row_count
+            FROM all_tables
+            WHERE owner = %s
+              AND table_name = ?
+            """.formatted(ownerExpression(schema));
     }
 
     @Override
@@ -352,6 +407,11 @@ public class OracleDialect extends AbstractDatabaseDialect {
                 """;
     }
 
+    /**
+     * One placeholder (the segment/table name); the owner is resolved here rather than bound, so the
+     * argument list no longer depends on whether a schema was supplied. Without the owner predicate
+     * a same-named segment in another schema was summed in as well.
+     */
     @Override
     public String estimateTableSizeSql(String tableName, String schema) {
         return """
@@ -360,9 +420,10 @@ public class OracleDialect extends AbstractDatabaseDialect {
                        count(*) AS extents
                 FROM dba_segments
                 WHERE segment_name = ?
+                  AND owner = %s
                   AND segment_type IN ('TABLE', 'TABLE PARTITION')
                 GROUP BY segment_name, segment_type
-                """;
+                """.formatted(ownerExpression(schema));
     }
 
     @Override
@@ -378,17 +439,20 @@ public class OracleDialect extends AbstractDatabaseDialect {
 
     @Override
     public String gatherTableStatsSql(String tableName, String schema) {
+        // DBMS_STATS takes the owner and table as string literals, so both identifiers are inlined
+        // rather than bound. Callers whitelist them with ValidationUtils.validateIdentifier first.
+        String owner = (schema == null || schema.isBlank()) ? "USER" : "'" + schema.toUpperCase() + "'";
         return """
                 BEGIN
                     DBMS_STATS.GATHER_TABLE_STATS(
-                        ownname => COALESCE(?, USER),
-                        tabname => ?,
+                        ownname => %s,
+                        tabname => '%s',
                         estimate_percent => DBMS_STATS.AUTO_SAMPLE_SIZE,
                         method_opt => 'FOR ALL COLUMNS SIZE AUTO',
                         cascade => TRUE
                     );
                 END;
-                """;
+                """.formatted(owner, tableName.toUpperCase());
     }
 
     @Override
@@ -479,52 +543,53 @@ public class OracleDialect extends AbstractDatabaseDialect {
                 tableName, selectFromDual, keyCondition, updateSet, columnList, insertValues);
     }
 
-    @Override
-    public String foreignKeyDownstreamQuery(String tableName) {
-        return """
+    /** Shared parent/child join over the two constraint views; {@code source_*} is always the parent. */
+    private static final String FK_PROJECTION = """
             SELECT uc_pk.table_name AS source_table,
                    uc_fk.table_name AS target_table,
                    c_pk.column_name AS source_column,
                    c_fk.column_name AS target_column
-            FROM all_constraints uc_pk
-            JOIN all_constraints uc_fk
+            FROM all_constraints uc_fk
+            JOIN all_constraints uc_pk
               ON uc_fk.r_constraint_name = uc_pk.constraint_name
-             AND uc_fk.constraint_type = 'R'
-            JOIN all_cons_columns c_pk
-              ON c_pk.constraint_name = uc_pk.constraint_name
-             AND c_pk.position = 1
+             AND uc_fk.r_owner = uc_pk.owner
+             AND uc_pk.constraint_type IN ('P', 'U')
             JOIN all_cons_columns c_fk
               ON c_fk.constraint_name = uc_fk.constraint_name
-             AND c_fk.position = 1
-            WHERE uc_pk.constraint_type = 'P'
+             AND c_fk.owner = uc_fk.owner
+            JOIN all_cons_columns c_pk
+              ON c_pk.constraint_name = uc_pk.constraint_name
+             AND c_pk.owner = uc_pk.owner
+             AND c_pk.position = c_fk.position
+            WHERE uc_fk.constraint_type = 'R'
+            """;
+
+    /** The queried table is the parent, so the placeholder constrains the referenced side. */
+    @Override
+    public String foreignKeyDownstreamQuery(String tableName) {
+        return FK_PROJECTION + """
               AND uc_pk.owner = USER
               AND uc_pk.table_name = ?
             ORDER BY uc_fk.table_name, c_fk.column_name
             """;
     }
 
+    /** The queried table is the child, so the placeholder constrains the referencing side. */
     @Override
     public String foreignKeyUpstreamQuery(String tableName) {
-        return """
-            SELECT uc_fk.table_name AS source_table,
-                   uc_pk.table_name AS target_table,
-                   c_fk.column_name AS source_column,
-                   c_pk.column_name AS target_column
-            FROM all_constraints uc_fk
-            JOIN all_constraints uc_pk
-              ON uc_fk.r_constraint_name = uc_pk.constraint_name
-             AND uc_pk.constraint_type = 'P'
-            JOIN all_cons_columns c_fk
-              ON c_fk.constraint_name = uc_fk.constraint_name
-             AND c_fk.position = 1
-            JOIN all_cons_columns c_pk
-              ON c_pk.constraint_name = uc_pk.constraint_name
-             AND c_pk.position = 1
-            WHERE uc_fk.constraint_type = 'R'
+        return FK_PROJECTION + """
               AND uc_fk.owner = USER
               AND uc_fk.table_name = ?
             ORDER BY uc_pk.table_name, c_pk.column_name
             """;
+    }
+
+    @Override
+    public String foreignKeyAllEdgesQuery(String schema) {
+        return FK_PROJECTION + """
+              AND uc_fk.owner = %s
+            ORDER BY uc_pk.table_name, uc_fk.table_name, c_fk.column_name
+            """.formatted(ownerExpression(schema));
     }
 
     @Override
@@ -539,19 +604,25 @@ public class OracleDialect extends AbstractDatabaseDialect {
             """;
     }
 
+    /**
+     * One placeholder: the second occurrence of the table name in the {@code NOT IN} subquery is
+     * replaced by a correlated {@code NOT EXISTS} on the outer row, so the argument list matches the
+     * contract without repeating the value.
+     */
     @Override
     public String candidateColumnsForIndexSql(String tableName) {
         return """
-            SELECT column_name, nullable, num_distinct
-            FROM user_tab_columns
-            WHERE table_name = ?
-              AND column_name NOT IN (
-                  SELECT column_name
-                  FROM user_ind_columns
-                  WHERE table_name = ?
+            SELECT c.column_name, c.nullable, c.num_distinct
+            FROM user_tab_columns c
+            WHERE c.table_name = ?
+              AND c.num_distinct IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM user_ind_columns ic
+                  WHERE ic.table_name = c.table_name
+                    AND ic.column_name = c.column_name
               )
-              AND num_distinct IS NOT NULL
-            ORDER BY num_distinct ASC
+            ORDER BY c.num_distinct ASC
             """;
     }
 
@@ -559,23 +630,24 @@ public class OracleDialect extends AbstractDatabaseDialect {
 
     @Override
     public String cdcReadChangesSql(String schema, String table, long fromLsn) {
-        // Oracle: use flashback query to compare current vs prior state via undo retention
-        // Note: production CDC would use LogMiner (DBMS_LOGMNR); this is a simplified approach
-        // using ROWID-based temporal comparison with flashback
+        // Oracle Flashback Version Query: the VERSIONS_OPERATION pseudo-column reports the real
+        // DML operation of every row version in the SCN range as 'I' / 'U' / 'D', which is exactly
+        // the CdcChangeType code set. Rows whose version predates the range have a NULL
+        // VERSIONS_OPERATION (they were not changed), so they are filtered out instead of being
+        // reported as an untyped "FLASHBACK" event.
+        // VERSIONS_XID is a RAW transaction id and does not fit the numeric transaction_id contract,
+        // so it is not projected.
         return """
-            SELECT 'FLASHBACK' AS change_type,
-                   SYSTIMESTAMP AS change_time,
-                   '' AS primary_keys,
+            SELECT t.VERSIONS_OPERATION AS change_type,
+                   t.VERSIONS_STARTTIME AS change_time,
+                   ROWIDTOCHAR(t.ROWID) AS primary_keys,
                    NULL AS before_json,
-                   (SELECT JSON_OBJECTAGG(t.column_name VALUE t.column_value IGNORE NULLS)
-                    FROM (
-                        SELECT COLUMN_NAME, CAST(COLUMN_VALUE AS VARCHAR2(4000)) AS column_value
-                        FROM XMLTABLE('/*' PASSING DBMS_XMLGEN.GETXML('SELECT * FROM %s AS OF TIMESTAMP SYSTIMESTAMP - INTERVAL \'5\' MINUTE') )
-                    ) t
-                   ) AS after_json,
+                   NULL AS after_json,
                    NULL AS transaction_id
-            FROM DUAL
-            """.formatted(normalizeTableName(table));
+            FROM %s VERSIONS BETWEEN SCN ? AND MAXVALUE t
+            WHERE t.VERSIONS_OPERATION IS NOT NULL
+            ORDER BY t.VERSIONS_STARTTIME
+            """.formatted(qualifiedName(schema, table));
     }
 
     @Override
@@ -598,6 +670,13 @@ public class OracleDialect extends AbstractDatabaseDialect {
 
     @Override
     public String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
-        return "CREATE TABLE %s.%s AS %s".formatted(targetSchema, targetTable, sourceQuery);
+        return "CREATE TABLE %s AS %s".formatted(qualifiedName(targetSchema, targetTable), sourceQuery);
+    }
+
+    /** Quotes {@code schema.table}, omitting the schema when it is absent. */
+    private String qualifiedName(String schema, String table) {
+        return schema == null || schema.isBlank()
+                ? quote(table)
+                : quote(schema) + "." + quote(table);
     }
 }

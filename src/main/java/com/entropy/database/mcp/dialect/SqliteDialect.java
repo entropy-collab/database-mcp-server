@@ -17,9 +17,13 @@ package com.entropy.database.mcp.dialect;
 
 public class SqliteDialect extends AbstractDatabaseDialect {
 
+    /**
+     * Quotes an identifier, escaping any embedded double quote by doubling it so that a
+     * delimiter inside {@code name} can never terminate the identifier context.
+     */
     @Override
     public String quote(String name) {
-        return "\"" + name + "\"";
+        return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
     @Override
@@ -88,6 +92,11 @@ public class SqliteDialect extends AbstractDatabaseDialect {
             SELECT '' AS name, '' AS minimum_value, '' AS maximum_value, '' AS increment, 0 AS cache_size
             WHERE 1 = 0
             """;
+    }
+
+    @Override
+    public String getTableRowCountSql(String schema, String tableName) {
+        return "SELECT COUNT(*) AS row_count FROM " + quote(tableName);
     }
 
     @Override

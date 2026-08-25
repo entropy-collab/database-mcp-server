@@ -17,9 +17,13 @@ package com.entropy.database.mcp.dialect;
 
 public class Db2Dialect extends AbstractDatabaseDialect {
 
+    /**
+     * Quotes an identifier, escaping any embedded double quote by doubling it so that a
+     * delimiter inside {@code name} can never terminate the identifier context.
+     */
     @Override
     public String quote(String name) {
-        return "\"" + name + "\"";
+        return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
     @Override
@@ -113,6 +117,11 @@ public class Db2Dialect extends AbstractDatabaseDialect {
               %s
             ORDER BY SEQNAME
             """.formatted(schemaFilter);
+    }
+
+    @Override
+    public String getTableRowCountSql(String schema, String tableName) {
+        return "SELECT COUNT(*) AS row_count FROM " + qualifiedTableName(schema, tableName);
     }
 
     @Override
