@@ -431,6 +431,117 @@ class DynamicDataSourceManagerImplTest {
         }
     }
 
+    /**
+     * Drop a single cache entry, which is what a lease expiry ends up doing. Reflection because the
+     * manager deliberately exposes no per-key eviction.
+     */
+    @SuppressWarnings("unchecked")
+    private static void invalidateCacheEntry(DynamicDataSourceManagerImpl manager, String key) {
+        try {
+            java.lang.reflect.Field field =
+                    DynamicDataSourceManagerImpl.class.getDeclaredField("leasedCache");
+            field.setAccessible(true);
+            ((com.github.benmanes.caffeine.cache.Cache<String, LeasedDataSource>) field.get(manager))
+                    .invalidate(key);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    // ─── fingerprint 命中的别名必须是一个完整可用的连接 ──────────────────────
+
+    /**
+     * 别名分支过去只 {@code renewLease()} 就返回，既不注册也不写缓存，于是别名对外等于不存在。
+     */
+    @Test
+    void aliasOfAnIdenticalConnectionIsRegisteredAndCached() {
+        DynamicDataSourceManagerImpl manager = createManager();
+        ConnectionProperties canonical = connection("jdbc:mysql://localhost:3306/test", true);
+        ConnectionProperties identical = connection("jdbc:mysql://localhost:3306/test", true);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create(eq("a"), any(ConnectionProperties.class), eq(dialect)))
+                .thenReturn(context);
+
+        manager.acquire("a", canonical);
+        ByokDataSourceContext aliasContext = manager.acquire("b", identical);
+
+        // 复用同一个池，而不是给别名再建一个
+        assertThat(aliasContext).isSameAs(context);
+        verify(dataSourceFactory, times(1))
+                .create(anyString(), any(ConnectionProperties.class), any(DatabaseDialect.class));
+
+        // 按名字取连接的工具走的是 acquire(String)，别名不写缓存时这里会抛 Connection not found
+        assertThat(manager.acquire("b")).isSameAs(context);
+        // readonly 必须与 canonical 一致，否则 readonly 连接的写工具会被放过
+        assertThat(manager.isReadonly("b")).isTrue();
+        assertThat(manager.isReadonly("b")).isEqualTo(manager.isReadonly("a"));
+        assertThat(manager.getConnectionMetadata("b")).isNotNull();
+        assertThat(manager.getConnectionMetadata("b").key()).isEqualTo("b");
+        assertThat(manager.listConnectionKeys()).contains("a", "b");
+        assertThat(manager.getAllConnectionMetadata()).hasSize(2);
+        // 指纹归属留在 canonical 名字上，别名不抢
+        assertThat(fingerprintIndexOf(manager)).containsValue("a").doesNotContainValue("b");
+    }
+
+    /** 别名过期不能把 canonical 正在使用的池关掉。 */
+    @Test
+    void removingAnAliasLeavesTheCanonicalConnectionUsable() {
+        DeferringExecutor cacheExecutor = new DeferringExecutor();
+        DynamicDataSourceManagerImpl manager = createManager(Duration.ofMinutes(30), cacheExecutor);
+        ConnectionProperties props = connection("jdbc:mysql://localhost:3306/test", true);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create(eq("a"), any(ConnectionProperties.class), eq(dialect)))
+                .thenReturn(context);
+
+        manager.acquire("a", props);
+        manager.acquire("b", props);
+
+        invalidateCacheEntry(manager, "b");
+        cacheExecutor.runAll();
+
+        assertThat(manager.getConnectionMetadata("b")).isNull();
+        assertThat(manager.isReadonly("b")).isFalse();
+        // 共享的 Hikari 池不能被别名的清理动作关掉
+        verify(context, never()).closePool();
+        assertThat(manager.acquire("a")).isSameAs(context);
+        assertThat(manager.isReadonly("a")).isTrue();
+        assertThat(manager.getConnectionMetadata("a")).isNotNull();
+    }
+
+    /** 最后一个名字消失时池才关闭，而且只关一次。 */
+    @Test
+    void sharedPoolIsClosedOnceTheLastNameIsGone() {
+        DeferringExecutor cacheExecutor = new DeferringExecutor();
+        DynamicDataSourceManagerImpl manager = createManager(Duration.ofMinutes(30), cacheExecutor);
+        ConnectionProperties props = connection("jdbc:mysql://localhost:3306/test", false);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create(eq("a"), any(ConnectionProperties.class), eq(dialect)))
+                .thenReturn(context);
+
+        manager.acquire("a", props);
+        manager.acquire("b", props);
+
+        invalidateCacheEntry(manager, "b");
+        cacheExecutor.runAll();
+        verify(context, never()).closePool();
+
+        invalidateCacheEntry(manager, "a");
+        cacheExecutor.runAll();
+
+        verify(context, times(1)).closePool();
+        assertThat(manager.getConnectionCount()).isZero();
+        assertThat(fingerprintIndexOf(manager)).isEmpty();
+    }
+
     // ─── JDBC URL guard ─────────────────────────────────────────────────────
 
     @Test

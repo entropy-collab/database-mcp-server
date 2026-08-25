@@ -162,6 +162,9 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      * makes this safe is that all state removal is scoped to {@code value}'s identity, so a callback
      * that arrives after the connection was rebuilt cannot touch the new connection. Staying off the
      * lock also means pool shutdown never blocks unrelated keys that hash to the same stripe.
+     *
+     * <p>关闭动作走 {@link #closeIfUnreferenced(LeasedDataSource)}：一个池可能同时挂在 canonical 名字和
+     * 若干别名下，别名过期时无条件 close 会把 canonical 正在用的池一起关掉。
      */
     private void onCacheRemoval(String key,
                                 LeasedDataSource value,
@@ -174,7 +177,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         }
         if (value != null) {
             log.info("Removing datasource: {} (cause: {})", key, cause);
-            value.close();
+            closeIfUnreferenced(value);
         }
     }
 
@@ -199,21 +202,9 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         // Check if an identical physical connection already exists under a different name
         String canonicalKey = contentFingerprintToKey.get(fingerprint);
         if (canonicalKey != null && !canonicalKey.equals(key)) {
-            log.info("Connection '{}' is an alias for existing connection '{}', reusing same pool", key, canonicalKey);
-            Object lock = lockFor(canonicalKey);
-            synchronized (lock) {
-                LeasedDataSource existing = leasedCache.getIfPresent(canonicalKey);
-                if (existing != null && !existing.isClosed()) {
-                    try {
-                        return existing.renewLease();
-                    } catch (McpLeaseExpiredException e) {
-                        log.warn("Canonical connection '{}' expired, recreating", canonicalKey);
-                        evictIfCurrent(canonicalKey, existing);
-                    }
-                } else if (existing != null && existing.isClosed()) {
-                    log.warn("Canonical connection '{}' is closed, evicting", canonicalKey);
-                    evictIfCurrent(canonicalKey, existing);
-                }
+            ByokDataSourceContext adopted = adoptAlias(key, canonicalKey, connection);
+            if (adopted != null) {
+                return adopted;
             }
         }
 
@@ -254,18 +245,9 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             // Re-check canonical key in case another thread created it
             canonicalKey = contentFingerprintToKey.get(fingerprint);
             if (canonicalKey != null && !canonicalKey.equals(key)) {
-                log.info("Another thread created canonical connection '{}', reusing", canonicalKey);
-                LeasedDataSource alias = leasedCache.getIfPresent(canonicalKey);
-                if (alias != null && !alias.isClosed()) {
-                    try {
-                        return alias.renewLease();
-                    } catch (McpLeaseExpiredException e) {
-                        log.warn("Canonical connection '{}' expired during lock", canonicalKey);
-                        evictIfCurrent(canonicalKey, alias);
-                    }
-                } else if (alias != null && alias.isClosed()) {
-                    log.warn("Canonical connection '{}' is closed during lock", canonicalKey);
-                    evictIfCurrent(canonicalKey, alias);
+                ByokDataSourceContext adopted = adoptAlias(key, canonicalKey, connection);
+                if (adopted != null) {
+                    return adopted;
                 }
             }
 
@@ -275,10 +257,72 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             // Register before publishing to the cache: the other order leaves a window in which a
             // concurrent acquire() finds the context but isReadonly() still answers false, which for a
             // read-only connection means write tools are let through.
-            register(key, newLeased, connection, dialect, fingerprint);
+            register(key, newLeased, connection, dialect.getClass().getSimpleName(), fingerprint);
             leasedCache.put(key, newLeased);
             return newLeased.renewLease();
         }
+    }
+
+    /**
+     * Let {@code key} share the pool that {@code canonicalKey} already owns.
+     *
+     * <p>指纹命中过去只是 {@code return existing.renewLease()}，既不注册也不写缓存，于是别名连接对外
+     * 等于不存在：{@code acquire(alias)} 抛 "Connection not found"、{@code isReadonly(alias)} 是 false
+     * （readonly 连接的写工具会被放过）、{@code listConnections} 也看不到它。这里补上注册与缓存写入，
+     * 顺序仍然是「先 register 再 put」，理由见 {@link #acquire(String, ConnectionProperties)}。
+     *
+     * <p>别名的 fingerprint 传 {@code null}：指纹归属留给 canonical，否则两个名字会在
+     * {@link #unregisterIfOwnedBy(String, LeasedDataSource)} 里互相删对方的索引项，最终指纹索引指向一个
+     * 已经消失的名字。代价是 canonical 先过期时指纹索引会清空，同内容的下一个名字会另开一个池——只是少了
+     * 一次去重，不会出错。
+     *
+     * <p>这里<em>不</em>取 canonical 的条带锁：本方法的第二个调用点已经持有 {@code key} 的条带锁，再去拿
+     * canonical 的锁就会出现「A 等 B、B 等 A」的锁序环（两个名字互为对方指纹的 canonical 时）。不加锁是安全的，
+     * 因为所有状态改动都按对象身份收口：{@code evictIfCurrent} 只在缓存里仍是同一个对象时才移除，注册完成后
+     * 又会复查 {@code isClosed()} 以防和过期回调撞车。
+     *
+     * @return 复用成功时的上下文；{@code null} 表示这次没能复用（canonical 已过期/已关闭/归属不一致），
+     *         调用方应继续走新建流程
+     */
+    private ByokDataSourceContext adoptAlias(String key, String canonicalKey, ConnectionProperties connection) {
+        LeasedDataSource shared = leasedCache.getIfPresent(canonicalKey);
+        if (shared == null) {
+            return null;
+        }
+        if (shared.isClosed()) {
+            log.warn("Canonical connection '{}' is closed, evicting", canonicalKey);
+            evictIfCurrent(canonicalKey, shared);
+            return null;
+        }
+        ConnectionRegistration canonical = registrations.get(canonicalKey);
+        if (canonical == null || canonical.owner() != shared) {
+            // 指纹索引与实际归属已经不一致：宁可新建一个池，也不要把别名挂到来历不明的连接上
+            log.warn("Canonical connection '{}' has no matching registration, not aliasing '{}'",
+                    canonicalKey, key);
+            return null;
+        }
+        ByokDataSourceContext context;
+        try {
+            context = shared.renewLease();
+        } catch (McpLeaseExpiredException e) {
+            log.warn("Canonical connection '{}' expired, recreating", canonicalKey);
+            evictIfCurrent(canonicalKey, shared);
+            return null;
+        }
+
+        register(key, shared, connection, canonical.metadata().dialect(), null);
+        leasedCache.put(key, shared);
+        log.info("Connection '{}' is an alias for existing connection '{}', reusing same pool",
+                key, canonicalKey);
+
+        if (shared.isClosed()) {
+            // 移除回调不持锁，所以它可能正好在我们注册期间关掉了这个池。别名不能对外暴露一个死池。
+            log.warn("Canonical connection '{}' was closed while aliasing '{}', discarding alias",
+                    canonicalKey, key);
+            evictIfCurrent(key, shared);
+            return null;
+        }
+        return context;
     }
 
     /**
@@ -320,7 +364,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             LeasedDataSource leased = new LeasedDataSource(key, context, leaseDuration, maxLifetime, false);
 
             // Same ordering rule as acquire(): registry first, cache second.
-            register(key, leased, null, dialect, null);
+            register(key, leased, null, dialect.getClass().getSimpleName(), null);
             leasedCache.put(key, leased);
 
             log.info("Registered existing datasource as BYOK connection: {}", key);
@@ -405,12 +449,16 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
     /**
      * Publish metadata, read-only flag and fingerprint for {@code owner} as one atomic unit.
+     *
+     * @param dialectName 上报给 {@code listConnections} 的方言名。别名路径直接沿用 canonical 已经登记好的
+     *                    名字，省掉一次 {@code DialectResolver} 解析，也避免两个名字显示成不同方言
+     * @param fingerprint 指纹归属；别名传 {@code null}，见 {@link #adoptAlias}
      */
     private void register(String key, LeasedDataSource owner, ConnectionProperties connection,
-                          DatabaseDialect dialect, String fingerprint) {
+                          String dialectName, String fingerprint) {
         var metadata = new ConnectionMetadata(
                 key,
-                dialect.getClass().getSimpleName(),
+                dialectName,
                 maskKey(connection != null ? connection.jdbcUrl() : "external"),
                 "system",
                 java.time.Instant.now(),
@@ -469,6 +517,27 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         }
         unregisterIfOwnedBy(key, value);
         leasedCache.asMap().remove(key, value);
+        closeIfUnreferenced(value);
+    }
+
+    /**
+     * 只有在没有任何注册项还指向 {@code value} 时才关闭它。
+     *
+     * <p>一个池可以同时挂在 canonical 名字和若干别名下（见 {@link #adoptAlias}）。按名字无条件 close 的话，
+     * 别名先过期就会把 canonical 仍在使用的 Hikari 池关掉，之后 canonical 的每次取连接都变成
+     * "HikariDataSource has been closed"。引用计数直接从 {@link #registrations} 里按对象身份数出来，
+     * 而不是另开一个计数器：计数器和注册表一旦不同步，泄漏或提前关闭都是静默的。
+     */
+    private void closeIfUnreferenced(LeasedDataSource value) {
+        synchronized (registryLock) {
+            for (ConnectionRegistration registration : registrations.values()) {
+                if (registration.owner() == value) {
+                    log.debug("Keeping pool of '{}' open: still referenced by '{}'",
+                            value.getKey(), registration.metadata().key());
+                    return;
+                }
+            }
+        }
         value.close();
     }
 
