@@ -39,7 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Strategy selection per dialect:
  * <ul>
  *   <li>Oracle — Flashback Version Query (VERSIONS BETWEEN SCN, real I/U/D per row version)</li>
- *   <li>MySQL — Trigger-based audit tables (binlog requires Debezium)</li>
+ *   <li>MySQL — Trigger-based audit tables with a Unix-second watermark (binlog requires Debezium)</li>
  *   <li>PostgreSQL — trigger-based audit with WAL LSN watermark</li>
  * </ul>
  *
@@ -73,11 +73,33 @@ public class CdcServiceImpl implements CdcService {
             ctx = dataSourceManager.acquire(connection);
             DatabaseDialect dialect = ctx.getDialect();
             String sql = dialect.cdcCheckSupportSql();
-            return sql != null && Integer.valueOf(1).equals(ctx.getJdbcTemplate().queryForObject(sql, Integer.class));
+            if (sql == null) {
+                return false;
+            }
+            // 用 queryForList + 首行首值，而不是 queryForObject：后者要求结果「恰好一行」，探测 SQL 只要
+            // 多返回一行（历史上 Oracle/PostgreSQL 的多段 UNION ALL 在多个分支命中时就是如此）就抛
+            // IncorrectResultSizeDataAccessException，被下面的 catch 吞成「不支持」——配置最完整的库反而
+            // 被判成不支持。方言侧的契约仍是单行单值，这里只是不再让「恰好一行」成为正确性的前提。
+            List<Map<String, Object>> rows = ctx.getJdbcTemplate().queryForList(sql);
+            if (rows.isEmpty()) {
+                return false;
+            }
+            return isTrue(rows.getFirst().values().stream().findFirst().orElse(null));
         } catch (Exception e) {
             log.warn("CDC support check failed for '{}': {}", connection, e.getMessage(), e);
             return false;
         }
+    }
+
+    /** Reads the probe value as a flag: {@code 1} / {@code true} means supported. */
+    private static boolean isTrue(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue() != 0L;
+        }
+        if (value instanceof Boolean flag) {
+            return flag;
+        }
+        return value != null && ("1".equals(value.toString().trim()) || "true".equalsIgnoreCase(value.toString().trim()));
     }
 
     // ─── Read Changes ─────────────────────────────────────────────────────
