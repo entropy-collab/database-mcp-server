@@ -47,7 +47,7 @@ class CrossDatabaseToolsTest {
     private static CrossDatabaseTools gatewayEnabledTools() {
         Environment environment = new MockEnvironment()
                 .withProperty("entropy.mcp.gateway.enabled", "true");
-        return new CrossDatabaseTools(null, null, null, null, null, environment);
+        return new CrossDatabaseTools(null, null, null, null, environment);
     }
 
     @Nested

@@ -22,6 +22,7 @@ import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.properties.QueryConfig;
+import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
@@ -48,7 +49,6 @@ public class FederatedQueryGateway implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(FederatedQueryGateway.class);
     private static final int SHUTDOWN_TIMEOUT_SECONDS = 30;
-    private static final int MAX_QUERY_THREADS = 10;
 
     private final DialectResolver dialectResolver;
     private final SqlValidator sqlValidator;
@@ -65,12 +65,22 @@ public class FederatedQueryGateway implements DisposableBean {
     private final Map<String, DatabaseDialect> dialectCache = new ConcurrentHashMap<>();
     private final ExecutorService executorService;
 
-    public FederatedQueryGateway(DialectResolver dialectResolver, SqlValidator sqlValidator, QueryConfig queryConfig) {
+    public FederatedQueryGateway(DialectResolver dialectResolver, SqlValidator sqlValidator, QueryConfig queryConfig,
+                                 ThreadPoolProperties threadPoolProperties) {
         this.dialectResolver = dialectResolver;
         this.sqlValidator = sqlValidator;
         this.queryConfig = queryConfig;
-        this.executorService = Executors.newFixedThreadPool(
-                Math.min(MAX_QUERY_THREADS, Runtime.getRuntime().availableProcessors()));
+        // Deliberately not min(_, availableProcessors()): these workers block on remote JDBC, so
+        // CPU count is the wrong bound. On a 2-vCPU container the old formula turned an N-database
+        // fan-out into two-at-a-time, which is the opposite of what the fan-out is for.
+        int size = (threadPoolProperties != null ? threadPoolProperties : ThreadPoolProperties.defaults())
+                .federatedQuerySize();
+        this.executorService = Executors.newFixedThreadPool(size, runnable -> {
+            Thread thread = new Thread(runnable, "mcp-federated");
+            thread.setDaemon(true);
+            return thread;
+        });
+        log.info("Federated query pool: size={}", size);
     }
 
     /**
@@ -84,7 +94,7 @@ public class FederatedQueryGateway implements DisposableBean {
             throw new McpFederatedException(ErrorCode.CONNECTION_FAILED,
                     "DataSource cannot be null (clientId=" + clientId + ")");
         }
-        databaseClients.put(clientId, RegisteredClient.of(dataSource));
+        databaseClients.put(clientId, RegisteredClient.of(dataSource, queryConfig.queryTimeoutSeconds()));
         dialectCache.remove(clientId);
         log.info("Registered federated client: {}", clientId);
     }
@@ -348,8 +358,17 @@ public class FederatedQueryGateway implements DisposableBean {
      */
     private record RegisteredClient(DataSource dataSource, JdbcTemplate jdbc, NamedParameterJdbcTemplate named) {
 
-        static RegisteredClient of(DataSource dataSource) {
+        /**
+         * @param queryTimeoutSeconds statement ceiling for this client. A federated fan-out waits on
+         *                            every database it targets, so an unbounded remote statement
+         *                            holds a gateway thread — and the request thread joining on it —
+         *                            until the driver gives up.
+         */
+        static RegisteredClient of(DataSource dataSource, int queryTimeoutSeconds) {
             JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            if (queryTimeoutSeconds > 0) {
+                jdbc.setQueryTimeout(queryTimeoutSeconds);
+            }
             return new RegisteredClient(dataSource, jdbc, new NamedParameterJdbcTemplate(jdbc));
         }
     }

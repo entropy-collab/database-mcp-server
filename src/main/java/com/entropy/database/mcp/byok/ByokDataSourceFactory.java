@@ -17,14 +17,16 @@ package com.entropy.database.mcp.byok;
 
 import com.entropy.database.mcp.audit.AuditLogRepository;
 import com.entropy.database.mcp.audit.SqlAuditService;
+import com.entropy.database.mcp.cache.ConnectionScopedCache;
 import com.entropy.database.mcp.cache.DatabaseCache;
 import com.entropy.database.mcp.cache.DatabaseCacheImpl;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitorImpl;
 import com.entropy.database.mcp.properties.ByokProperties;
-import com.entropy.database.mcp.properties.CacheConfig;
 import com.entropy.database.mcp.properties.DatabaseProperties;
+import com.entropy.database.mcp.properties.StatementTimeoutProperties;
+import com.entropy.database.mcp.properties.StatementTimeouts;
 import com.entropy.database.mcp.byok.ByokWriteRepository;
 import com.entropy.database.mcp.repository.DatabaseReadRepository;
 import com.entropy.database.mcp.repository.ExecutionPlanRepository;
@@ -58,15 +60,15 @@ import java.util.function.Supplier;
 public class ByokDataSourceFactory {
 
     private static final Logger log = LoggerFactory.getLogger(ByokDataSourceFactory.class);
-    private static final int DEFAULT_LEAK_DETECTION_THRESHOLD_SECONDS = 60;
 
     private final Supplier<SqlValidator> sqlValidator;
     private final Supplier<DataMaskingService> maskingService;
     private final Supplier<AuditLogRepository> auditLogRepository;
     private final Supplier<DatabaseProperties> databaseProperties;
     private final Supplier<ByokProperties> byokProperties;
-    private final Supplier<CacheConfig> cacheConfig;
     private final Supplier<SqlAuditService> sqlAuditService;
+    private final Supplier<StatementTimeoutProperties> statementTimeoutProperties;
+    private final Supplier<DatabaseCacheImpl> sharedCache;
     private final int defaultFetchSize;
 
     public ByokDataSourceFactory(Supplier<SqlValidator> sqlValidator,
@@ -74,16 +76,18 @@ public class ByokDataSourceFactory {
                                   Supplier<AuditLogRepository> auditLogRepository,
                                   Supplier<DatabaseProperties> databaseProperties,
                                   Supplier<ByokProperties> byokProperties,
-                                  Supplier<CacheConfig> cacheConfig,
                                   Supplier<SqlAuditService> sqlAuditService,
+                                  Supplier<StatementTimeoutProperties> statementTimeoutProperties,
+                                  Supplier<DatabaseCacheImpl> sharedCache,
                                   int defaultFetchSize) {
         this.sqlValidator = sqlValidator;
         this.maskingService = maskingService;
         this.auditLogRepository = auditLogRepository;
         this.databaseProperties = databaseProperties;
         this.byokProperties = byokProperties;
-        this.cacheConfig = cacheConfig;
         this.sqlAuditService = sqlAuditService;
+        this.statementTimeoutProperties = statementTimeoutProperties;
+        this.sharedCache = sharedCache;
         this.defaultFetchSize = defaultFetchSize;
     }
 
@@ -94,10 +98,12 @@ public class ByokDataSourceFactory {
      * Lifecycle (close / lease expiry) is managed by the caller ({@link LeasedDataSource}).
      */
     public ByokDataSourceContext create(String key, ConnectionProperties connection, DatabaseDialect dialect) {
-        HikariDataSource dataSource = createDataSource(connection, dialect);
-        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-        ByokInfrastructure infrastructure = createInfrastructure(key, jdbcTemplate, dialect);
-        return new ByokDataSourceContext(key, dataSource, dialect, jdbcTemplate, infrastructure);
+        StatementTimeouts timeouts = resolveTimeouts();
+        HikariDataSource dataSource = createDataSource(connection, dialect, timeouts);
+        StatementTemplates templates = StatementTemplates.over(
+                dataSource, new JdbcTemplate(dataSource), timeouts);
+        ByokInfrastructure infrastructure = createInfrastructure(key, templates, dialect);
+        return new ByokDataSourceContext(key, dataSource, dialect, templates, infrastructure);
     }
 
     /**
@@ -105,14 +111,27 @@ public class ByokDataSourceFactory {
      * The returned context has a non-closeable leased wrapper.
      */
     public ByokDataSourceContext createExisting(String key, DataSource externalDataSource, DatabaseDialect dialect) {
-        JdbcTemplate jdbcTemplate = new JdbcTemplate(externalDataSource);
-        ByokInfrastructure infrastructure = createInfrastructure(key, jdbcTemplate, dialect);
-        return new ByokDataSourceContext(key, externalDataSource, dialect, jdbcTemplate, infrastructure);
+        StatementTemplates templates = StatementTemplates.over(
+                externalDataSource, new JdbcTemplate(externalDataSource), resolveTimeouts());
+        ByokInfrastructure infrastructure = createInfrastructure(key, templates, dialect);
+        return new ByokDataSourceContext(key, externalDataSource, dialect, templates, infrastructure);
     }
 
     // ─── Internal factories ─────────────────────────────────────────────────
 
-    private HikariDataSource createDataSource(ConnectionProperties connection, DatabaseDialect dialect) {
+    /**
+     * Join the read ceiling — which lives in {@code query.timeout-seconds} — with the write, DDL and
+     * ETL ceilings so there is exactly one source of truth per category.
+     */
+    private StatementTimeouts resolveTimeouts() {
+        int readSeconds = databaseProperties.get().query().timeoutSeconds();
+        StatementTimeoutProperties props = statementTimeoutProperties.get();
+        return props != null ? props.resolve(readSeconds)
+                : new StatementTimeouts(readSeconds, 0, 0, 0);
+    }
+
+    private HikariDataSource createDataSource(ConnectionProperties connection, DatabaseDialect dialect,
+                                              StatementTimeouts timeouts) {
         DatabaseProperties dbProps = databaseProperties.get();
         ByokProperties byokProps = byokProperties.get();
         HikariConfig config = new HikariConfig();
@@ -128,37 +147,46 @@ public class ByokDataSourceFactory {
         config.setMaxLifetime(byokProps.maxLifetime().toMillis());
         config.setConnectionTestQuery(dialect.connectionTestQuery());
         dialect.configureDataSource(config, dbProps);
-        // Enable connection leak detection to catch unreturned connections early.
-        // Set to 60s — slightly less than default leaseDuration (30min) but catches bugs during dev.
-        config.setLeakDetectionThreshold(DEFAULT_LEAK_DETECTION_THRESHOLD_SECONDS);
+        // Milliseconds, and derived from the longest statement ceiling. The previous value was the
+        // literal 60 against this millisecond setter, which is below HikariCP's 2s floor — so leak
+        // detection was silently off, not the 60s the comment claimed. Deriving it also keeps a
+        // legitimate long ETL or DDL statement from being reported as a leak.
+        config.setLeakDetectionThreshold(timeouts.leakDetectionThresholdMs());
 
-        log.info("Configured HikariCP pool for dialect={}: poolSize={}, minIdle={}",
+        log.info("Configured HikariCP pool for dialect={}: poolSize={}, minIdle={}, "
+                        + "statementTimeoutsSec(read/write/ddl/etl)={}/{}/{}/{}, leakDetectionMs={}",
                 dialect.getClass().getSimpleName(),
-                byokProps.poolSize(), byokProps.minIdle());
+                byokProps.poolSize(), byokProps.minIdle(),
+                timeouts.readSeconds(), timeouts.writeSeconds(), timeouts.ddlSeconds(),
+                timeouts.etlSeconds(), timeouts.leakDetectionThresholdMs());
         return new HikariDataSource(config);
     }
 
-    private ByokInfrastructure createInfrastructure(String key, JdbcTemplate jdbcTemplate, DatabaseDialect dialect) {
+    private ByokInfrastructure createInfrastructure(String key, StatementTemplates templates, DatabaseDialect dialect) {
         SqlValidator validator = sqlValidator.get();
         DataMaskingService masking = maskingService.get();
         AuditLogRepository auditRepo = auditLogRepository.get();
         DatabaseProperties dbProps = databaseProperties.get();
-        CacheConfig cc = cacheConfig.get();
         int fetchSize = defaultFetchSize;
         int queryTimeoutSeconds = dbProps.query().timeoutSeconds();
+        JdbcTemplate readTemplate = templates.read();
 
-        DatabaseCache cache = new DatabaseCacheImpl(
-                cc.maxSize(), cc.queryCacheTtl(), cc.metadataCacheTtl());
-        DatabaseHealthMonitor healthMonitor = new DatabaseHealthMonitorImpl(jdbcTemplate, cache);
+        // One shared Caffeine instance for the whole process, viewed through a per-connection
+        // key prefix. Building a cache per connection made total cache memory scale with
+        // max-cached-connections while the entry budget was written as if only one existed.
+        DatabaseCache cache = new ConnectionScopedCache(sharedCache.get(), key);
+        DatabaseHealthMonitor healthMonitor = new DatabaseHealthMonitorImpl(readTemplate, cache);
         QueryAuditLogger auditLogger = new QueryAuditLoggerImpl(auditRepo, dbProps, sqlAuditService.get());
         DatabaseReadRepository readRepo = new DatabaseReadRepository(
-                jdbcTemplate, dialect, validator, cache, masking,
+                readTemplate, dialect, validator, cache, masking,
                 dbProps.query().maxRows(),
                 dbProps.query().maxResultRows(),
-                fetchSize, queryTimeoutSeconds, null);
-        ByokWriteRepository writeRepo = new ByokWriteRepository(jdbcTemplate, validator);
+                fetchSize, queryTimeoutSeconds);
+        // DDL rather than the read template: executeDdl issues ALTER/CREATE, which can wait on a
+        // metadata lock for longer than any interactive query is allowed to.
+        ByokWriteRepository writeRepo = new ByokWriteRepository(templates.ddl(), validator);
         ExecutionPlanRepository executionPlanRepo = new ExecutionPlanRepositoryImpl(
-                jdbcTemplate, dialect, validator);
+                readTemplate, dialect, validator);
 
         return new ByokInfrastructure(cache, healthMonitor, auditLogger,
                 readRepo, writeRepo, executionPlanRepo);

@@ -30,10 +30,16 @@ import java.util.Map;
 /**
  * Unified database cache with Caffeine.
  * Merges QueryCache and SchemaCache into a single high-performance cache.
- * 
+ *
  * Uses two internal caches:
  * - queryCache: For query results (smaller, shorter TTL)
  * - metadataCache: For schema metadata (larger, longer TTL)
+ *
+ * <p><b>One instance is shared by every BYOK connection.</b> {@code maxSize} is therefore a
+ * process-wide entry budget, not a per-connection one: previously one instance was built per
+ * connection, so the worst case was {@code maxSize × maxCachedConnections} entries on a heap
+ * sized for a single cache. Per-connection isolation is provided by
+ * {@link ConnectionScopedCache}, which prefixes keys and invalidates by prefix.
  */
 public class DatabaseCacheImpl implements DatabaseCache {
 
@@ -278,7 +284,53 @@ public class DatabaseCacheImpl implements DatabaseCache {
     }
 
     @Override
-    public BloomFilter<String> getQueryBloomFilter() {
-        return queryBloomFilter;
+    public boolean mightContainQuery(String key) {
+        // No filter means "cannot rule it out" — degrade to always consulting the cache.
+        return queryBloomFilter == null || queryBloomFilter.mightContain(key);
+    }
+
+    @Override
+    public void recordQueryKey(String key) {
+        if (queryBloomFilter != null) {
+            queryBloomFilter.put(key);
+        }
+    }
+
+    // ─── Scope Operations (used by ConnectionScopedCache) ─────────────────
+
+    /**
+     * Invalidate every entry whose logical key starts with {@code scope}.
+     * This is what makes {@code clearCache(connection)} still mean "this connection only"
+     * now that one Caffeine instance is shared across connections.
+     */
+    void invalidateScope(String scope) {
+        int removed = 0;
+        removed += removeByPrefix(queryCache, QUERY_PREFIX + scope);
+        removed += removeByPrefix(metadataCache, METADATA_PREFIX + scope);
+        // The bloom filter has no removal, so a cleared scope keeps reporting "might contain".
+        // That costs one extra cache lookup that misses, never a stale hit.
+        log.debug("DatabaseCache scope cleared: scope={}, entries={}", scope, removed);
+    }
+
+    /** Number of live query entries in the given scope. */
+    long scopedQuerySize(String scope) {
+        return countByPrefix(queryCache, QUERY_PREFIX + scope);
+    }
+
+    /** Number of live metadata entries in the given scope. */
+    long scopedMetadataSize(String scope) {
+        return countByPrefix(metadataCache, METADATA_PREFIX + scope);
+    }
+
+    private static int removeByPrefix(Cache<String, Object> cache, String prefix) {
+        if (cache == null) return 0;
+        var keys = cache.asMap().keySet().stream().filter(k -> k.startsWith(prefix)).toList();
+        cache.invalidateAll(keys);
+        return keys.size();
+    }
+
+    private static long countByPrefix(Cache<String, Object> cache, String prefix) {
+        if (cache == null) return 0;
+        return cache.asMap().keySet().stream().filter(k -> k.startsWith(prefix)).count();
     }
 }

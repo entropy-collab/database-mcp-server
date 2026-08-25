@@ -33,6 +33,7 @@ import com.entropy.database.mcp.properties.LineageProperties;
 import com.entropy.database.mcp.properties.OptimizerProperties;
 import com.entropy.database.mcp.properties.QualityProperties;
 import com.entropy.database.mcp.properties.QueryConfig;
+import com.entropy.database.mcp.properties.StatementTimeoutProperties;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
@@ -54,7 +55,7 @@ import java.util.function.Supplier;
  * following Spring's DataSourceBuilder pattern.
  */
 @Configuration
-@EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class, BackupProperties.class, CatalogProperties.class, CdcProperties.class, LineageProperties.class, OptimizerProperties.class, QualityProperties.class})
+@EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class, BackupProperties.class, CatalogProperties.class, CdcProperties.class, LineageProperties.class, OptimizerProperties.class, QualityProperties.class, StatementTimeoutProperties.class})
 public class DatabaseConfig {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseConfig.class);
@@ -85,9 +86,14 @@ public class DatabaseConfig {
         );
     }
 
+    /**
+     * One shared cache for the whole process. Per-connection isolation is layered on top by
+     * {@code ConnectionScopedCache} in {@link ByokDataSourceFactory}, so
+     * {@code entropy.mcp.database.cache.max-size} is a global entry budget.
+     */
     @Bean
-    @ConditionalOnMissingBean
-    public com.entropy.database.mcp.cache.DatabaseCache databaseCache(CacheConfig cacheConfig) {
+    @ConditionalOnMissingBean(com.entropy.database.mcp.cache.DatabaseCache.class)
+    public com.entropy.database.mcp.cache.DatabaseCacheImpl databaseCache(CacheConfig cacheConfig) {
         return new com.entropy.database.mcp.cache.DatabaseCacheImpl(
                 cacheConfig.maxSize(),
                 cacheConfig.queryCacheTtl(),
@@ -129,8 +135,9 @@ public class DatabaseConfig {
             @Nullable com.entropy.database.mcp.audit.AuditLogRepository auditLogRepository,
             DatabaseProperties properties,
             ByokProperties byokProperties,
-            CacheConfig cacheConfig,
             SqlAuditService sqlAuditService,
+            StatementTimeoutProperties statementTimeoutProperties,
+            com.entropy.database.mcp.cache.DatabaseCacheImpl sharedCache,
             QueryConfig queryConfig) {
         // Use Suppliers to defer shared-component resolution until factory.create() is called.
         // This avoids circular dependency during bean initialization.
@@ -139,11 +146,12 @@ public class DatabaseConfig {
         Supplier<com.entropy.database.mcp.audit.AuditLogRepository> ar = () -> auditLogRepository;
         Supplier<DatabaseProperties> dp = () -> properties;
         Supplier<ByokProperties> bp = () -> byokProperties;
-        Supplier<CacheConfig> cc = () -> cacheConfig;
         Supplier<SqlAuditService> sas = () -> sqlAuditService;
+        Supplier<StatementTimeoutProperties> stp = () -> statementTimeoutProperties;
+        Supplier<com.entropy.database.mcp.cache.DatabaseCacheImpl> sc = () -> sharedCache;
         int fetchSize = queryConfig != null ? queryConfig.fetchSize() : 100;
 
-        return new ByokDataSourceFactory(sv, ms, ar, dp, bp, cc, sas, fetchSize);
+        return new ByokDataSourceFactory(sv, ms, ar, dp, bp, sas, stp, sc, fetchSize);
     }
 
     @Bean
@@ -170,8 +178,14 @@ public class DatabaseConfig {
                                                   EtlConfig etlConfig,
                                                   @org.springframework.beans.factory.annotation.Qualifier("etlTaskExecutor")
                                                   org.springframework.core.task.TaskExecutor etlTaskExecutor,
-                                                  com.entropy.database.mcp.monitor.McpMetricsCollector metricsCollector) {
-        return new JobExecutionEngine(dataSourceManager, metricsCollector, etlConfig, etlTaskExecutor);
+                                                  com.entropy.database.mcp.monitor.McpMetricsCollector metricsCollector,
+                                                  SqlValidator sqlValidator) {
+        // The validator was omitted here, which left JobExecutionEngine.validateSourceSql a no-op:
+        // ETL source SQL reached the database without the table allow-list, join or
+        // subquery-depth checks that every other read path goes through. The bean existed all
+        // along; only this call site failed to pass it.
+        return new JobExecutionEngine(dataSourceManager, metricsCollector, etlConfig, etlTaskExecutor,
+                sqlValidator);
     }
 
 }

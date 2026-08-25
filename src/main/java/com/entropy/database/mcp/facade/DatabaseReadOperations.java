@@ -17,7 +17,6 @@ package com.entropy.database.mcp.facade;
 
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.domain.PlanAnalysis;
-import com.entropy.database.mcp.stream.SseStreamManager;
 
 import java.util.List;
 import java.util.Map;
@@ -28,10 +27,6 @@ import java.util.Map;
 public interface DatabaseReadOperations {
 
     PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken, String connection);
-
-    PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
-                                             SseStreamManager.QueryExecutor<PaginatedQueryResult> executor,
-                                             String connection);
 
     List<Map<String, Object>> executeNamedQuery(String sql, Map<String, Object> params, String connection);
 

@@ -18,6 +18,7 @@ package com.entropy.database.mcp.byok;
 import com.entropy.database.mcp.cache.DatabaseCache;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
+import com.entropy.database.mcp.properties.StatementTimeouts;
 import com.entropy.database.mcp.repository.DatabaseReadRepository;
 import com.entropy.database.mcp.repository.ExecutionPlanRepository;
 import com.entropy.database.mcp.security.QueryAuditLogger;
@@ -41,20 +42,20 @@ public class ByokDataSourceContext {
     private final String key;
     private final DataSource dataSource;
     private final DatabaseDialect dialect;
-    private final JdbcTemplate jdbcTemplate;
+    private final StatementTemplates templates;
     private final NamedParameterJdbcTemplate namedParameterJdbcTemplate;
     private final ByokInfrastructure infrastructure;
 
     public ByokDataSourceContext(String key,
                                  DataSource dataSource,
                                  DatabaseDialect dialect,
-                                 JdbcTemplate jdbcTemplate,
+                                 StatementTemplates templates,
                                  ByokInfrastructure infrastructure) {
         this.key = key;
         this.dataSource = dataSource;
         this.dialect = dialect;
-        this.jdbcTemplate = jdbcTemplate;
-        this.namedParameterJdbcTemplate = new NamedParameterJdbcTemplate(jdbcTemplate);
+        this.templates = templates;
+        this.namedParameterJdbcTemplate = new NamedParameterJdbcTemplate(templates.read());
         this.infrastructure = infrastructure;
     }
 
@@ -78,8 +79,41 @@ public class ByokDataSourceContext {
         return dialect;
     }
 
+    /**
+     * Template for read work, bounded by the read timeout.
+     *
+     * <p>The default for anything that is not clearly a write, a DDL statement or a bulk transfer.
+     * Picking this one for a long-running statement will abort it at the read ceiling — that is the
+     * intended failure mode, and the fix is to pick the matching category below, not to remove the
+     * ceiling.
+     */
     public JdbcTemplate getJdbcTemplate() {
-        return jdbcTemplate;
+        return templates.read();
+    }
+
+    /** Template for row-modifying statements (INSERT/UPDATE/DELETE, batch writes). */
+    public JdbcTemplate getWriteJdbcTemplate() {
+        return templates.write();
+    }
+
+    /** Template for DDL, which can block on metadata locks far longer than a write. */
+    public JdbcTemplate getDdlJdbcTemplate() {
+        return templates.ddl();
+    }
+
+    /** Template for bulk transfers: ETL steps, backup extraction and replay. */
+    public JdbcTemplate getEtlJdbcTemplate() {
+        return templates.etl();
+    }
+
+    /**
+     * The timeout ceilings behind the templates above.
+     *
+     * <p>Needed by callers that build statements from a raw {@link Connection} — the transaction
+     * path — and therefore have to apply the ceiling themselves.
+     */
+    public StatementTimeouts getStatementTimeouts() {
+        return templates.timeouts();
     }
 
     public NamedParameterJdbcTemplate getNamedParameterJdbcTemplate() {

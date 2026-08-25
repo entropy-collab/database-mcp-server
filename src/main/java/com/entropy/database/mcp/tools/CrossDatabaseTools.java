@@ -21,7 +21,6 @@ import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.gateway.FederatedQueryGateway;
 import com.entropy.database.mcp.properties.QueryConfig;
 import com.entropy.database.mcp.security.SqlValidator;
-import com.entropy.database.mcp.stream.SseStreamManager;
 import com.entropy.database.mcp.util.ValidationUtils;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
@@ -49,20 +48,17 @@ public class CrossDatabaseTools extends McpToolBase {
 
     private final DatabaseOperations routingFacade;
     private final SqlValidator sqlValidator;
-    private final SseStreamManager sseStreamManager;
     private final FederatedQueryGateway gateway;
     private final boolean gatewayEnabled;
     private final int maxExportRows;
 
     public CrossDatabaseTools(DatabaseOperations routingFacade,
                               SqlValidator sqlValidator,
-                              SseStreamManager sseStreamManager,
                               FederatedQueryGateway gateway,
                               QueryConfig queryConfig,
                               Environment environment) {
         this.routingFacade = routingFacade;
         this.sqlValidator = sqlValidator;
-        this.sseStreamManager = sseStreamManager;
         this.gateway = gateway;
         this.gatewayEnabled = Boolean.parseBoolean(environment.getProperty("entropy.mcp.gateway.enabled", "false"));
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;

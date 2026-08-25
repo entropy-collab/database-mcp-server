@@ -17,6 +17,7 @@ package com.entropy.database.mcp.byok;
 
 import com.entropy.database.mcp.cache.DatabaseCache;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.properties.StatementTimeouts;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.repository.DatabaseReadRepository;
 import com.entropy.database.mcp.repository.ExecutionPlanRepository;
@@ -58,7 +59,7 @@ class ByokDataSourceContextTest {
         when(infrastructure.readRepository()).thenReturn(readRepository);
 
         ByokDataSourceContext context = new ByokDataSourceContext(
-                "key1", dataSource, dialect, jdbcTemplate, infrastructure
+                "key1", dataSource, dialect, templatesOver(dataSource), infrastructure
         );
 
         assertThat(context.getKey()).isEqualTo("key1");
@@ -84,7 +85,7 @@ class ByokDataSourceContextTest {
         when(infrastructure.executionPlanRepository()).thenReturn(executionPlanRepository);
 
         ByokDataSourceContext context = new ByokDataSourceContext(
-                "key1", dataSource, dialect, jdbcTemplate, infrastructure
+                "key1", dataSource, dialect, templatesOver(dataSource), infrastructure
         );
 
         assertThat(context.getCache()).isSameAs(cache);
@@ -98,7 +99,7 @@ class ByokDataSourceContextTest {
     @Test
     void closeWithNonCloseableDataSource() {
         ByokDataSourceContext context = new ByokDataSourceContext(
-                "key1", dataSource, dialect, jdbcTemplate, infrastructure
+                "key1", dataSource, dialect, templatesOver(dataSource), infrastructure
         );
 
         // dataSource is a mock that doesn't implement AutoCloseable, so closePool() should be a no-op
@@ -133,10 +134,18 @@ class ByokDataSourceContextTest {
         };
 
         ByokDataSourceContext context = new ByokDataSourceContext(
-                "key1", mockCloseableDataSource, dialect, jdbcTemplate, infrastructure
+                "key1", mockCloseableDataSource, dialect, templatesOver(mockCloseableDataSource), infrastructure
         );
 
         // Should catch the exception and not rethrow
         assertThatNoException().isThrownBy(context::closePool);
+    }
+
+    /**
+     * Wrap the mocked read template with the default ceilings; the sibling templates are derived
+     * over the same (mocked) datasource and are never executed here.
+     */
+    private StatementTemplates templatesOver(DataSource source) {
+        return StatementTemplates.over(source, jdbcTemplate, StatementTimeouts.defaults());
     }
 }

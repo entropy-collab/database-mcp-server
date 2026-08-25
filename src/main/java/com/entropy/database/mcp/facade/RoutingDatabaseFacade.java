@@ -20,7 +20,6 @@ import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
-import com.entropy.database.mcp.stream.SseStreamManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Lazy;
@@ -185,12 +184,6 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     public PaginatedQueryResult executeQuery(
             String sql, int maxRows, String continuationToken, String connection) {
         return resolveFacade(connection).executeQuery(sql, maxRows, continuationToken, connection);
-    }
-
-    @Override
-    public PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
-                                                    SseStreamManager.QueryExecutor<PaginatedQueryResult> executor, String connection) {
-        return resolveFacade(connection).executeQueryWithSse(sql, maxRows, continuationToken, executor, connection);
     }
 
     @Override

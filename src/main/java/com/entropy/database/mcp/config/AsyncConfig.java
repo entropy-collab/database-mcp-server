@@ -15,15 +15,19 @@
  */
 package com.entropy.database.mcp.config;
 
+import com.entropy.database.mcp.properties.DatabaseProperties;
+import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.interceptor.AsyncUncaughtExceptionHandler;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.AsyncConfigurer;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.util.Arrays;
 import java.util.concurrent.Executor;
@@ -32,21 +36,33 @@ import java.util.concurrent.ThreadPoolExecutor;
 /**
  * Async configuration with dedicated thread pools.
  * Replaces Spring's default SimpleAsyncTaskExecutor to prevent thread leakage.
+ *
+ * <p>All three pools run blocking JDBC, so their widths come from configuration rather than from
+ * {@code availableProcessors()} — see {@link ThreadPoolProperties}.
  */
 @Configuration
 @EnableAsync
 @EnableScheduling
+@EnableConfigurationProperties(ThreadPoolProperties.class)
 public class AsyncConfig implements AsyncConfigurer {
 
     private static final Logger log = LoggerFactory.getLogger(AsyncConfig.class);
+
+    private final ThreadPoolProperties pools;
+    private final DatabaseProperties databaseProperties;
+
+    public AsyncConfig(ThreadPoolProperties pools, DatabaseProperties databaseProperties) {
+        this.pools = pools != null ? pools : ThreadPoolProperties.defaults();
+        this.databaseProperties = databaseProperties;
+    }
 
     @Override
     @Bean(name = "taskExecutor")
     public Executor getAsyncExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(4);
-        executor.setMaxPoolSize(8);
-        executor.setQueueCapacity(100);
+        executor.setCorePoolSize(pools.asyncCoreSize());
+        executor.setMaxPoolSize(pools.asyncMaxSize());
+        executor.setQueueCapacity(pools.asyncQueueCapacity());
         executor.setThreadNamePrefix("mcp-async-");
         executor.setAllowCoreThreadTimeOut(true);
         executor.setKeepAliveSeconds(60);
@@ -55,6 +71,8 @@ public class AsyncConfig implements AsyncConfigurer {
         // trace. CallerRuns degrades latency instead of losing records.
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         executor.initialize();
+        log.info("Async pool: core={}, max={}, queue={}",
+                pools.asyncCoreSize(), pools.asyncMaxSize(), pools.asyncQueueCapacity());
         return executor;
     }
 
@@ -64,13 +82,20 @@ public class AsyncConfig implements AsyncConfigurer {
      * <p>Kept separate from {@code taskExecutor} on purpose: an ETL job can run for minutes and
      * would otherwise occupy every worker plus the queue, starving the short-lived
      * {@code @Async} audit writes that share the pool.
+     *
+     * <p>Width comes from {@code entropy.mcp.database.etl.thread-pool-size}. That key existed and
+     * reached {@code EtlConfig}, but nothing ever read it — the pool was hardcoded at 2/4, so
+     * raising the documented knob changed nothing. Core equals max because an ETL worker is
+     * blocked on JDBC, not on CPU: growing the pool only under queue pressure would leave
+     * configured capacity unused while jobs queue.
      */
     @Bean(name = "etlTaskExecutor")
     public ThreadPoolTaskExecutor etlTaskExecutor() {
+        int size = databaseProperties.etl().threadPoolSize();
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(2);
-        executor.setMaxPoolSize(4);
-        executor.setQueueCapacity(50);
+        executor.setCorePoolSize(size);
+        executor.setMaxPoolSize(size);
+        executor.setQueueCapacity(pools.etlQueueCapacity());
         executor.setThreadNamePrefix("mcp-etl-");
         executor.setKeepAliveSeconds(120);
         // ETL submission must fail loudly rather than block the MCP request thread.
@@ -78,7 +103,30 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(30);
         executor.initialize();
+        log.info("ETL pool: size={}, queue={}", size, pools.etlQueueCapacity());
         return executor;
+    }
+
+    /**
+     * Scheduler for {@code @Scheduled} tasks.
+     *
+     * <p>Without this bean Spring falls back to a single-threaded scheduler whose threads are
+     * unnamed and whose uncaught exceptions surface only as a generic log line. BYOK cleanup
+     * closes Hikari pools, which blocks; on one thread any second scheduled task would wait
+     * behind it, and a thrown exception would cancel a {@code fixedRate} task permanently.
+     */
+    @Bean(name = "taskScheduler")
+    public ThreadPoolTaskScheduler taskScheduler() {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(pools.schedulerSize());
+        scheduler.setThreadNamePrefix("mcp-sched-");
+        scheduler.setWaitForTasksToCompleteOnShutdown(true);
+        scheduler.setAwaitTerminationSeconds(30);
+        scheduler.setErrorHandler(t ->
+                log.error("Scheduled task threw {}: {}", t.getClass().getSimpleName(), t.getMessage(), t));
+        scheduler.initialize();
+        log.info("Scheduler pool: size={}", pools.schedulerSize());
+        return scheduler;
     }
 
     /**

@@ -15,8 +15,6 @@
  */
 package com.entropy.database.mcp.cache;
 
-import com.google.common.hash.BloomFilter;
-
 /**
  * Multi-tier database cache interface.
  * Provides hot/warm/cold cache layers with refresh-ahead support.
@@ -146,7 +144,18 @@ public interface DatabaseCache {
     java.util.Map<String, Object> getStatistics();
 
     /**
-     * Get the query bloom filter.
+     * Query-key membership pre-check. Returns {@code false} only when the key is definitely
+     * absent from the query cache, so a caller can skip the cache lookup entirely.
+     *
+     * <p>Exposed as a predicate rather than as the underlying {@code BloomFilter}: a scoped
+     * cache has to prefix the key with its own scope before consulting the shared filter,
+     * which is impossible if callers hold the filter directly.
      */
-    BloomFilter<String> getQueryBloomFilter();
+    boolean mightContainQuery(String key);
+
+    /**
+     * Record a query key in the membership filter. Call this whenever the corresponding
+     * entry is written via {@link #putQuery(String, Object)}.
+     */
+    void recordQueryKey(String key);
 }

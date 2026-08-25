@@ -33,6 +33,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -116,12 +117,6 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
     }
 
     @Override
-    public PaginatedQueryResult executeQueryWithSse(String sql, int maxRows, String continuationToken,
-                                                    com.entropy.database.mcp.stream.SseStreamManager.QueryExecutor<PaginatedQueryResult> executor, String connection) {
-        return context.getReadRepository().executeQueryWithSse(sql, maxRows, continuationToken, executor);
-    }
-
-    @Override
     public List<Map<String, Object>> queryRows(String sql, String connection, Object... args) {
         JdbcTemplate jdbc = context.getJdbcTemplate();
         // The single-argument overload avoids handing the driver an empty parameter array, which
@@ -153,7 +148,7 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
 
     @Override
     public int executeUpdate(String sql, String connection, Object... args) {
-        JdbcTemplate jdbc = context.getJdbcTemplate();
+        JdbcTemplate jdbc = context.getWriteJdbcTemplate();
         if (args == null || args.length == 0) {
             return jdbc.update(sql);
         }
@@ -193,7 +188,7 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
         }
         int effectiveBatchSize = batchSize > 0 ? batchSize : rows.size();
         List<Map<String, Object>> namedRows = toNamedRows(columns, rows);
-        long written = BatchInsertHelper.batchInsert(context.getJdbcTemplate(), sql, namedRows,
+        long written = BatchInsertHelper.batchInsert(context.getWriteJdbcTemplate(), sql, namedRows,
                 effectiveBatchSize, BatchInsertHelper.setRowColumns(columns));
         // A driver may answer Statement.SUCCESS_NO_INFO (-2) per batch entry instead of a row
         // count, which sums to a negative total. The batch did not fail — it succeeded without
@@ -413,7 +408,11 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
      * {@link TransactionContext} bound to one JDBC connection.
      *
      * <p>Statements go straight to that connection instead of through the context's
-     * {@code JdbcTemplate}, which would borrow a second connection and commit independently.
+     * {@code JdbcTemplate}, which would borrow a second connection and commit independently. The
+     * flip side is that nothing applies a {@code queryTimeout} on the way — the per-category
+     * templates cannot help here — so each method sets its own ceiling. Without it a single blocked
+     * statement pins both a pool connection and the request thread until the driver gives up, which
+     * for most drivers means indefinitely.
      */
     private final class JdbcTransactionContext implements TransactionContext {
 
@@ -426,6 +425,7 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
         @Override
         public int update(String sql, Object... args) {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                applyTimeout(ps, context.getStatementTimeouts().writeSeconds());
                 bind(ps, args);
                 return ps.executeUpdate();
             } catch (SQLException e) {
@@ -437,6 +437,9 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
         @Override
         public void execute(String sql) {
             try (Statement stmt = conn.createStatement()) {
+                // The DDL ceiling: this overload is the one DdlExecutionTools drives, and DDL can
+                // wait on a metadata lock far longer than a row-level write.
+                applyTimeout(stmt, context.getStatementTimeouts().ddlSeconds());
                 stmt.execute(sql);
             } catch (SQLException e) {
                 throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
@@ -447,6 +450,7 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
         @Override
         public List<Map<String, Object>> queryRows(String sql, Object... args) {
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                applyTimeout(ps, context.getStatementTimeouts().readSeconds());
                 bind(ps, args);
                 try (ResultSet rs = ps.executeQuery()) {
                     return readAll(rs);
@@ -454,6 +458,25 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
             } catch (SQLException e) {
                 throw new McpToolException(ErrorCode.QUERY_EXECUTION_FAILED,
                         "Query failed in transaction: " + e.getMessage(), e, context.getKey());
+            }
+        }
+
+        /**
+         * Best-effort ceiling: a driver that does not support {@code setQueryTimeout} throws
+         * {@link SQLFeatureNotSupportedException}, and refusing to run the statement at all would
+         * be a worse outcome than running it unbounded on that driver.
+         */
+        private void applyTimeout(Statement stmt, int seconds) {
+            if (seconds <= 0) {
+                return;
+            }
+            try {
+                stmt.setQueryTimeout(seconds);
+            } catch (SQLFeatureNotSupportedException e) {
+                log.debug("Driver for {} does not support setQueryTimeout; statement runs unbounded",
+                        context.getKey());
+            } catch (SQLException e) {
+                log.warn("Failed to set query timeout on {}: {}", context.getKey(), e.getMessage());
             }
         }
 

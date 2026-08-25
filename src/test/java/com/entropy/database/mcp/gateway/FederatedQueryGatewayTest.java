@@ -18,6 +18,7 @@ package com.entropy.database.mcp.gateway;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.exception.McpFederatedException;
 import com.entropy.database.mcp.properties.QueryConfig;
+import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -75,7 +76,8 @@ class FederatedQueryGatewayTest {
         gateway = new FederatedQueryGateway(
                 new DialectResolver(),
                 mock(SqlValidator.class),
-                new QueryConfig(100, 10_000, 100, 500, 30));
+                new QueryConfig(100, 10_000, 100, 500, 30),
+                ThreadPoolProperties.defaults());
         gateway.registerClient("h2", dataSource);
     }
 
