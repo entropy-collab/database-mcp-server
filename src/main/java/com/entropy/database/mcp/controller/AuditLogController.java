@@ -31,6 +31,12 @@ import java.util.Map;
 @RequestMapping("/api/audit")
 public class AuditLogController {
 
+    /**
+     * Upper bound for the {@code limit} request parameter. Audit rows carry the original SQL, so a
+     * single unbounded call would both dump the whole history and hold it all in memory.
+     */
+    static final int MAX_LIMIT = 1000;
+
     private final QueryAuditLogger auditLogger;
     private final AuditLogRepository auditLogRepository;
 
@@ -48,7 +54,7 @@ public class AuditLogController {
     public List<Map<String, Object>> getLogs(
             @RequestParam(defaultValue = "50") int limit,
             @RequestParam(required = false) String operation) {
-        List<Map<String, Object>> all = auditLogger.getRecentLogs(limit);
+        List<Map<String, Object>> all = auditLogger.getRecentLogs(clampLimit(limit));
         if (operation != null && !operation.isBlank()) {
             return all.stream()
                     .filter(log -> operation.equals(log.get("tool")))
@@ -71,7 +77,8 @@ public class AuditLogController {
             @RequestParam(required = false) String endTime) {
         Instant start = parseInstant(startTime);
         Instant end = parseInstant(endTime);
-        List<AuditLogEntity> entities = auditLogRepository.query(tool, connectionKey, start, end, limit);
+        List<AuditLogEntity> entities =
+                auditLogRepository.query(tool, connectionKey, start, end, clampLimit(limit));
         return entities.stream()
                 .<Map<String, Object>>map(entity -> Map.of(
                     "id", entity.id(),
@@ -85,6 +92,13 @@ public class AuditLogController {
                     "connectionKey", entity.connectionKey()
                 ))
                 .toList();
+    }
+
+    private static int clampLimit(int limit) {
+        if (limit < 1) {
+            return 1;
+        }
+        return Math.min(limit, MAX_LIMIT);
     }
 
     private static Instant parseInstant(String value) {

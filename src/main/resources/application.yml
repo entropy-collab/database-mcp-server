@@ -5,15 +5,16 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,env,beans,mappings,loggers,prometheus
+        # Keep the exposed surface to the operational essentials. env/beans/mappings/loggers/
+        # configprops/threaddump/heapdump leak configuration, credentials and memory contents,
+        # and are only permitAll-safe when entropy.mcp.security.enabled=false.
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always
       probes:
         enabled: true
     metrics:
-      enabled: true
-    loggers:
       enabled: true
 
 logging:
@@ -41,6 +42,16 @@ spring:
 
 entropy:
   mcp:
+    # HTTP-layer authentication (Basic, plus Bearer/JWT when
+    # spring.security.oauth2.resourceserver.jwt.* is configured). When true, /mcp needs an
+    # authenticated principal, /api/** needs ROLE_ADMIN and every actuator endpoint other than
+    # health/info needs authentication. Requires MCP_SECURITY_ADMIN_PASSWORD.
+    #
+    # Do NOT confuse this with entropy.mcp.database.security below: that one is a different
+    # switch that only tunes SQL-level guardrails (allowed-tables / max-joins /
+    # max-subquery-depth) and has no effect on HTTP authentication.
+    security:
+      enabled: false
     database:
       enabled: true
       dialect: generic
@@ -88,6 +99,20 @@ entropy:
         max-cached-connections: 100
         pool-size: 10
         min-idle: 2
+        url-guard:
+          # Which driver and which host a caller may point us at is deployment policy, and this is a
+          # BYOK gateway: both stay unrestricted by default so existing connections keep working.
+          # Empty allowed-drivers means every jdbc: scheme is allowed.
+          allowed-drivers: []
+          # Empty blocked-hosts means no host is blocked. An entry starting with "." or "*." matches
+          # by domain suffix, e.g. ".internal".
+          blocked-hosts: []
+          block-private-networks: false
+          # On by default: this is the real remote-code-execution vector, not the host. Rejects the
+          # JDBC URL parameters that turn a connection string into code execution or local file
+          # access - H2 INIT / RUNSCRIPT, MySQL allowLoadLocalInfile / allowUrlInLocalInfile /
+          # autoDeserialize / socketFactory / queryInterceptors / statementInterceptors, and friends.
+          reject-dangerous-url-parameters: true
       connection-pool:
         connection-timeout: 30s
         idle-timeout: 10m

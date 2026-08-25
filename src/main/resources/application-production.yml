@@ -4,9 +4,11 @@
 
 entropy:
   mcp:
+    # HTTP authentication for /mcp, /api/** and the non-public actuator endpoints.
+    # This is NOT entropy.mcp.database.security (SQL guardrails) - see application.yml.
+    security:
+      enabled: true
     gateway:
       enabled: true
     database:
       dialect: oracle
-      security:
-        enabled: true

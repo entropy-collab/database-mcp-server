@@ -18,10 +18,12 @@ package com.entropy.database.mcp.security;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -77,24 +79,70 @@ public class SecurityConfig {
                 ================================================================""");
     }
 
+    /**
+     * Property names that switch on the OAuth2 resource server. Any one of them being set means
+     * Spring Boot can build a {@code JwtDecoder}, so the JWT filter can be wired safely; with none
+     * of them set, adding {@code oauth2ResourceServer} would fail the context at startup.
+     */
+    private static final String[] JWT_PROPERTIES = {
+        "spring.security.oauth2.resourceserver.jwt.issuer-uri",
+        "spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
+        "spring.security.oauth2.resourceserver.jwt.public-key-location"
+    };
+
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public SecurityFilterChain securityFilterChain(
+            HttpSecurity http,
+            Environment environment,
+            ObjectProvider<JwtAuthenticationConverter> jwtAuthenticationConverter) throws Exception {
         http
             .csrf(csrf -> csrf.disable())
             .sessionManagement(session -> session
                 .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> {
-                auth.requestMatchers("/actuator/health").permitAll()
+                auth.requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                     .requestMatchers("/actuator/info").permitAll();
                 if (securityEnabled) {
-                    auth.requestMatchers("/mcp").authenticated()
+                    // Audit history replays raw SQL, which can contain inlined credentials;
+                    // keep it and the remaining actuator surface behind an authenticated admin.
+                    auth.requestMatchers("/api/**").hasRole("ADMIN")
+                        .requestMatchers("/actuator/**").authenticated()
+                        .requestMatchers("/mcp").authenticated()
                         .anyRequest().denyAll();
                 } else {
                     auth.requestMatchers("/mcp").permitAll()
                         .anyRequest().permitAll();
                 }
             });
+
+        if (securityEnabled) {
+            // Without an authentication mechanism the rules above can never be satisfied.
+            http.httpBasic(basic -> basic.realmName("database-mcp-server"));
+
+            if (jwtResourceServerConfigured(environment)) {
+                JwtAuthenticationConverter converter = jwtAuthenticationConverter.getIfAvailable();
+                http.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {
+                    if (converter != null) {
+                        jwt.jwtAuthenticationConverter(converter);
+                    }
+                }));
+                log.info("MCP HTTP authentication accepts HTTP Basic and Bearer (JWT) credentials.");
+            } else {
+                log.info("MCP HTTP authentication accepts HTTP Basic credentials "
+                    + "(no spring.security.oauth2.resourceserver.jwt.* configured, JWT disabled).");
+            }
+        }
         return http.build();
+    }
+
+    private static boolean jwtResourceServerConfigured(Environment environment) {
+        for (String property : JWT_PROPERTIES) {
+            String value = environment.getProperty(property);
+            if (value != null && !value.isBlank()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Bean
