@@ -79,6 +79,15 @@ public class McpToolExceptionAspect {
             "scanCustomTools",
             "registerSubscription", "unregisterSubscription");
 
+    /**
+     * Error codes that can legitimately mean "the connection argument was not usable". Anything
+     * else — a query failure, a pool outage, a lease expiry — describes work that had already
+     * started and must keep its own classification.
+     */
+    private static final Set<ErrorCode> MISSING_CONNECTION_CODES = Set.of(
+            ErrorCode.PARAMETER_VALIDATION_FAILED,
+            ErrorCode.CONNECTION_NOT_FOUND);
+
     private final DynamicDataSourceManager dataSourceManager;
 
     public McpToolExceptionAspect(DynamicDataSourceManager dataSourceManager) {
@@ -107,9 +116,8 @@ public class McpToolExceptionAspect {
             return result;
         } catch (Throwable t) {
             Throwable enhanced = enhanceWithDialectHint(t, context.connection());
-            // Provide friendly hint when connection parameter is missing
-            if (context.connection() == null || context.connection().isBlank()) {
-                enhanced = enhanceMissingConnectionHint(enhanced, toolName);
+            if (isMissingConnectionArgument(pjp, enhanced)) {
+                enhanced = missingConnectionHint(enhanced);
             }
             // Surface the error classification in the message so the LLM can distinguish an
             // input mistake it can fix from a server-side failure it cannot. The exception is
@@ -181,30 +189,50 @@ public class McpToolExceptionAspect {
     }
 
     /**
-     * Replace connection-related exceptions with a friendly hint when connection param is missing.
+     * Whether this failure really is "the caller omitted the connection argument".
+     *
+     * <p>Two structural conditions, both required. First, the tool must declare a
+     * {@code connection}/{@code connectionName} parameter that this invocation left null or blank —
+     * a tool that was handed a name cannot be missing one. Second, the failure must be a
+     * connection-resolution or parameter-validation failure by <em>type</em>, not by wording.
+     *
+     * <p>The message text is deliberately never consulted. "HikariDataSource has been closed",
+     * "connection refused" and "Failed to acquire connection" all contain the word while describing
+     * a server-side fault; rewriting them as {@code PARAMETER_VALIDATION_FAILED} told the LLM to
+     * retry with a different parameter and hid the real outage.
      */
-    private Throwable enhanceMissingConnectionHint(Throwable t, String toolName) {
-        Throwable root = findRootCause(t);
-        String msg = root.getMessage();
-        if (msg != null && (msg.contains("Connection is required") || msg.contains("connection")
-                || msg.contains("Connection not found"))) {
-            // Get available connections to help the LLM
-            Collection<String> registered = dataSourceManager.listConnectionKeys();
-            String connectionHint;
-            if (registered.isEmpty()) {
-                connectionHint = "No connections registered. Call createNamedConnection first.";
-            } else {
-                String connectionList = registered.stream()
-                        .map(name -> "  - " + name)
-                        .collect(Collectors.joining("\n"));
-                connectionHint = String.format("Available connections:\n%s\nUse one of these names as the connection parameter.", connectionList);
-            }
-            return new McpToolException(
-                    com.entropy.database.mcp.exception.ErrorCode.PARAMETER_VALIDATION_FAILED,
-                    "参数 'connection' 未提供。\n" + connectionHint,
-                    root.getCause());
+    private boolean isMissingConnectionArgument(ProceedingJoinPoint pjp, Throwable t) {
+        if (!ConnectionArgExtractor.isConnectionArgMissing(
+                pjp.getArgs(), (MethodSignature) pjp.getSignature())) {
+            return false;
         }
-        return t;
+        if (t instanceof McpToolException mcpEx) {
+            return MISSING_CONNECTION_CODES.contains(mcpEx.getErrorCode());
+        }
+        // The routing facade reports an unresolvable or unsupplied connection name as a plain
+        // IllegalArgumentException before any datasource is touched; pool and driver failures
+        // arrive as DataAccessException/SQLException instead and must not be caught here.
+        return t instanceof IllegalArgumentException;
+    }
+
+    /**
+     * Replace a connection-resolution failure with the list of names the caller could have passed.
+     */
+    private Throwable missingConnectionHint(Throwable t) {
+        Collection<String> registered = dataSourceManager.listConnectionKeys();
+        String connectionHint;
+        if (registered.isEmpty()) {
+            connectionHint = "No connections registered. Call createNamedConnection first.";
+        } else {
+            String connectionList = registered.stream()
+                    .map(name -> "  - " + name)
+                    .collect(Collectors.joining("\n"));
+            connectionHint = String.format("Available connections:\n%s\nUse one of these names as the connection parameter.", connectionList);
+        }
+        return new McpToolException(
+                ErrorCode.PARAMETER_VALIDATION_FAILED,
+                "参数 'connection' 未提供。\n" + connectionHint,
+                t);
     }
 
     private Throwable findRootCause(Throwable t) {

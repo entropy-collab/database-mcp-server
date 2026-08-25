@@ -17,7 +17,7 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
@@ -31,9 +31,9 @@ import java.util.Map;
 @Component
 public class SchemaTools extends McpToolBase {
 
-    private final RoutingDatabaseFacade routingFacade;
+    private final DatabaseOperations routingFacade;
 
-    public SchemaTools(RoutingDatabaseFacade routingFacade) {
+    public SchemaTools(DatabaseOperations routingFacade) {
         this.routingFacade = routingFacade;
     }
 

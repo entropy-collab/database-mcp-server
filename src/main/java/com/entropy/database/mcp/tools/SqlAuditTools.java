@@ -25,6 +25,7 @@ import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
 
@@ -104,7 +105,10 @@ public class SqlAuditTools extends McpToolBase {
     private Instant parseInstant(String value, String paramName) {
         try {
             return Instant.parse(value);
-        } catch (IllegalArgumentException e) {
+        } catch (DateTimeParseException e) {
+            // Instant.parse signals a bad literal with DateTimeParseException, not
+            // IllegalArgumentException, so the previous catch never fired and a malformed timestamp
+            // surfaced as SYSTEM_ERROR instead of a parameter the caller can correct.
             throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid " + paramName + ": use ISO-8601 (e.g., 2024-01-01T00:00:00Z)");
         }
     }

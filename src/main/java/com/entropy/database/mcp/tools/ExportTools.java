@@ -18,8 +18,9 @@ package com.entropy.database.mcp.tools;
 import com.entropy.database.mcp.config.QueryConfig;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.util.QueryUtils;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
@@ -36,10 +37,10 @@ public class ExportTools extends McpToolBase {
     private static final int MAX_EXPORT_LIMIT = 10000;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    private final RoutingDatabaseFacade routingFacade;
+    private final DatabaseOperations routingFacade;
     private final int maxExportRows;
 
-    public ExportTools(RoutingDatabaseFacade routingFacade, QueryConfig queryConfig) {
+    public ExportTools(DatabaseOperations routingFacade, QueryConfig queryConfig) {
         this.routingFacade = routingFacade;
         this.maxExportRows = queryConfig != null ? queryConfig.maxExportRows() : 500;
     }
@@ -79,9 +80,12 @@ public class ExportTools extends McpToolBase {
                     "rows", result.rows(),
                     "rowCount", result.rows().size()
             ));
-        } catch (Exception e) {
-            log.warn("exportJson failed: {}", e.getMessage(), e);
-            throw new McpToolException(ErrorCode.SYSTEM_ERROR, "JSON export failed");
+        } catch (JsonProcessingException e) {
+            // Serialisation is the only failure this block can still own; the query above already
+            // reports its own errors. Narrowed because a checked exception is the only reason a
+            // catch is needed here at all — safeExecute cannot wrap a String-returning tool.
+            log.warn("exportJson serialisation failed for {} columns: {}", result.columns().size(), e.getMessage(), e);
+            throw new McpToolException(ErrorCode.SYSTEM_ERROR, "JSON export failed", e);
         }
     }
 }

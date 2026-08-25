@@ -15,8 +15,9 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.util.ConnectionUtils;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
@@ -37,9 +38,9 @@ public class ResourceTools {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
 
-    private final RoutingDatabaseFacade routingFacade;
+    private final DatabaseOperations routingFacade;
 
-    public ResourceTools(RoutingDatabaseFacade routingFacade) {
+    public ResourceTools(DatabaseOperations routingFacade) {
         this.routingFacade = routingFacade;
     }
 
@@ -87,8 +88,11 @@ public class ResourceTools {
                             json
                     )
             ));
-        } catch (Exception e) {
-            log.warn("Failed to list tables", e);
+        } catch (RuntimeException | JsonProcessingException e) {
+            // A resource read must always answer with a resource; the error travels in the payload
+            // instead of as an exception. Narrowed to the two families that can actually occur —
+            // the facade's runtime failures and serialisation — so nothing else is silently absorbed.
+            log.warn("Failed to list tables for connection '{}'", connection, e);
             return new McpSchema.ReadResourceResult(List.of(
                     new McpSchema.TextResourceContents(
                             "schema://tables/" + connection,

@@ -15,7 +15,7 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
@@ -28,9 +28,9 @@ import java.util.Map;
 @Component
 public class CacheAdminTools extends McpToolBase {
 
-    private final RoutingDatabaseFacade routingFacade;
+    private final DatabaseOperations routingFacade;
 
-    public CacheAdminTools(RoutingDatabaseFacade routingFacade) {
+    public CacheAdminTools(DatabaseOperations routingFacade) {
         this.routingFacade = routingFacade;
     }
 

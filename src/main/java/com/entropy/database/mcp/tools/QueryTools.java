@@ -19,7 +19,7 @@ import com.entropy.database.mcp.config.QueryConfig;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.util.QueryUtils;
 import org.springframework.ai.mcp.annotation.McpTool;
@@ -37,11 +37,11 @@ import java.util.Map;
 @Component
 public class QueryTools extends McpToolBase {
 
-    private final RoutingDatabaseFacade routingFacade;
+    private final DatabaseOperations routingFacade;
     private final SqlValidator sqlValidator;
     private final int maxExportRows;
 
-    public QueryTools(RoutingDatabaseFacade routingFacade,
+    public QueryTools(DatabaseOperations routingFacade,
                       SqlValidator sqlValidator,
                       QueryConfig queryConfig) {
         this.routingFacade = routingFacade;

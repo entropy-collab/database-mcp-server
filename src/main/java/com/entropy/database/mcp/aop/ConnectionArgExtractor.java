@@ -75,6 +75,41 @@ public final class ConnectionArgExtractor {
         return extractConnectionName(args);
     }
 
+    /**
+     * Whether the invoked method declares a connection-name parameter that the caller left null,
+     * absent or blank.
+     *
+     * <p>Structural counterpart to sniffing exception messages for the word "connection": a tool
+     * that never declares the parameter cannot be missing it, and a tool that was given one is not
+     * missing it no matter what the failure says.
+     *
+     * @return false when the method declares no connection parameter at all
+     */
+    public static boolean isConnectionArgMissing(Object[] args, MethodSignature signature) {
+        if (signature == null) {
+            return false;
+        }
+        Parameter[] parameters = signature.getMethod().getParameters();
+        for (int i = 0; i < parameters.length; i++) {
+            if (!isConnectionParameter(parameters[i])) {
+                continue;
+            }
+            if (args == null || i >= args.length) {
+                return true;
+            }
+            return !(args[i] instanceof String s) || s.isBlank();
+        }
+        return false;
+    }
+
+    private static boolean isConnectionParameter(Parameter param) {
+        if (!param.isNamePresent()) {
+            return false;
+        }
+        String name = param.getName();
+        return "connection".equalsIgnoreCase(name) || "connectionName".equalsIgnoreCase(name);
+    }
+
     private static boolean isLikelyConnectionName(String s) {
         if (s.isBlank() || s.length() > MAX_NAME_LENGTH) {
             return false;
