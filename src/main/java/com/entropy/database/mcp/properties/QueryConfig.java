@@ -13,13 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.config;
+package com.entropy.database.mcp.properties;
 
 /**
- * ETL-related configuration.
+ * Query-related configuration.
  */
-public record EtlConfig(
-        int threadPoolSize,
-        int batchSize
+public record QueryConfig(
+        int maxRows,
+        int maxResultRows,
+        int fetchSize,
+        int maxExportRows,
+        int queryTimeoutSeconds
 ) {
+    public QueryConfig(int maxRows, int maxResultRows, int fetchSize, int maxExportRows) {
+        this(maxRows, maxResultRows, fetchSize, maxExportRows, 30);
+    }
 }

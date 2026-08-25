@@ -23,7 +23,7 @@ import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitorImpl;
 import com.entropy.database.mcp.properties.ByokProperties;
-import com.entropy.database.mcp.config.CacheConfig;
+import com.entropy.database.mcp.properties.CacheConfig;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.byok.ByokWriteRepository;
 import com.entropy.database.mcp.repository.DatabaseReadRepository;

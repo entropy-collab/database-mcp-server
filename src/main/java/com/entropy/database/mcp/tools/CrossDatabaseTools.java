@@ -17,9 +17,9 @@ package com.entropy.database.mcp.tools;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.config.QueryConfig;
 import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.gateway.FederatedQueryGateway;
+import com.entropy.database.mcp.properties.QueryConfig;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.stream.SseStreamManager;
 import com.entropy.database.mcp.util.ValidationUtils;

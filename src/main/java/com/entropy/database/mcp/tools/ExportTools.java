@@ -15,10 +15,10 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.config.QueryConfig;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.DatabaseOperations;
+import com.entropy.database.mcp.properties.QueryConfig;
 import com.entropy.database.mcp.util.QueryUtils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;

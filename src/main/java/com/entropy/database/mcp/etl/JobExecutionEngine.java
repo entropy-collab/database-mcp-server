@@ -17,9 +17,9 @@ package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
-import com.entropy.database.mcp.config.EtlConfig;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
+import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

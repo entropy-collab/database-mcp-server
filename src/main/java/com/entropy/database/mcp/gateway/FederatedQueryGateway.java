@@ -21,7 +21,7 @@ import com.entropy.database.mcp.exception.McpFederatedException;
 import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.security.SqlValidator;
-import com.entropy.database.mcp.config.QueryConfig;
+import com.entropy.database.mcp.properties.QueryConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
