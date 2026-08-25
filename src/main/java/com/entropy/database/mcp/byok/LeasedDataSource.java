@@ -134,7 +134,7 @@ public class LeasedDataSource {
             return;
         }
         try {
-            context.close();
+            context.closePool();
             log.debug("Closed leased datasource: {}", key);
         } catch (Exception e) {
             log.warn("Failed to close leased datasource: {}", key, e);

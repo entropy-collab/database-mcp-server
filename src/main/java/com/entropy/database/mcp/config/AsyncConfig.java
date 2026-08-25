@@ -27,6 +27,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.Arrays;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ThreadPoolExecutor;
 
 /**
  * Async configuration with dedicated thread pools.
@@ -49,6 +50,33 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setThreadNamePrefix("mcp-async-");
         executor.setAllowCoreThreadTimeOut(true);
         executor.setKeepAliveSeconds(60);
+        // Audit and compliance logging run on this pool. The default AbortPolicy would drop
+        // those tasks silently once the queue fills, producing gaps in the audit trail with no
+        // trace. CallerRuns degrades latency instead of losing records.
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
+
+    /**
+     * Dedicated pool for ETL job execution.
+     *
+     * <p>Kept separate from {@code taskExecutor} on purpose: an ETL job can run for minutes and
+     * would otherwise occupy every worker plus the queue, starving the short-lived
+     * {@code @Async} audit writes that share the pool.
+     */
+    @Bean(name = "etlTaskExecutor")
+    public ThreadPoolTaskExecutor etlTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(50);
+        executor.setThreadNamePrefix("mcp-etl-");
+        executor.setKeepAliveSeconds(120);
+        // ETL submission must fail loudly rather than block the MCP request thread.
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
         executor.initialize();
         return executor;
     }

@@ -191,7 +191,13 @@ public class MultiSessionContext {
 
     /**
      * Purge all expired entries across all sessions.
+     *
+     * <p>Scheduled rather than relying on the lazy check in {@link #doGet}: a session that is
+     * written to and never read again would otherwise retain its payload for the process
+     * lifetime, since nothing ever evaluates its expiry.
      */
+    @org.springframework.scheduling.annotation.Scheduled(
+            fixedRateString = "${entropy.mcp.housekeeping.prune-interval:600000}")
     public void purgeExpired() {
         long now = System.currentTimeMillis();
         store.values().forEach(nsMap ->

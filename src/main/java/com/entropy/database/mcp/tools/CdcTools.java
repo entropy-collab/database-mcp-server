@@ -44,7 +44,8 @@ public class CdcTools extends McpToolBase {
         this.props = props;
     }
 
-    @McpTool(description = "检查指定连接是否支持 CDC（Flashback/binary log/pglogical 等）")
+    @McpTool(description = "检查指定连接是否支持 CDC（Flashback/binary log/pglogical 等）",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> checkCdcSupport(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
@@ -57,7 +58,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "读取指定表的 CDC 变更事件：INSERT/UPDATE/DELETE 操作记录，支持从指定 LSN 开始拉取")
+    @McpTool(description = "读取指定表的 CDC 变更事件：INSERT/UPDATE/DELETE 操作记录，支持从指定 LSN 开始拉取",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> readChanges(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "Schema 名称") String schema,
@@ -87,7 +89,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "获取数据库当前的 LSN/SCN/binlog position，用于 CDC 断点续读")
+    @McpTool(description = "获取数据库当前的 LSN/SCN/binlog position，用于 CDC 断点续读",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getCurrentLsn(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
@@ -97,7 +100,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "创建镜像表：将源表结构和数据复制到目标表，用于 CDC 实时同步目标库")
+    @McpTool(description = "创建镜像表：将源表结构和数据复制到目标表，用于 CDC 实时同步目标库",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> createMirrorTable(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "源 Schema") String sourceSchema,
@@ -115,7 +119,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "注册 CDC 订阅：指定监听哪些表/模式的变更事件（INSERT/UPDATE/DELETE）")
+    @McpTool(description = "注册 CDC 订阅：指定监听哪些表/模式的变更事件（INSERT/UPDATE/DELETE）",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> registerSubscription(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "订阅名称（唯一标识）") String name,
@@ -140,7 +145,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "列出当前所有 CDC 订阅及其状态")
+    @McpTool(description = "列出当前所有 CDC 订阅及其状态",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listSubscriptions(
             @McpToolParam(description = "连接名称（可选，不传返回所有连接）") String connection) {
         return safeExecute(() -> {
@@ -162,7 +168,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "注销指定的 CDC 订阅")
+    @McpTool(description = "注销指定的 CDC 订阅",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> unregisterSubscription(
             @McpToolParam(description = "订阅名称") String name) {
         return safeExecute(() -> {
@@ -171,7 +178,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "查看 CDC 引擎运行状态：LSN、已捕获事件数、活跃订阅数等")
+    @McpTool(description = "查看 CDC 引擎运行状态：LSN、已捕获事件数、活跃订阅数等",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getCdcStatus(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
@@ -191,7 +199,8 @@ public class CdcTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "查看 CDC 模块配置参数")
+    @McpTool(description = "查看 CDC 模块配置参数",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getCdcConfig() {
         return success(Map.of(
                 "enabled", props.enabled(),

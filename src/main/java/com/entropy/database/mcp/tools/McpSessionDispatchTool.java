@@ -56,7 +56,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         this.multiSessionContext = multiSessionContext;
     }
 
-    @McpTool(description = "Store data in the current MCP session context for cross-tool sharing")
+    @McpTool(description = "Store data in the current MCP session context for cross-tool sharing",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> sessionStore(
             @McpToolParam(description = "Namespace: 'queries', 'etl', 'preferences', or 'scratch'") String namespace,
             @McpToolParam(description = "Key within the namespace") String key,
@@ -68,7 +69,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Retrieve data from the current MCP session context")
+    @McpTool(description = "Retrieve data from the current MCP session context",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> sessionGet(
             @McpToolParam(description = "Namespace to query") String namespace,
             @McpToolParam(description = "Key to retrieve") String key) {
@@ -81,7 +83,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List all keys in a session namespace")
+    @McpTool(description = "List all keys in a session namespace",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> sessionKeys(
             @McpToolParam(description = "Namespace to list keys for") String namespace) {
         return safeExecute(() -> {
@@ -90,7 +93,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Remove a value from the session context")
+    @McpTool(description = "Remove a value from the session context",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> sessionRemove(
             @McpToolParam(description = "Namespace") String namespace,
             @McpToolParam(description = "Key to remove") String key) {
@@ -100,7 +104,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Purge expired entries from all session namespaces")
+    @McpTool(description = "Purge expired entries from all session namespaces",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> sessionPurge() {
         return safeExecute(() -> {
             multiSessionContext.purgeExpired();
@@ -108,7 +113,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Invoke a custom tool registered via CustomToolRegistrar")
+    @McpTool(description = "Invoke a custom tool registered via CustomToolRegistrar",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = true))
     public Map<String, Object> invokeCustomTool(
             @McpToolParam(description = "Name of the custom tool to invoke") String toolName,
             @McpToolParam(description = "Tool arguments as JSON object", required = false) Map<String, Object> args) {
@@ -119,7 +125,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List all registered custom tools")
+    @McpTool(description = "List all registered custom tools",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listCustomTools() {
         return safeExecute(() -> {
             Set<String> tools = customToolRegistrar.listTools();
@@ -137,7 +144,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Scan a package for @McpTool annotated classes and register them as custom tools")
+    @McpTool(description = "Scan a package for @McpTool annotated classes and register them as custom tools",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = true, openWorldHint = true))
     public Map<String, Object> scanCustomTools(
             @McpToolParam(description = "Java package to scan (e.g., 'com.example.mytools')") String basePackage) {
         return safeExecute(() -> {
@@ -148,7 +156,8 @@ public class McpSessionDispatchTool extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get current session metadata (correlation ID, elapsed time, active tools)")
+    @McpTool(description = "Get current session metadata (correlation ID, elapsed time, active tools)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getSessionInfo() {
         return safeExecute(() -> {
             McpToolContext ctx = McpToolContext.current().orElse(null);

@@ -16,9 +16,7 @@ entropy:
       ddl:
         allowed: true
       security:
-        enabled: false
         allowed-tables: []
-        enable-parameterized-only: true
       masking:
         column-patterns:
           - email

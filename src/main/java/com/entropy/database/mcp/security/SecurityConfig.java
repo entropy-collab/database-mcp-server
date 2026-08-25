@@ -15,6 +15,9 @@
  */
 package com.entropy.database.mcp.security;
 
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -40,11 +43,39 @@ import org.springframework.security.web.SecurityFilterChain;
 @EnableWebSecurity
 public class SecurityConfig {
 
+    private static final Logger log = LoggerFactory.getLogger(SecurityConfig.class);
+
     @Value("${entropy.mcp.security.enabled:false}")
     private boolean securityEnabled;
 
     @Value("${entropy.mcp.security.admin-username:admin}")
     private String adminUsername;
+
+    /**
+     * Make the unauthenticated deployment mode impossible to run into by accident.
+     *
+     * <p>With {@code entropy.mcp.security.enabled=false} the {@code /mcp} endpoint is open to
+     * anyone who can reach the port, and every registered BYOK connection — including any with
+     * DDL rights — is reachable through it. That is a legitimate choice for a laptop, and a
+     * serious exposure anywhere else, so it is stated explicitly at startup instead of being
+     * inferable only from the config file.
+     */
+    @PostConstruct
+    void warnIfUnauthenticated() {
+        if (securityEnabled) {
+            log.info("MCP HTTP authentication is ENABLED; /mcp requires an authenticated principal.");
+            return;
+        }
+        log.warn("""
+                ================================================================
+                MCP HTTP authentication is DISABLED (entropy.mcp.security.enabled=false).
+                /mcp accepts unauthenticated requests, which can execute queries,
+                DDL and ETL writes against every registered BYOK connection.
+                Only run this way on a host that is not reachable by others.
+                To enable: set entropy.mcp.security.enabled=true and provide
+                MCP_SECURITY_ADMIN_PASSWORD.
+                ================================================================""");
+    }
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {

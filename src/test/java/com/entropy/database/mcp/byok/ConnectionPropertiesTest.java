@@ -127,12 +127,39 @@ class ConnectionPropertiesTest {
     }
 
     @Test
-    void getCacheKeyCombinesJdbcUrlUsernameAndDialect() {
+    void getCacheKeyCombinesJdbcUrlUsernameDialectCredentialAndReadonly() {
         ConnectionProperties props = new ConnectionProperties(
                 "jdbc:oracle:thin:@//localhost/test", "user", "pass", null, null, null
         );
 
-        assertThat(props.getCacheKey()).isEqualTo("jdbc:oracle:thin:@//localhost/test|user|oracle");
+        assertThat(props.getCacheKey())
+                .startsWith("jdbc:oracle:thin:@//localhost/test|user|oracle|")
+                .endsWith("|false")
+                .doesNotContain("pass");
+    }
+
+    @Test
+    void getCacheKeyDiffersWhenOnlyPasswordDiffers() {
+        ConnectionProperties correct = new ConnectionProperties(
+                "jdbc:oracle:thin:@//localhost/test", "user", "right", null, null, null
+        );
+        ConnectionProperties wrong = new ConnectionProperties(
+                "jdbc:oracle:thin:@//localhost/test", "user", "wrong", null, null, null
+        );
+
+        assertThat(correct.getCacheKey()).isNotEqualTo(wrong.getCacheKey());
+    }
+
+    @Test
+    void getCacheKeyDiffersWhenOnlyReadonlyDiffers() {
+        ConnectionProperties writable = new ConnectionProperties(
+                "jdbc:oracle:thin:@//localhost/test", "user", "pass", null, null, false
+        );
+        ConnectionProperties readonly = new ConnectionProperties(
+                "jdbc:oracle:thin:@//localhost/test", "user", "pass", null, null, true
+        );
+
+        assertThat(writable.getCacheKey()).isNotEqualTo(readonly.getCacheKey());
     }
 
     @ParameterizedTest

@@ -153,8 +153,8 @@ public class ByokDataSourceFactory {
         QueryAuditLogger auditLogger = new QueryAuditLoggerImpl(auditRepo, dbProps, sqlAuditService.get());
         DatabaseReadRepository readRepo = new DatabaseReadRepository(
                 jdbcTemplate, dialect, validator, cache, masking,
-                DatabaseReadRepository.DEFAULT_MAX_ROWS,
-                DatabaseReadRepository.DEFAULT_MAX_RESULT_ROWS,
+                dbProps.query().maxRows(),
+                dbProps.query().maxResultRows(),
                 fetchSize, queryTimeoutSeconds, null);
         ByokWriteRepository writeRepo = new ByokWriteRepository(jdbcTemplate, validator);
         ExecutionPlanRepository executionPlanRepo = new ExecutionPlanRepositoryImpl(

@@ -39,7 +39,8 @@ public class ConnectionAdminTools extends McpToolBase {
         this.dataSourceManager = dataSourceManager;
     }
 
-    @McpTool(description = "List all registered datasource connections")
+    @McpTool(description = "List all registered datasource connections",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listConnections() {
         return safeExecute(() -> {
             Collection<String> keys = dataSourceManager.listConnectionKeys();
@@ -67,7 +68,8 @@ public class ConnectionAdminTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get detailed metadata for a specific connection")
+    @McpTool(description = "Get detailed metadata for a specific connection",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> describeConnection(
             @McpToolParam(description = "Connection key") String connectionName) {
         return safeExecute(() -> {
@@ -92,7 +94,8 @@ public class ConnectionAdminTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get connection count summary (active and total registered)")
+    @McpTool(description = "Get connection count summary (active and total registered)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getConnectionCount() {
         return safeExecute(() -> success(Map.of(
                 "activeConnections", dataSourceManager.getActiveConnectionCount(),

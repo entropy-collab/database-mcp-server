@@ -92,7 +92,7 @@ public class ToolWhitelistAspect {
             log.debug("Tool '{}' filtered out by intent router (intent={}, confidence={})",
                     toolName, result.get("intent"), confidence);
             throw new com.entropy.database.mcp.exception.McpToolException(
-                    com.entropy.database.mcp.exception.ErrorCode.SYSTEM_ERROR,
+                    com.entropy.database.mcp.exception.ErrorCode.TOOL_FILTERED,
                     "Tool '" + toolName + "' is not recommended for this intent. "
                             + "Recommended tools: " + recommendedTools
                             + ". Consider using one of: " + String.join(", ", recommendedTools));

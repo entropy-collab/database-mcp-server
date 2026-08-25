@@ -251,8 +251,6 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         } catch (Exception e) {
             log.warn("Failed to fetch edges for {}: {}", tableName, e.getMessage(), e);
             return List.of();
-        } finally {
-            ctx.close();
         }
     }
 
@@ -266,8 +264,6 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         } catch (Exception e) {
             log.warn("Failed to list tables: {}", e.getMessage(), e);
             return List.of();
-        } finally {
-            ctx.close();
         }
     }
 

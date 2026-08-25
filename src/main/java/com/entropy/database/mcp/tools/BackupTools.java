@@ -47,7 +47,8 @@ public class BackupTools extends McpToolBase {
         this.backupProps = backupProps;
     }
 
-    @McpTool(description = "Full backup of a table's data as INSERT statements")
+    @McpTool(description = "Full backup of a table's data as INSERT statements",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> backupTable(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Table name to backup") String tableName,
@@ -64,28 +65,32 @@ public class BackupTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Backup table schema definition as DDL statements")
+    @McpTool(description = "Backup table schema definition as DDL statements",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> backupSchema(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Table name to backup schema for") String tableName) {
         return safeExecute(() -> backupService.backupSchema(tableName, connectionName));
     }
 
-    @McpTool(description = "Restore a table from a backup by replaying the saved SQL script in a transaction")
+    @McpTool(description = "Restore a table from a backup by replaying the saved SQL script in a transaction",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> restoreBackup(
             @McpToolParam(description = "Backup ID to restore from") String backupId,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName) {
         return safeExecute(() -> backupService.restoreBackup(backupId, connectionName));
     }
 
-    @McpTool(description = "Quick restore: truncate target table then load data from backup")
+    @McpTool(description = "Quick restore: truncate target table then load data from backup",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> quickRestore(
             @McpToolParam(description = "Backup ID to restore from") String backupId,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName) {
         return safeExecute(() -> backupService.quickRestore(backupId, connectionName));
     }
 
-    @McpTool(description = "List backup records with optional filters")
+    @McpTool(description = "List backup records with optional filters",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listBackups(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Filter by table name", required = false) String tableName,
@@ -112,7 +117,8 @@ public class BackupTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get a single backup record by ID")
+    @McpTool(description = "Get a single backup record by ID",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getBackup(@McpToolParam(description = "Backup ID") String backupId) {
         return safeExecute(() -> {
             BackupMetadata meta = metadataRepository.get(backupId);
@@ -121,7 +127,8 @@ public class BackupTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Delete a backup record and its metadata")
+    @McpTool(description = "Delete a backup record and its metadata",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> deleteBackup(@McpToolParam(description = "Backup ID to delete") String backupId) {
         return safeExecute(() -> {
             boolean deleted = metadataRepository.delete(backupId);
@@ -129,7 +136,8 @@ public class BackupTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Clean up expired backup records older than retention period")
+    @McpTool(description = "Clean up expired backup records older than retention period",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> cleanupBackups(
             @McpToolParam(description = "Retention days (defaults to config)", required = false) Integer retentionDays) {
         return safeExecute(() -> {
@@ -139,7 +147,8 @@ public class BackupTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Show current backup configuration")
+    @McpTool(description = "Show current backup configuration",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getBackupConfig() {
         return safeExecute(() -> success(Map.of(
                 "enabled", backupProps.enabled(),

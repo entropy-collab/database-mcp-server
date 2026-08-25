@@ -17,6 +17,11 @@ package com.entropy.database.mcp.byok;
 
 import com.entropy.database.mcp.dialect.DialectUtils;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+
 /**
  * BYOK connection properties.
  * Immutable DTO for database connection information provided by the caller.
@@ -72,8 +77,34 @@ public record ConnectionProperties(
         }
     }
 
+    /**
+     * Content fingerprint used to deduplicate physically identical connections.
+     *
+     * <p>The credential digest MUST be part of the fingerprint. Without it, a caller who knows
+     * only {@code jdbcUrl + username} would be treated as an alias of an existing pool and would
+     * inherit that pool's already-authenticated connections without ever presenting a valid
+     * password — an authentication bypass.
+     *
+     * <p>{@code readonly} is included as well: two logical connections that differ only in their
+     * read-only intent must not share a pool.
+     */
     public String getCacheKey() {
-        return normalizeJdbcUrl(jdbcUrl) + "|" + username + "|" + dialect;
+        return normalizeJdbcUrl(jdbcUrl) + "|" + username + "|" + dialect
+                + "|" + credentialDigest() + "|" + readonly;
+    }
+
+    /**
+     * SHA-256 digest of the password, so the fingerprint never carries the secret in clear text.
+     */
+    private String credentialDigest() {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest((password == null ? "" : password).getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is mandated by the JLS platform requirements; unreachable in practice.
+            throw new IllegalStateException("SHA-256 digest unavailable", e);
+        }
     }
 
     /**

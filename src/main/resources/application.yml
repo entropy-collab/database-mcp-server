@@ -31,7 +31,7 @@ spring:
     mcp:
       server:
         name: database-mcp-server
-        version: 0.1.0
+        version: 0.1.1
         protocol: STATELESS
         tool-callback:
           auto-detect: true
@@ -68,9 +68,9 @@ entropy:
       ddl:
         allowed: true
       security:
-        enabled: false
+        # SQL-level guardrails only. HTTP authentication is entropy.mcp.security.enabled.
+        # Empty allowed-tables means no table restriction.
         allowed-tables: []
-        enable-parameterized-only: true
         max-joins: 10
         max-subquery-depth: 5
       etl:
@@ -82,8 +82,8 @@ entropy:
         metadata-ttl: 5m
         max-warm-size: 10
       byok:
-        lease-duration: 2h
-        max-lifetime: 4h
+        lease-duration: 1h
+        max-lifetime: 2h
         cleanup-interval: 5m
         max-cached-connections: 100
         pool-size: 10

@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
@@ -46,6 +47,9 @@ class McpServerIntegrationTest {
 
     @LocalServerPort
     private int port;
+
+    @Value("${spring.ai.mcp.server.version}")
+    private String configuredServerVersion;
 
     private RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -100,7 +104,7 @@ class McpServerIntegrationTest {
 
         assertThat(response).isNotNull();
         assertThat(response).contains("\"database-mcp-server\"");
-        assertThat(response).contains("\"0.1.0\"");
+        assertThat(response).contains("\"" + configuredServerVersion + "\"");
         assertThat(response).contains("\"capabilities\"");
     }
 

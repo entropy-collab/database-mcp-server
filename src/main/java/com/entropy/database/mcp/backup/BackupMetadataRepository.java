@@ -15,25 +15,39 @@
  */
 package com.entropy.database.mcp.backup;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * In-memory backup metadata store with auto-cleanup of expired records.
+ *
+ * <p>Each record retains the backup's full SQL script, so this store is the fastest route to an
+ * OutOfMemoryError in a long-running process. It is therefore bounded by both count and age;
+ * eviction is silent, and {@link #get} returning {@code null} is the expected signal that a
+ * backup is no longer available for restore.
  */
 @Repository
 public class BackupMetadataRepository {
 
     private static final Logger log = LoggerFactory.getLogger(BackupMetadataRepository.class);
 
-    private final ConcurrentHashMap<String, BackupMetadata> store = new ConcurrentHashMap<>();
+    private static final int MAX_RECORDS = 200;
+    private static final Duration MAX_RETENTION = Duration.ofDays(7);
+
+    private final ConcurrentMap<String, BackupMetadata> store = Caffeine.newBuilder()
+            .maximumSize(MAX_RECORDS)
+            .expireAfterWrite(MAX_RETENTION)
+            .<String, BackupMetadata>build()
+            .asMap();
 
     public String save(BackupMetadata metadata) {
         String id = metadata.backupId() != null ? metadata.backupId() : UUID.randomUUID().toString();

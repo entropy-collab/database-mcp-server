@@ -27,6 +27,7 @@ import org.springframework.beans.factory.DisposableBean;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
@@ -51,8 +52,17 @@ public class JobExecutionEngine implements DisposableBean {
     private final DynamicDataSourceManager dataSourceManager;
     private final SqlValidator sqlValidator;
 
-    // Active job executions (in-memory for demo; in production use a persistent store)
-    private final Map<String, JobExecution> executions = new ConcurrentHashMap<>();
+    // Job executions live in process memory only — they are lost on restart. Bounded so a long
+    // running server cannot accumulate executions (each one retains its full step state) until
+    // it runs out of heap.
+    private static final int MAX_TRACKED_EXECUTIONS = 500;
+    private static final Duration EXECUTION_RETENTION = Duration.ofHours(24);
+    private final Map<String, JobExecution> executions = com.github.benmanes.caffeine.cache.Caffeine
+            .newBuilder()
+            .maximumSize(MAX_TRACKED_EXECUTIONS)
+            .expireAfterWrite(EXECUTION_RETENTION)
+            .<String, JobExecution>build()
+            .asMap();
 
     private final TaskExecutor taskExecutor;
     private final EtlConfig etlConfig;
@@ -434,17 +444,16 @@ public class JobExecutionEngine implements DisposableBean {
                 .toList();
     }
 
+    /**
+     * Record a step's new state on the live execution.
+     *
+     * <p>Mutates {@code execution.stepStates()} in place rather than rebuilding the
+     * {@link JobExecution}. The previous copy-on-write version reassigned its own parameter, so
+     * the caller's {@code execution} reference kept the stale map — {@code getFailedStepIds()} in
+     * {@link #execute} then saw no failures and reported a job with failed steps as COMPLETED.
+     */
     private void updateStepState(JobExecution execution, String stepId, StepExecutionState newState) {
-        Map<String, StepExecutionState> newStates = new ConcurrentHashMap<>(execution.stepStates());
-        newStates.put(stepId, newState);
-        execution = new JobExecution(
-                execution.jobId(),
-                execution.jobName(),
-                execution.status(),
-                execution.startedAt(),
-                execution.completedAt(),
-                newStates
-        );
+        execution.stepStates().put(stepId, newState);
         executions.put(execution.jobId(), execution);
     }
 

@@ -134,7 +134,17 @@ public class ByokDataSourceContext {
         // This method is a no-op for backward compatibility.
     }
 
-    public void close() {
+    /**
+     * Destroy the underlying HikariCP pool.
+     *
+     * <p>Deliberately package-private: the pool's lifetime is owned by
+     * {@link DynamicDataSourceManager} through {@link LeasedDataSource}. Callers that merely
+     * finished using a context must NOT close it — doing so tears down the shared pool for
+     * every other in-flight caller of the same BYOK connection, and leaves the lease cache
+     * holding a dead context until the lease expires. Simply drop the reference instead;
+     * JDBC connections are returned to the pool by the JdbcTemplate / try-with-resources.
+     */
+    void closePool() {
         if (dataSource instanceof AutoCloseable closeable) {
             try {
                 closeable.close();

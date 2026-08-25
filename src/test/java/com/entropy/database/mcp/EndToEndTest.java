@@ -185,6 +185,31 @@ class EndToEndTest {
     }
 
     @Test
+    @DisplayName("tools/list should advertise MCP tool annotations")
+    void testToolsListAnnotations() throws Exception {
+        String response = postMcp("tools/list", null);
+        JsonNode tools = parseResult(response).get("result").get("tools");
+
+        JsonNode readOnlyTool = findTool(tools, "executeQuery");
+        assertThat(readOnlyTool.get("annotations")).isNotNull();
+        assertThat(readOnlyTool.get("annotations").get("readOnlyHint").asBoolean()).isTrue();
+
+        JsonNode mutatingTool = findTool(tools, "executeDdl");
+        assertThat(mutatingTool.get("annotations")).isNotNull();
+        assertThat(mutatingTool.get("annotations").get("readOnlyHint").asBoolean()).isFalse();
+        assertThat(mutatingTool.get("annotations").get("destructiveHint").asBoolean()).isTrue();
+    }
+
+    private JsonNode findTool(JsonNode tools, String name) {
+        for (JsonNode tool : tools) {
+            if (name.equals(tool.get("name").asText())) {
+                return tool;
+            }
+        }
+        throw new AssertionError("Tool not found in tools/list: " + name);
+    }
+
+    @Test
     @DisplayName("tools/call listTables should return test tables")
     void testListTables() throws Exception {
         String response = postToolCall("listTables", Map.of("schema", "PUBLIC", "connection", "primary"));

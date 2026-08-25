@@ -34,14 +34,16 @@ public class CacheAdminTools extends McpToolBase {
         this.routingFacade = routingFacade;
     }
 
-    @McpTool(description = "Clear all cached query results and metadata")
+    @McpTool(description = "Clear all cached query results and metadata",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> clearCache(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         routingFacade.clearCache(connection);
         return success(Map.of("status", "Cache cleared successfully"));
     }
 
-    @McpTool(description = "Get database query statistics and cache metrics")
+    @McpTool(description = "Get database query statistics and cache metrics",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getStatistics(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.getStatistics(connection);

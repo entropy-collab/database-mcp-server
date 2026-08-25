@@ -78,7 +78,8 @@ public class CrossDatabaseTools extends McpToolBase {
             - 数据已分布在多个数据库，无法直接连接远程库时
             
             语法：SQL 中使用 @db_link 语法引用远程表（如 t@my_db_link）
-            """)
+            """,
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> queryCrossDatabaseJoin(
             @McpToolParam(description = "SQL query with @db_link syntax") String sql,
             @McpToolParam(description = "Maximum rows to return") Integer maxRows,
@@ -105,7 +106,8 @@ public class CrossDatabaseTools extends McpToolBase {
             - 配合 queryCrossDatabaseJoin 构建跨库查询
             
             owner 参数：传 'USER' 查当前登录用户，或传入具体 Schema 名（大写）
-            """)
+            """,
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public List<Map<String, Object>> listRemoteTables(
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Remote schema owner (use 'USER' for current user)") String owner,
@@ -128,7 +130,8 @@ public class CrossDatabaseTools extends McpToolBase {
         }
     }
 
-    @McpTool(description = "Describe a remote table's columns via DB Link")
+    @McpTool(description = "Describe a remote table's columns via DB Link",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public List<Map<String, Object>> describeRemoteTable(
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Remote table name") String remoteTable,
@@ -147,7 +150,8 @@ public class CrossDatabaseTools extends McpToolBase {
         }
     }
 
-    @McpTool(description = "Execute a pre-built complex cross-database analytics query with JOINs, subqueries, and analytic functions")
+    @McpTool(description = "Execute a pre-built complex cross-database analytics query with JOINs, subqueries, and analytic functions",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> queryComplexCrossDatabaseAnalytics(
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Local transaction table prefix (e.g., 'TBL_STL_TXN_DTL_')") String localTablePrefix,
@@ -172,7 +176,8 @@ public class CrossDatabaseTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get pre-built cross-database JOIN query templates")
+    @McpTool(description = "Get pre-built cross-database JOIN query templates",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getCrossDatabaseTemplates() {
         if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled");
         return success(Map.of(
@@ -183,19 +188,22 @@ public class CrossDatabaseTools extends McpToolBase {
         ));
     }
 
-    @McpTool(description = "List all registered databases with connection info")
+    @McpTool(description = "List all registered databases with connection info",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public List<Map<String, Object>> listDatabases() {
         if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled");
         return gateway.listDatabases();
     }
 
-    @McpTool(description = "Get detailed information about a specific database in the federated gateway")
+    @McpTool(description = "Get detailed information about a specific database in the federated gateway",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getFederatedDatabaseInfo(@McpToolParam(description = "Database identifier") String databaseId) {
         if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled (databaseId=" + databaseId + ")");
         return gateway.getDatabaseInfo(databaseId);
     }
 
-    @McpTool(description = "Execute the same query across multiple databases and aggregate results")
+    @McpTool(description = "Execute the same query across multiple databases and aggregate results",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> executeFederatedQuery(
             @McpToolParam(description = "SQL query to execute") String query,
             @McpToolParam(description = "List of database IDs to query") List<String> databases,
@@ -204,19 +212,22 @@ public class CrossDatabaseTools extends McpToolBase {
         return gateway.executeFederatedQuery(query, databases, maxRows);
     }
 
-    @McpTool(description = "Execute different queries on different databases in parallel")
+    @McpTool(description = "Execute different queries on different databases in parallel",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> executeSelectiveQuery(@McpToolParam(description = "Map of databaseId to SQL query") Map<String, String> databaseQueries) {
         if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled (databaseQueries=" + databaseQueries + ")");
         return gateway.executeSelectiveQuery(databaseQueries);
     }
 
-    @McpTool(description = "Get the number of registered database clients in the federated gateway")
+    @McpTool(description = "Get the number of registered database clients in the federated gateway",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getGatewayStatistics() {
         if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled");
         return success(Map.of("clientCount", gateway.getClientCount(), "databases", gateway.listDatabases().size()));
     }
 
-    @McpTool(description = "Create an Oracle Database Link for cross-database queries")
+    @McpTool(description = "Create an Oracle Database Link for cross-database queries",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = true))
     public Map<String, Object> createDbLink(
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Remote host") String host,
@@ -241,18 +252,14 @@ public class CrossDatabaseTools extends McpToolBase {
                 dbLinkName, username, escapedPassword, host, port, serviceName);
         sqlValidator.validateDdl(dblinkSql);
         return safeExecute(() -> {
-            ByokDataSourceContext ctx = null;
-            try {
-                ctx = dataSourceManager.acquire(connection);
-                ctx.getJdbcTemplate().execute(dblinkSql);
-                return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' created successfully", dbLinkName)));
-            } finally {
-                if (ctx != null) ctx.close();
-            }
+            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+            ctx.getJdbcTemplate().execute(dblinkSql);
+            return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' created successfully", dbLinkName)));
         });
     }
 
-    @McpTool(description = "Drop an Oracle Database Link")
+    @McpTool(description = "Drop an Oracle Database Link",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> dropDbLink(
             @McpToolParam(description = "Name of the database link to drop") String dbLinkName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
@@ -261,18 +268,14 @@ public class CrossDatabaseTools extends McpToolBase {
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
         sqlValidator.validateDdl(dropSql);
         return safeExecute(() -> {
-            ByokDataSourceContext ctx = null;
-            try {
-                ctx = dataSourceManager.acquire(connection);
-                ctx.getJdbcTemplate().execute(dropSql);
-                return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
-            } finally {
-                if (ctx != null) ctx.close();
-            }
+            ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+            ctx.getJdbcTemplate().execute(dropSql);
+            return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' dropped successfully", dbLinkName)));
         });
     }
 
-    @McpTool(description = "Test database link connectivity by querying a remote table")
+    @McpTool(description = "Test database link connectivity by querying a remote table",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> testDbLink(
             @McpToolParam(description = "Database link name") String dbLinkName,
             @McpToolParam(description = "Remote table name to query") String remoteTable,

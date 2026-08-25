@@ -73,7 +73,7 @@ public record DatabaseProperties(
             ddl = new DdlProperties(false);
         }
         if (security == null) {
-            security = new SecurityProperties(10, 5);
+            security = new SecurityProperties(10, 5, java.util.List.of());
         }
         if (etl == null) {
             etl = new EtlProperties(4);
@@ -203,11 +203,14 @@ public record DatabaseProperties(
 
     public record SecurityProperties(
         int maxJoins,
-        int maxSubqueryDepth
+        int maxSubqueryDepth,
+        java.util.List<String> allowedTables
     ) {
         public SecurityProperties {
             maxJoins = maxJoins > 0 ? maxJoins : 10;
             maxSubqueryDepth = maxSubqueryDepth > 0 ? maxSubqueryDepth : 5;
+            // Empty means "no table restriction", matching SqlValidator's existing semantics.
+            allowedTables = allowedTables != null ? java.util.List.copyOf(allowedTables) : java.util.List.of();
         }
     }
 

@@ -94,8 +94,51 @@ class DynamicDataSourceManagerImplTest {
     }
 
     @Test
-    void acquireExistingConnection() {
+    void isReadonlyReflectsRegisteredConnectionFlag() {
         DynamicDataSourceManagerImpl manager = createManager();
+        ConnectionProperties readonlyConnection = ConnectionProperties.builder()
+                .jdbcUrl("jdbc:mysql://localhost:3306/test")
+                .username("user")
+                .password("pass")
+                .dialect("mysql")
+                .driverClassName("com.mysql.cj.jdbc.Driver")
+                .readonly(true)
+                .build();
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create("ro", readonlyConnection, dialect)).thenReturn(context);
+
+        manager.acquire("ro", readonlyConnection);
+
+        assertThat(manager.isReadonly("ro")).isTrue();
+        assertThat(manager.isReadonly("never-registered")).isFalse();
+    }
+
+    @Test
+    void isReadonlyIsFalseForWritableConnection() {
+        DynamicDataSourceManagerImpl manager = createManager();
+        ConnectionProperties connection = ConnectionProperties.builder()
+                .jdbcUrl("jdbc:mysql://localhost:3306/test")
+                .username("user")
+                .password("pass")
+                .dialect("mysql")
+                .driverClassName("com.mysql.cj.jdbc.Driver")
+                .build();
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create("rw", connection, dialect)).thenReturn(context);
+
+        manager.acquire("rw", connection);
+
+        assertThat(manager.isReadonly("rw")).isFalse();
+    }
+
+    @Test
+    void acquireExistingConnection() {        DynamicDataSourceManagerImpl manager = createManager();
         ConnectionProperties connection = ConnectionProperties.builder()
                 .jdbcUrl("jdbc:mysql://localhost:3306/test")
                 .username("user")

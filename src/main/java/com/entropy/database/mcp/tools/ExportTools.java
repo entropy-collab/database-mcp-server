@@ -48,7 +48,8 @@ public class ExportTools extends McpToolBase {
         return Math.min(maxRows, Math.min(MAX_EXPORT_LIMIT, maxExportRows));
     }
 
-    @McpTool(description = "Execute a query and export results to CSV format")
+    @McpTool(description = "Execute a query and export results to CSV format",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public String exportCsv(
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows") int maxRows,
@@ -61,7 +62,8 @@ public class ExportTools extends McpToolBase {
         return QueryUtils.toCsv(result.rows(), result.columns());
     }
 
-    @McpTool(description = "Execute a query and export results to JSON format")
+    @McpTool(description = "Execute a query and export results to JSON format",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public String exportJson(
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows") int maxRows,

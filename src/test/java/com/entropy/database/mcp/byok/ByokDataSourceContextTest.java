@@ -101,8 +101,8 @@ class ByokDataSourceContextTest {
                 "key1", dataSource, dialect, jdbcTemplate, infrastructure
         );
 
-        // dataSource is a mock that doesn't implement AutoCloseable, so close() should be a no-op
-        assertThatNoException().isThrownBy(context::close);
+        // dataSource is a mock that doesn't implement AutoCloseable, so closePool() should be a no-op
+        assertThatNoException().isThrownBy(context::closePool);
     }
 
     @Test
@@ -137,6 +137,6 @@ class ByokDataSourceContextTest {
         );
 
         // Should catch the exception and not rethrow
-        assertThatNoException().isThrownBy(context::close);
+        assertThatNoException().isThrownBy(context::closePool);
     }
 }

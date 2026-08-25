@@ -20,7 +20,7 @@ class SqlValidatorTest {
     @BeforeEach
     void setUp(@Mock DatabaseProperties properties) {
         lenient().when(properties.query()).thenReturn(new DatabaseProperties.QueryProperties(100, 30, true, 10000, 500, 100));
-        lenient().when(properties.security()).thenReturn(new DatabaseProperties.SecurityProperties(10, 5));
+        lenient().when(properties.security()).thenReturn(new DatabaseProperties.SecurityProperties(10, 5, java.util.List.of()));
         validator = new SqlValidatorImpl(properties);
     }
 

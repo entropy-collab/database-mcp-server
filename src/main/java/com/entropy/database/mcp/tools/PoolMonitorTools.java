@@ -39,7 +39,8 @@ public class PoolMonitorTools extends McpToolBase {
         this.dataSourceManager = dataSourceManager;
     }
 
-    @McpTool(description = "Get real-time HikariCP pool statistics for all connections")
+    @McpTool(description = "Get real-time HikariCP pool statistics for all connections",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getPoolStats() {
         return safeExecute(() -> {
             Map<String, HikariPoolStats> stats = dataSourceManager.getPoolStats();
@@ -55,7 +56,8 @@ public class PoolMonitorTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get HikariCP pool statistics for a specific connection")
+    @McpTool(description = "Get HikariCP pool statistics for a specific connection",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getPoolStatsForConnection(
             @McpToolParam(description = "Connection name (e.g. 'primary' or BYOK key)") String connectionName) {
         return safeExecute(() -> {
@@ -68,7 +70,8 @@ public class PoolMonitorTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get overall MCP server metrics including tool performance and cache hit rate")
+    @McpTool(description = "Get overall MCP server metrics including tool performance and cache hit rate",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getMetrics() {
         return safeExecute(() -> {
             // Metrics are recorded through the PerformanceTimingAspect and McpMetricsCollector

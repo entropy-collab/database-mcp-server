@@ -43,7 +43,8 @@ public class OracleSessionTools extends McpToolBase {
         this.ddlAllowed = ddlAllowed;
     }
 
-    @McpTool(description = "Kill an Oracle database session (requires ALTER SYSTEM privilege)")
+    @McpTool(description = "Kill an Oracle database session (requires ALTER SYSTEM privilege)",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> killSession(
             @McpToolParam(description = "Session identifier in format 'sid,serial#' (e.g. '123,4567')") String sessionId,
             @McpToolParam(description = "Kill mode: IMMEDIATE (default) or POST_TRANSACTION", required = false) String mode,

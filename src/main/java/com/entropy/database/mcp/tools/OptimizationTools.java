@@ -54,7 +54,8 @@ public class OptimizationTools extends McpToolBase {
             - 预防性优化：上线前对复杂 SQL 进行预检
             
             返回字段：planRows、queryDurationMs、estimatedRowCount、tableSizeMb、warnings、indexRecommendations、rewriteSuggestions、actionItems
-            """)
+            """,
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> analyzeQuery(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "要分析的 SQL 语句") String sql) {
@@ -83,7 +84,8 @@ public class OptimizationTools extends McpToolBase {
 
     // ─── Index Recommendations ───────────────────────────────────────────────
 
-    @McpTool(description = "分析指定表的索引使用情况，推荐缺失索引（含复合索引建议）")
+    @McpTool(description = "分析指定表的索引使用情况，推荐缺失索引（含复合索引建议）",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> recommendIndexes(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "表名") String tableName) {
@@ -109,7 +111,8 @@ public class OptimizationTools extends McpToolBase {
             - 子查询 → 转换为 JOIN
             
             返回字段：suggestionCount、suggestions（每条含 type/description/recommendedSql）
-            """)
+            """,
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> suggestRewrites(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "要分析的 SQL 语句") String sql) {
@@ -124,7 +127,8 @@ public class OptimizationTools extends McpToolBase {
 
     // ─── Table Performance Report ────────────────────────────────────────────
 
-    @McpTool(description = "分析指定表的整体性能：行数、大小、索引覆盖率、数据分布，输出优化建议")
+    @McpTool(description = "分析指定表的整体性能：行数、大小、索引覆盖率、数据分布，输出优化建议",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> analyzeTable(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "表名") String tableName) {
@@ -148,7 +152,8 @@ public class OptimizationTools extends McpToolBase {
 
     // ─── Plan Interpretation ─────────────────────────────────────────────────
 
-    @McpTool(description = "解读执行计划文本：逐行标注问题类型（全表扫描/嵌套循环/哈希连接等），输出中文摘要")
+    @McpTool(description = "解读执行计划文本：逐行标注问题类型（全表扫描/嵌套循环/哈希连接等），输出中文摘要",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> interpretPlan(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "执行计划文本（EXPLAIN 输出的原始文本）") String planText,
@@ -165,7 +170,8 @@ public class OptimizationTools extends McpToolBase {
 
     // ─── Config ──────────────────────────────────────────────────────────────
 
-    @McpTool(description = "查看优化器配置参数")
+    @McpTool(description = "查看优化器配置参数",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getOptimizerConfig() {
         return success(context(
                 "enabled", props.enabled(),

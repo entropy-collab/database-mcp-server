@@ -39,12 +39,14 @@ public class DatabaseHealthTools extends McpToolBase {
         this.dataSourceManager = dataSourceManager;
     }
 
-    @McpTool(description = "Check database health using dialect-specific query")
+    @McpTool(description = "Check database health using dialect-specific query",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> checkHealth(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return DialectQueryUtils.checkHealth(dataSourceManager, connection);
     }
 
-    @McpTool(description = "List active database sessions")
+    @McpTool(description = "List active database sessions",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listActiveSessions(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
             String sql = dialect.listActiveSessionsSql();
@@ -53,7 +55,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Show database locks and blocking information")
+    @McpTool(description = "Show database locks and blocking information",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> showLocks(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
             String sql = dialect.showLocksSql();
@@ -62,7 +65,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Show blocking chain (who is blocking whom)")
+    @McpTool(description = "Show blocking chain (who is blocking whom)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> showBlockingTree(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
             String sql = dialect.showBlockingTreeSql();
@@ -71,7 +75,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List tablespaces and usage")
+    @McpTool(description = "List tablespaces and usage",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listTablespaces(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
             String sql = dialect.listTablespacesSql();
@@ -80,7 +85,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List datafiles status and autoextension")
+    @McpTool(description = "List datafiles status and autoextension",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listDataFiles(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
             String sql = dialect.listDataFilesSql();
@@ -89,7 +95,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Estimate table size in MB")
+    @McpTool(description = "Estimate table size in MB",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> estimateTableSize(
             @McpToolParam(description = "Table name") String tableName,
             @McpToolParam(description = "Optional schema name", required = false) String schema,
@@ -100,7 +107,8 @@ public class DatabaseHealthTools extends McpToolBase {
         return result;
     }
 
-    @McpTool(description = "List invalid database objects")
+    @McpTool(description = "List invalid database objects",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listInvalidObjects(
             @McpToolParam(description = "Optional schema name filter", required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
@@ -111,7 +119,8 @@ public class DatabaseHealthTools extends McpToolBase {
         }, schema == null ? null : schema);
     }
 
-    @McpTool(description = "Gather table statistics for optimizer")
+    @McpTool(description = "Gather table statistics for optimizer",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> gatherTableStats(
             @McpToolParam(description = "Table name") String tableName,
             @McpToolParam(description = "Optional schema name", required = false) String schema,
@@ -126,7 +135,8 @@ public class DatabaseHealthTools extends McpToolBase {
         return result;
     }
 
-    @McpTool(description = "Show index status and unusable indexes")
+    @McpTool(description = "Show index status and unusable indexes",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> showIndexStatus(
             @McpToolParam(description = "Optional table name filter") String tableName,
             @McpToolParam(description = "Optional schema name", required = false) String schema,
@@ -138,7 +148,8 @@ public class DatabaseHealthTools extends McpToolBase {
         }, schema, tableName);
     }
 
-    @McpTool(description = "Generate flashback query template (AS OF TIMESTAMP)")
+    @McpTool(description = "Generate flashback query template (AS OF TIMESTAMP)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> flashbackQuery(
             @McpToolParam(description = "Table name") String tableName,
             @McpToolParam(description = "Timestamp in ISO-8601 format", required = false) String timestamp,
@@ -164,7 +175,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Show undo tablespace usage")
+    @McpTool(description = "Show undo tablespace usage",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> showUndoUsage(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
             String sql = dialect.showUndoUsageSql();
@@ -173,7 +185,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List current user privileges")
+    @McpTool(description = "List current user privileges",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listCurrentPrivileges(@McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
             String sql = dialect.listCurrentPrivilegesSql();
@@ -182,7 +195,8 @@ public class DatabaseHealthTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List grants for a user or role")
+    @McpTool(description = "List grants for a user or role",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listGrants(
             @McpToolParam(description = "User or role name") String userName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {

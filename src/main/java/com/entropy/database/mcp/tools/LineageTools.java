@@ -40,7 +40,8 @@ public class LineageTools extends McpToolBase {
 
     // ─── Upstream / Downstream ────────────────────────────────────────────────
 
-    @McpTool(description = "Get direct upstream edges (tables that this table references via foreign keys)")
+    @McpTool(description = "Get direct upstream edges (tables that this table references via foreign keys)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getUpstream(
             @McpToolParam(description = "Table name to analyze") String tableName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
@@ -49,7 +50,8 @@ public class LineageTools extends McpToolBase {
                 tableName, connectionName, format, "UPSTREAM"));
     }
 
-    @McpTool(description = "Get direct downstream edges (tables that reference this table via foreign keys)")
+    @McpTool(description = "Get direct downstream edges (tables that reference this table via foreign keys)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getDownstream(
             @McpToolParam(description = "Table name to analyze") String tableName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
@@ -60,7 +62,8 @@ public class LineageTools extends McpToolBase {
 
     // ─── Full Analysis ────────────────────────────────────────────────────────
 
-    @McpTool(description = "Full lineage analysis with BFS traversal — returns upstream/downstream tables and anomalies")
+    @McpTool(description = "Full lineage analysis with BFS traversal — returns upstream/downstream tables and anomalies",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> analyzeLineage(
             @McpToolParam(description = "Table name to analyze") String tableName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
@@ -99,7 +102,8 @@ public class LineageTools extends McpToolBase {
 
     // ─── Impact Analysis ──────────────────────────────────────────────────────
 
-    @McpTool(description = "Impact analysis: find all downstream tables that would be affected by a change to the source table")
+    @McpTool(description = "Impact analysis: find all downstream tables that would be affected by a change to the source table",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getImpactAnalysis(
             @McpToolParam(description = "Source table name") String tableName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
@@ -126,7 +130,8 @@ public class LineageTools extends McpToolBase {
 
     // ─── Export ────────────────────────────────────────────────────────────────
 
-    @McpTool(description = "Export lineage graph as Mermaid flowchart syntax")
+    @McpTool(description = "Export lineage graph as Mermaid flowchart syntax",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> exportMermaid(
             @McpToolParam(description = "Table name to export") String tableName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
@@ -136,7 +141,8 @@ public class LineageTools extends McpToolBase {
                 "format", "mermaid", "graph", analyzer.exportMermaid(tableName, connectionName, depth)));
     }
 
-    @McpTool(description = "Export lineage graph as DOT (Graphviz) syntax")
+    @McpTool(description = "Export lineage graph as DOT (Graphviz) syntax",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> exportDot(
             @McpToolParam(description = "Table name to export") String tableName,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
@@ -148,7 +154,8 @@ public class LineageTools extends McpToolBase {
 
     // ─── Global ────────────────────────────────────────────────────────────────
 
-    @McpTool(description = "List all foreign-key-based lineage edges across all tables in the database")
+    @McpTool(description = "List all foreign-key-based lineage edges across all tables in the database",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listAllEdges(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName) {
         return safeExecute(() -> {
@@ -162,7 +169,8 @@ public class LineageTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Show current lineage configuration")
+    @McpTool(description = "Show current lineage configuration",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getLineageConfig() {
         return success(Map.of(
                 "enabled", props.enabled(),

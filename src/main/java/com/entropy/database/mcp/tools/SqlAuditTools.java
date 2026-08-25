@@ -47,7 +47,8 @@ public class SqlAuditTools extends McpToolBase {
         this.complianceReportService = complianceReportService;
     }
 
-    @McpTool(description = "Get recent query audit log entries from in-memory buffer")
+    @McpTool(description = "Get recent query audit log entries from in-memory buffer",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getAuditLogs(@McpToolParam(description = "Number of entries to return (default 50)") int limit) {
         return safeExecute(() -> {
             List<Map<String, Object>> entries = queryAuditLogger.getRecentLogs(limit);
@@ -55,7 +56,8 @@ public class SqlAuditTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get the top N slowest queries (queries exceeding the slow query threshold)")
+    @McpTool(description = "Get the top N slowest queries (queries exceeding the slow query threshold)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getSlowQueries(@McpToolParam(description = "Maximum number of slow queries to return (default 50, max 500)") int limit) {
         return safeExecute(() -> {
             int clamped = Math.min(Math.max(limit, 1), 500);
@@ -63,7 +65,8 @@ public class SqlAuditTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get TOP N most frequent SQL patterns with statistics (count, avg/max duration, total rows)")
+    @McpTool(description = "Get TOP N most frequent SQL patterns with statistics (count, avg/max duration, total rows)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getSqlPatternStats(@McpToolParam(description = "Maximum number of patterns to return (default 100, max 500)") int limit) {
         return safeExecute(() -> {
             int clamped = Math.min(Math.max(limit, 1), 500);
@@ -73,7 +76,8 @@ public class SqlAuditTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Generate a GDPR-style data access report for a time range")
+    @McpTool(description = "Generate a GDPR-style data access report for a time range",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getDataAccessReport(
             @McpToolParam(description = "Start time in ISO-8601 format (e.g., 2024-01-01T00:00:00Z)") String startTime,
             @McpToolParam(description = "End time in ISO-8601 format (e.g., 2024-12-31T23:59:59Z)") String endTime,
@@ -85,7 +89,8 @@ public class SqlAuditTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Generate a 等保 (Level Protection) compliance report for a time range")
+    @McpTool(description = "Generate a 等保 (Level Protection) compliance report for a time range",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getProtectionReport(
             @McpToolParam(description = "Start time in ISO-8601 format (e.g., 2024-01-01T00:00:00Z)") String startTime,
             @McpToolParam(description = "End time in ISO-8601 format (e.g., 2024-12-31T23:59:59Z)") String endTime) {
@@ -104,7 +109,8 @@ public class SqlAuditTools extends McpToolBase {
         }
     }
 
-    @McpTool(description = "Get real-time audit metrics summary (total queries, slow query rate, tracked patterns)")
+    @McpTool(description = "Get real-time audit metrics summary (total queries, slow query rate, tracked patterns)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getAuditMetrics() {
         return safeExecute(() -> success(complianceReportService.getRealtimeMetrics()));
     }

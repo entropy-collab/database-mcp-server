@@ -100,8 +100,6 @@ public class DataCatalogServiceImpl implements DataCatalogService {
         } catch (Exception e) {
             log.warn("Failed to generate catalog for {}: {}", tableName, e.getMessage(), e);
             return buildErrorEntry(tableName, connection, null);
-        } finally {
-            ctx.close();
         }
     }
 

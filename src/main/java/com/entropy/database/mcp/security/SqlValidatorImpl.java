@@ -48,6 +48,7 @@ public class SqlValidatorImpl implements SqlValidator {
     public SqlValidatorImpl(DatabaseProperties properties) {
         this.properties = properties;
         this.allowedOperations = Collections.unmodifiableSet(new HashSet<>(ALLOWED_OPS));
+        this.allowedTables = new HashSet<>(properties.security().allowedTables());
     }
 
     @Override

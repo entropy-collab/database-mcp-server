@@ -54,7 +54,8 @@ public class QualityTools extends McpToolBase {
         this.qualityAlertService = qualityAlertService;
     }
 
-    @McpTool(description = "Run data quality checks on a table")
+    @McpTool(description = "Run data quality checks on a table",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> checkTableQuality(
             @McpToolParam(description = "Connection name", required = false) String connectionName,
             @McpToolParam(description = "Table name to check") String tableName,
@@ -88,7 +89,8 @@ public class QualityTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List all built-in quality rule templates")
+    @McpTool(description = "List all built-in quality rule templates",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listQualityRuleTemplates() {
         return safeExecute(() -> success(Map.of("templates", List.of(
                 ruleTemplate("null_rate", "Null Rate Check",
@@ -109,7 +111,8 @@ public class QualityTools extends McpToolBase {
         ))));
     }
 
-    @McpTool(description = "Get recent quality alert summary")
+    @McpTool(description = "Get recent quality alert summary",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getQualityAlertSummary(
             @McpToolParam(description = "Number of recent alerts to return (default 20)", required = false) int limit) {
         return safeExecute(() -> {

@@ -17,6 +17,7 @@ public enum ErrorCode {
     CONNECTION_FAILED("CON002", "Database connection failed"),
     LEASE_EXPIRED("CON003", "Connection lease expired"),
     CONNECTION_GATEWAY_DISABLED("CON004", "Gateway is not enabled"),
+    CONNECTION_READONLY("CON005", "Connection is registered as read-only"),
 
     // ── Query (查询执行) ────────────────────────────────────────────────────
     QUERY_TIMEOUT("QRY001", "Query timeout"),
@@ -26,6 +27,7 @@ public enum ErrorCode {
     // ── Security (安全/权限) ───────────────────────────────────────────────
     SECURITY_VIOLATION("SEC001", "Security violation"),
     SQL_OPERATION_NOT_ALLOWED("SEC002", "SQL operation not allowed"),
+    TOOL_FILTERED("SEC003", "Tool is not available for the current request"),
 
     // ── Federated (跨库/网关) ──────────────────────────────────────────────
     FEDERATED_QUERY_FAILED("FED001", "Federated query failed"),

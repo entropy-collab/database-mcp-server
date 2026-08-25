@@ -131,8 +131,9 @@ public class QueryContextCache {
 
     /**
      * Removes expired entries from both the table cache and health cache.
-     * Should be called periodically (e.g., every ~10 minutes).
      */
+    @org.springframework.scheduling.annotation.Scheduled(
+            fixedRateString = "${entropy.mcp.housekeeping.prune-interval:600000}")
     public void pruneExpired() {
         long now = Instant.now().toEpochMilli();
 

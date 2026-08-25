@@ -21,11 +21,13 @@ import com.entropy.database.mcp.domain.PaginatedQueryResult;
 import com.entropy.database.mcp.repository.QueryLimits;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
+import com.entropy.database.mcp.session.McpToolContext;
 import com.entropy.database.mcp.stream.SseStreamManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -239,7 +241,12 @@ public class DatabaseReadRepository {
 
     @SuppressWarnings("unchecked")
     private PaginatedQueryResult executeQueryDirect(String sql, int maxRows, String continuationToken) {
-        // Prepare cache key and pagination params
+        // Inject SQLCommenter trace annotation for database-side query tracking
+        String tracedSql = injectSqlComment(sql);
+
+        // Prepare cache key and pagination params. The key must be derived from the ORIGINAL
+        // sql: tracedSql carries a per-request trace_id, which would make every key unique
+        // and the cache unreachable.
         int limit = Math.min(maxRows, this.maxRows);
         String schema = extractSchema(sql);
         String cacheKey = "query:" + sha256(schema + "." + sql) + ":" + limit;
@@ -259,8 +266,8 @@ public class DatabaseReadRepository {
         // Execute query with pagination
         int offset = (int) parseCursor(continuationToken);
         String limitedSql = dialect.supportsLimit()
-                ? dialect.applyLimit(sql, limit, offset)
-                : sql;
+                ? dialect.applyLimit(tracedSql, limit, offset)
+                : tracedSql;
 
         // Apply query timeout to PreparedStatement
         List<Map<String, Object>> rows = jdbcTemplate.query(con -> {
@@ -321,18 +328,31 @@ public class DatabaseReadRepository {
 
     // ─── Private helpers ──────────────────────────────────────────────────
 
-    private static final MessageDigest SHA256;
-    static {
-        try {
-            SHA256 = MessageDigest.getInstance("SHA-256");
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to initialize SHA-256", e);
+    /**
+     * Inject a SQLCommenter-style trace annotation into the SQL for database-side query tracking.
+     * Format: {@code &#47;* trace_id=xxx tool=executeQuery *&#47;} - most databases ignore
+     * unknown comments.
+     */
+    private String injectSqlComment(String sql) {
+        if (sql == null || sql.isBlank()) return sql;
+        // Don't re-inject if already annotated
+        if (sql.contains("trace_id=")) return sql;
+        McpToolContext current = McpToolContext.current().orElse(null);
+        String traceId = current != null ? current.correlationId() : "unknown";
+        String toolName = current != null && current.toolName() != null ? current.toolName() : "unknown";
+        String comment = "/* trace_id=" + traceId + " tool=" + toolName + " */ ";
+        // Find first non-whitespace character and insert after it (after SELECT, WITH, etc.)
+        int firstNonWhitespace = 0;
+        while (firstNonWhitespace < sql.length() && Character.isWhitespace(sql.charAt(firstNonWhitespace))) {
+            firstNonWhitespace++;
         }
+        return sql.substring(0, firstNonWhitespace) + comment + sql.substring(firstNonWhitespace);
     }
 
     private static String sha256(String input) {
         try {
-            byte[] hash = SHA256.digest(input.getBytes());
+            // MessageDigest is not thread-safe, so a fresh instance is required per call.
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder(64);
             for (byte b : hash) {
                 sb.append(String.format("%02x", b));

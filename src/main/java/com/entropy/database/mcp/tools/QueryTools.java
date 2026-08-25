@@ -55,7 +55,8 @@ public class QueryTools extends McpToolBase {
             Returns columns, rows, rowCount, hasMore, and continuationToken for pagination.
             Use executeQueryWithFilter for parameterized queries to prevent SQL injection.
             Tags: [read, query, select, paginated]
-            """)
+            """,
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> executeQuery(
             @McpToolParam(description = "SQL query to execute") String sql,
             @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
@@ -81,7 +82,8 @@ public class QueryTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get database connection information including product name and version")
+    @McpTool(description = "Get database connection information including product name and version",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getDatabaseInfo(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.getDatabaseInfo(connection);
@@ -91,7 +93,8 @@ public class QueryTools extends McpToolBase {
             Execute up to 5 SQL SELECT queries concurrently. Each result includes columns, rows, and rowCount.
             Use for batch analysis across multiple queries without sequential waiting.
             Tags: [read, query, batch, select]
-            """)
+            """,
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public List<Map<String, Object>> batchQuery(
             @McpToolParam(description = "List of SQL queries (max 5)") List<String> sqls,
             @McpToolParam(description = "Maximum rows per query", required = false) Integer maxRows,
@@ -132,7 +135,8 @@ public class QueryTools extends McpToolBase {
             - 快速查询单条记录或计数统计
             
             返回字段：rows、rowCount
-            """)
+            """,
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> executeSqlTemplate(
             @McpToolParam(description = "Template name: query_by_id, list_by_page, or count_by_condition") String templateName,
             @McpToolParam(description = "Table name") String table,
@@ -169,6 +173,47 @@ public class QueryTools extends McpToolBase {
 
             List<Map<String, Object>> rows = routingFacade.executeNamedQuery(sql, boundParams, connection);
             return success(Map.of("rows", rows, "rowCount", rows.size()));
+        });
+    }
+
+    @McpTool(description = """
+            Execute a parameterized SQL SELECT query with built-in SQL injection protection.
+            Use this instead of executeQuery when you need to pass user-supplied values safely.
+            Parameters are bound via named placeholders (:name) — never concatenate user input into SQL.
+            Prerequisite: call createNamedConnection first to register the database connection.
+            Tags: [read, query, parameterized, safe, select]
+            """,
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
+    public Map<String, Object> executeQueryWithFilter(
+            @McpToolParam(description = "SQL query with named parameters (e.g. WHERE name = :name)") String sql,
+            @McpToolParam(description = "Named parameters as key-value pairs (e.g. {\"name\": \"John\"})", required = false) Map<String, Object> params,
+            @McpToolParam(description = "Maximum number of rows to return", required = false) Integer maxRows,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
+        return safeExecute(() -> {
+            if (sql == null || sql.isBlank()) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "sql must not be blank");
+            }
+            Map<String, Object> boundParams = params != null ? new HashMap<>(params) : new HashMap<>();
+            log.debug("executeQueryWithFilter called: sqlLen={}, paramsSize={}, connection={}",
+                    sql.length(), boundParams.size(), connection);
+            // Validate the SQL structure (allow SELECT only, no DDL)
+            sqlValidator.validateSelect(sql);
+            // Execute using named parameter query — safe from SQL injection
+            List<Map<String, Object>> rows = routingFacade.executeNamedQuery(sql, boundParams, connection);
+            int limit = maxRows != null ? maxRows : 100;
+            List<Map<String, Object>> safeRows = QueryUtils.makeSerializable(
+                    rows.size() > limit ? rows.subList(0, limit) : rows);
+            Map<String, Object> resultMap = new HashMap<>();
+            if (!rows.isEmpty()) {
+                resultMap.put("columns", new ArrayList<>(rows.get(0).keySet()));
+            } else {
+                resultMap.put("columns", List.of());
+            }
+            resultMap.put("rows", safeRows);
+            resultMap.put("rowCount", safeRows.size());
+            resultMap.put("totalRows", rows.size());
+            resultMap.put("parametersUsed", boundParams.keySet().size());
+            return success(resultMap);
         });
     }
 }

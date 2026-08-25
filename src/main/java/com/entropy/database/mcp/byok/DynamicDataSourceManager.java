@@ -57,6 +57,14 @@ public interface DynamicDataSourceManager {
     ConnectionMetadata getConnectionMetadata(String key);
 
     /**
+     * Whether the connection was registered as read-only.
+     *
+     * <p>Returns false for unknown keys: an unregistered connection fails later with
+     * {@code CONNECTION_NOT_FOUND}, which is a clearer diagnosis than a read-only rejection.</p>
+     */
+    boolean isReadonly(String key);
+
+    /**
      * List all registered connection keys.
      */
     Collection<String> listConnectionKeys();

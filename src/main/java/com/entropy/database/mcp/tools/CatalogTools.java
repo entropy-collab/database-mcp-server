@@ -40,7 +40,8 @@ public class CatalogTools extends McpToolBase {
         this.props = props;
     }
 
-    @McpTool(description = "生成指定表的完整数据目录：表注释、字段注释、行数、大小、敏感字段分类")
+    @McpTool(description = "生成指定表的完整数据目录：表注释、字段注释、行数、大小、敏感字段分类",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> generateCatalog(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "表名") String tableName) {
@@ -68,7 +69,8 @@ public class CatalogTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "扫描指定 Schema 下所有表的元数据目录，批量返回每表的注释、字段数、最大敏感级别")
+    @McpTool(description = "扫描指定 Schema 下所有表的元数据目录，批量返回每表的注释、字段数、最大敏感级别",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> scanSchema(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "Schema 名称，留空使用默认 schema") String schema) {
@@ -98,7 +100,8 @@ public class CatalogTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "按关键词搜索数据资产（表名和注释模糊匹配），返回匹配的表及其分类信息")
+    @McpTool(description = "按关键词搜索数据资产（表名和注释模糊匹配），返回匹配的表及其分类信息",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> searchAssets(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "搜索关键词（表名或注释中包含该词）") String keyword,
@@ -128,7 +131,8 @@ public class CatalogTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "对单个字段进行数据分类分级：识别敏感级别（PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED/HIGHLY_SENSITIVE）和业务分类")
+    @McpTool(description = "对单个字段进行数据分类分级：识别敏感级别（PUBLIC/INTERNAL/CONFIDENTIAL/RESTRICTED/HIGHLY_SENSITIVE）和业务分类",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> classifyColumn(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "字段名（如 customer_id）") String columnName,
@@ -146,7 +150,8 @@ public class CatalogTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "列出指定 Schema 下所有高敏感级别字段（CONFIDENTIAL 及以上），便于合规审查")
+    @McpTool(description = "列出指定 Schema 下所有高敏感级别字段（CONFIDENTIAL 及以上），便于合规审查",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listSensitiveColumns(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "Schema 名称") String schema) {
@@ -175,7 +180,8 @@ public class CatalogTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "查看数据目录服务配置参数")
+    @McpTool(description = "查看数据目录服务配置参数",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getCatalogConfig() {
         return success(Map.of(
                 "enabled", props.enabled(),

@@ -29,6 +29,7 @@ import javax.sql.DataSource;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.beans.factory.DisposableBean;
@@ -48,10 +49,23 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     private final ByokDataSourceFactory dataSourceFactory;
     private final com.github.benmanes.caffeine.cache.Cache<String, LeasedDataSource> leasedCache;
     private final Map<String, ConnectionMetadata> metadataRegistry;
+    private final Set<String> readonlyKeys = ConcurrentHashMap.newKeySet();
     private final Map<String, String> contentFingerprintToKey; // content fingerprint → canonical key
-    // Use Caffeine with TTL to prevent unbounded growth of keyLocks entries.
-    // Entries expire after 2x leaseDuration with no access, avoiding memory leak.
-    private final com.github.benmanes.caffeine.cache.Cache<String, Object> keyLocks;
+
+    /**
+     * Fixed set of striped monitors guarding per-key connection creation and eviction.
+     *
+     * <p>Striping rather than a per-key map with eviction: an evictable lock map can hand two
+     * threads two <em>different</em> monitors for the same key (entry expires between the two
+     * lookups), silently losing mutual exclusion. A fixed array always maps a key to the same
+     * monitor and cannot grow without bound. The cost is that unrelated keys sharing a stripe
+     * serialize occasionally, which is harmless for pool creation.
+     */
+    private static final int LOCK_STRIPES = 64;
+    private final Object[] keyLocks = new Object[LOCK_STRIPES];
+
+    /** Guards the metadata / fingerprint / readonly registries as one unit. */
+    private final Object registryLock = new Object();
 
     private final Duration leaseDuration;
     private final Duration maxLifetime;
@@ -81,9 +95,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
         this.metadataRegistry = new ConcurrentHashMap<>();
         this.contentFingerprintToKey = new ConcurrentHashMap<>();
-        this.keyLocks = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
-                .expireAfterAccess(leaseDuration.multipliedBy(2))
-                .build();
+        java.util.Arrays.setAll(this.keyLocks, i -> new Object());
 
 
         this.leasedCache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
@@ -91,10 +103,11 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 .expireAfterAccess(leaseDuration)
                 .removalListener((String key, LeasedDataSource value, com.github.benmanes.caffeine.cache.RemovalCause cause) -> {
                     // Acquire per-key lock to coordinate with acquire() threads
-                    Object lock = keyLocks.get(key, k -> new Object());
+                    Object lock = lockFor(key);
                     synchronized (lock) {
-                        synchronized (keyLocks) {
+                        synchronized (registryLock) {
                             metadataRegistry.remove(key);
+                            readonlyKeys.remove(key);
                             contentFingerprintToKey.values().removeIf(v -> v.equals(key));
                         }
                         if (metricsCollector != null) {
@@ -107,10 +120,15 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                             value.close();
                         }
                     }
-                    // Remove lock entry after cleanup
-                    keyLocks.invalidate(key);
                 })
                 .build();
+    }
+
+    /**
+     * Resolve the striped monitor for a key. Always returns the same monitor for the same key.
+     */
+    private Object lockFor(String key) {
+        return keyLocks[Math.floorMod(key.hashCode(), LOCK_STRIPES)];
     }
 
     /**
@@ -126,7 +144,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         String canonicalKey = contentFingerprintToKey.get(fingerprint);
         if (canonicalKey != null && !canonicalKey.equals(key)) {
             log.info("Connection '{}' is an alias for existing connection '{}', reusing same pool", key, canonicalKey);
-            Object lock = keyLocks.get(canonicalKey, k -> new Object());
+            Object lock = lockFor(canonicalKey);
             synchronized (lock) {
                 LeasedDataSource existing = leasedCache.getIfPresent(canonicalKey);
                 if (existing != null && !existing.isClosed()) {
@@ -152,7 +170,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 return existing.renewLease();
             } catch (McpLeaseExpiredException e) {
                 log.warn("Datasource {} exceeded max lifetime, evicting and recreating", key);
-                Object lock = keyLocks.get(key, k -> new Object());
+                Object lock = lockFor(key);
                 synchronized (lock) {
                     leasedCache.invalidate(key);
                     contentFingerprintToKey.remove(fingerprint);
@@ -166,7 +184,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             contentFingerprintToKey.remove(fingerprint);
         }
 
-        Object lock = keyLocks.get(key, k -> new Object());
+        Object lock = lockFor(key);
         boolean created = false;
         synchronized (lock) {
             // Double-check after acquiring lock
@@ -244,7 +262,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      */
     @Override
     public void registerExisting(String key, DataSource existingDataSource, DatabaseDialect dialect) {
-        Object lock = keyLocks.get(key, k -> new Object());
+        Object lock = lockFor(key);
         synchronized (lock) {
             LeasedDataSource existing = leasedCache.getIfPresent(key);
             if (existing != null) {
@@ -291,7 +309,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             // Close any partially created resources
             if (context != null) {
                 try {
-                    context.close();
+                    context.closePool();
                 } catch (Exception closeEx) {
                     log.warn("Failed to close context after creation failure: {}", key, closeEx);
                 }
@@ -316,6 +334,11 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 0
         );
         metadataRegistry.put(key, metadata);
+        if (connection != null && Boolean.TRUE.equals(connection.readonly())) {
+            readonlyKeys.add(key);
+        } else {
+            readonlyKeys.remove(key);
+        }
         log.debug("Registered connection metadata: {} -> {}", key, metadata);
     }
 
@@ -336,6 +359,12 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     public ConnectionMetadata getConnectionMetadata(String key) {
         if (key == null || key.isBlank()) return null;
         return metadataRegistry.get(key);
+    }
+
+    @Override
+    public boolean isReadonly(String key) {
+        if (key == null || key.isBlank()) return false;
+        return readonlyKeys.contains(key);
     }
 
     @Override
@@ -363,18 +392,8 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         for (var entry : snapshot.entrySet()) {
             String key = entry.getKey();
             LeasedDataSource leased = entry.getValue();
-            // Acquire lock before closing to ensure no concurrent access
-            Object lock = keyLocks.getIfPresent(key);
-            if (lock != null) {
-                synchronized (lock) {
-                    try {
-                        leased.close();
-                    } catch (Exception e) {
-                        log.warn("Failed to close datasource during shutdown: {}", key, e);
-                    }
-                }
-            } else {
-                // Lock already evicted, close directly
+            // Acquire the striped lock before closing to ensure no concurrent access
+            synchronized (lockFor(key)) {
                 try {
                     leased.close();
                 } catch (Exception e) {
@@ -385,6 +404,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         leasedCache.invalidateAll();
         contentFingerprintToKey.clear();
         metadataRegistry.clear();
+        readonlyKeys.clear();
         log.info("All datasources shut down");
     }
 

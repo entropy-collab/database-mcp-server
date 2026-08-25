@@ -78,8 +78,6 @@ public class CdcServiceImpl implements CdcService {
         } catch (Exception e) {
             log.warn("CDC support check failed for '{}': {}", connection, e.getMessage(), e);
             return false;
-        } finally {
-            if (ctx != null) ctx.close();
         }
     }
 
@@ -119,8 +117,6 @@ public class CdcServiceImpl implements CdcService {
             }
         } catch (Exception e) {
             log.warn("Failed to read CDC changes for {}.{}: {}", schema, table, e.getMessage(), e);
-        } finally {
-            if (ctx != null) ctx.close();
         }
         return events;
     }
@@ -183,23 +179,18 @@ public class CdcServiceImpl implements CdcService {
     @Override
     public void createMirrorTable(String connection, String sourceSchema, String sourceTable,
                                   String targetSchema, String targetTable) {
-        ByokDataSourceContext ctx = null;
-        try {
-            ctx = dataSourceManager.acquire(connection);
-            DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
+        ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
+        DatabaseDialect dialect = ctx.getDialect();
+        JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
-            String sql = dialect.cdcCreateMirrorTableSql(targetSchema, targetTable,
-                    "SELECT * FROM " + dialect.quote(sourceTable));
-            if (sql == null) {
-                throw new UnsupportedOperationException(
-                        "Mirror table creation not supported for dialect: " + dialect.getDialectName());
-            }
-            jdbc.execute(sql);
-            log.info("Created mirror table {}.{} from {}.{}", targetSchema, targetTable, sourceSchema, sourceTable);
-        } finally {
-            if (ctx != null) ctx.close();
+        String sql = dialect.cdcCreateMirrorTableSql(targetSchema, targetTable,
+                "SELECT * FROM " + dialect.quote(sourceTable));
+        if (sql == null) {
+            throw new UnsupportedOperationException(
+                    "Mirror table creation not supported for dialect: " + dialect.getDialectName());
         }
+        jdbc.execute(sql);
+        log.info("Created mirror table {}.{} from {}.{}", targetSchema, targetTable, sourceSchema, sourceTable);
     }
 
     // ─── Subscription Management ──────────────────────────────────────────

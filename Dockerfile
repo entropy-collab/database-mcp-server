@@ -2,7 +2,9 @@
 # 构建命令：
 #   docker buildx build --platform linux/amd64 -t database-mcp-server:latest .
 
-FROM eclipse-temurin:25-jdk
+# Use mirror for base image to improve pull reliability in CN environments
+ARG BASE_IMAGE=docker.1ms.run/library/eclipse-temurin:25-jdk
+FROM ${BASE_IMAGE}
 
 # Install curl for health checks with Aliyun mirror
 RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g; s/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list \
@@ -13,7 +15,7 @@ RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g; s/security.ubuntu.com/mir
 WORKDIR /app
 
 # Copy locally built jar
-COPY target/database-mcp-server-0.1.0-SNAPSHOT.jar app.jar
+COPY target/database-mcp-server-*.jar app.jar
 
 # Debug: list jar contents
 RUN unzip -l app.jar | grep "application-.*.yml" || echo "No application yml files found in jar"

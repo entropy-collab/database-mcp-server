@@ -95,7 +95,7 @@ class LeasedDataSourceTest {
     @Test
     void closeCallsContextClose() {
         ByokDataSourceContext context = mock(ByokDataSourceContext.class);
-        doNothing().when(context).close();
+        doNothing().when(context).closePool();
 
         LeasedDataSource leased = new LeasedDataSource(
                 "key1", context, Duration.ofMinutes(30), Duration.ofHours(2), true
@@ -103,7 +103,7 @@ class LeasedDataSourceTest {
 
         leased.close();
 
-        verify(context).close();
+        verify(context).closePool();
     }
 
     @Test

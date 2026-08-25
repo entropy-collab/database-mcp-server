@@ -10,4 +10,3 @@ entropy:
       dialect: oracle
       security:
         enabled: true
-        allow-drop-table: false

@@ -66,7 +66,8 @@ public class EtlTools extends McpToolBase {
         this.sqlValidator = sqlValidator;
     }
 
-    @McpTool(description = "Create a named BYOK connection to a remote database")
+    @McpTool(description = "Create a named BYOK connection to a remote database",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = true, openWorldHint = true))
     public Map<String, Object> createNamedConnection(
             @McpToolParam(description = "Connection name for reuse") String name,
             @McpToolParam(description = "JDBC URL") String jdbcUrl,
@@ -95,7 +96,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Batch insert rows into a remote table via BYOK connection")
+    @McpTool(description = "Batch insert rows into a remote table via BYOK connection",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> insertData(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Target table name") String tableName,
@@ -123,7 +125,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Insert query results into a target table (ETL helper)")
+    @McpTool(description = "Insert query results into a target table (ETL helper)",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> insertQueryResult(
             @McpToolParam(description = "Source BYOK connection name") String sourceConnectionName,
             @McpToolParam(description = "Source SELECT query") String sourceSql,
@@ -153,7 +156,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Transform and insert data with column mapping (ETL helper)")
+    @McpTool(description = "Transform and insert data with column mapping (ETL helper)",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> transformAndInsert(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Source table name") String sourceTable,
@@ -205,7 +209,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Upsert data into a table (insert or update based on key columns)")
+    @McpTool(description = "Upsert data into a table (insert or update based on key columns)",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = true, openWorldHint = false))
     public Map<String, Object> upsertData(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Target table name") String tableName,
@@ -235,7 +240,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Validate data quality in a table (nulls, duplicates, types)")
+    @McpTool(description = "Validate data quality in a table (nulls, duplicates, types)",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> validateDataQuality(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Table name to validate") String tableName,
@@ -283,7 +289,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Export query results to a table with automatic batching")
+    @McpTool(description = "Export query results to a table with automatic batching",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> exportQueryToTable(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "Source SELECT query") String sourceSql,
@@ -327,7 +334,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Submit an ETL job for execution (MigrationJob DSL)")
+    @McpTool(description = "Submit an ETL job for execution (MigrationJob DSL)",
+             annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> submitEtlJob(@McpToolParam(description = "Job definition (id, name, description, steps)") Object jobDefinition) {
         return safeExecute(() -> {
             @SuppressWarnings("unchecked")
@@ -377,7 +385,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Get the status of an ETL job")
+    @McpTool(description = "Get the status of an ETL job",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getJobStatus(@McpToolParam(description = "Job identifier") String jobId) {
         return safeExecute(() -> {
             Optional<JobExecution> execution = executionEngine.getExecution(jobId);
@@ -401,7 +410,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "List all submitted ETL jobs")
+    @McpTool(description = "List all submitted ETL jobs",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listJobs() {
         return safeExecute(() -> {
             List<Map<String, Object>> jobs = executionEngine.listExecutions().stream()
@@ -419,7 +429,8 @@ public class EtlTools extends McpToolBase {
         });
     }
 
-    @McpTool(description = "Stop a running ETL job")
+    @McpTool(description = "Stop a running ETL job",
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> stopJob(@McpToolParam(description = "Job identifier to stop") String jobId) {
         return safeExecute(() -> {
             Optional<JobExecution> execution = executionEngine.getExecution(jobId);

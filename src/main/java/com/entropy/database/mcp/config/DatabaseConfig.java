@@ -163,9 +163,10 @@ public class DatabaseConfig {
     public JobExecutionEngine jobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                                                   DatabaseProperties properties,
                                                   EtlConfig etlConfig,
-                                                  org.springframework.core.task.TaskExecutor taskExecutor,
+                                                  @org.springframework.beans.factory.annotation.Qualifier("etlTaskExecutor")
+                                                  org.springframework.core.task.TaskExecutor etlTaskExecutor,
                                                   com.entropy.database.mcp.monitor.McpMetricsCollector metricsCollector) {
-        return new JobExecutionEngine(dataSourceManager, metricsCollector, etlConfig, taskExecutor);
+        return new JobExecutionEngine(dataSourceManager, metricsCollector, etlConfig, etlTaskExecutor);
     }
 
 }

@@ -58,7 +58,8 @@ public class QueryAnalysisTools extends McpToolBase {
         this.dialectResolver = dialectResolver;
     }
 
-    @McpTool(description = "获取 SQL 执行计划，分析性能并返回优化建议（先计划后执行方案）")
+    @McpTool(description = "获取 SQL 执行计划，分析性能并返回优化建议（先计划后执行方案）",
+             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> explainPlan(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "要分析的 SQL 语句") String sql) {
@@ -102,7 +103,8 @@ public class QueryAnalysisTools extends McpToolBase {
             - risk_level=low 可直接执行
             
             返回字段：riskScore、riskLevel、tables（各表行数）、suggestions、recommendation
-            """)
+            """,
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> assessQueryRisk(
             @McpToolParam(description = "连接名称") String connection,
             @McpToolParam(description = "要评估的 SQL 语句") String sql) {

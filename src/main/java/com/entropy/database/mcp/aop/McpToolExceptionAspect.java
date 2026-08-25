@@ -18,6 +18,7 @@ package com.entropy.database.mcp.aop;
 import com.entropy.database.mcp.aop.ConnectionArgExtractor;
 import com.entropy.database.mcp.byok.ConnectionMetadata;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.session.McpToolContext;
 import org.aspectj.lang.ProceedingJoinPoint;
@@ -27,13 +28,17 @@ import org.aspectj.lang.annotation.Pointcut;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.mcp.annotation.McpTool;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.stereotype.Component;
 
+import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -56,6 +61,24 @@ public class McpToolExceptionAspect {
 
     private static final Logger log = LoggerFactory.getLogger(McpToolExceptionAspect.class);
 
+    /** Prefix of the classification suffix appended to tool error messages. */
+    private static final String CLASSIFICATION_MARKER = " [code=";
+
+    /**
+     * Tools whose only side-effect is server-side state (caches, session key/value store,
+     * in-memory registries). They never write to the database, so the per-connection
+     * {@code readonly} flag must not block them.
+     *
+     * <p>Every other non-{@code readOnlyHint} tool is treated as a database mutation. The
+     * read-only classification itself lives on each tool's {@code @McpTool.McpAnnotations},
+     * so it is declared exactly once.</p>
+     */
+    private static final Set<String> SERVER_STATE_ONLY_TOOLS = Set.of(
+            "clearCache",
+            "sessionStore", "sessionRemove", "sessionPurge",
+            "scanCustomTools",
+            "registerSubscription", "unregisterSubscription");
+
     private final DynamicDataSourceManager dataSourceManager;
 
     public McpToolExceptionAspect(DynamicDataSourceManager dataSourceManager) {
@@ -77,6 +100,7 @@ public class McpToolExceptionAspect {
                 toolName, context.correlationId(), context.sessionId());
 
         try {
+            rejectIfReadonlyConnection(pjp, toolName, context.connection());
             Object result = pjp.proceed();
             injectConnection(result, pjp);
             log.debug("MCP tool exit: tool={}, elapsed={}ms", toolName, context.elapsedMillis());
@@ -85,12 +109,57 @@ public class McpToolExceptionAspect {
             Throwable enhanced = enhanceWithDialectHint(t, context.connection());
             // Provide friendly hint when connection parameter is missing
             if (context.connection() == null || context.connection().isBlank()) {
-                return enhanceMissingConnectionHint(enhanced, toolName);
+                enhanced = enhanceMissingConnectionHint(enhanced, toolName);
+            }
+            // Surface the error classification in the message so the LLM can distinguish an
+            // input mistake it can fix from a server-side failure it cannot. The exception is
+            // still thrown: the Spring AI SDK converts it to isError=true, which is the
+            // correct MCP shape for a tool execution error.
+            if (enhanced instanceof McpToolException mcpEx) {
+                enhanced = annotateErrorClassification(mcpEx);
             }
             throw enhanced;
         } finally {
             context.close();
         }
+    }
+
+    /**
+     * Reject database-mutating tools on connections registered with {@code readonly=true}.
+     *
+     * <p>The read-only classification is read from the tool's own
+     * {@code @McpTool.McpAnnotations(readOnlyHint = ...)}, so it is declared in exactly one
+     * place and cannot drift from what {@code tools/list} advertises.</p>
+     *
+     * <p>Two exemptions: {@code createNamedConnection} registers or re-registers the
+     * connection itself, so gating it on the flag it sets would make a read-only connection
+     * impossible to update; and {@link #SERVER_STATE_ONLY_TOOLS} never touch the database.</p>
+     */
+    private void rejectIfReadonlyConnection(ProceedingJoinPoint pjp, String toolName, String connection) {
+        if (connection == null || connection.isBlank()) return;
+        if ("createNamedConnection".equals(toolName)) return;
+        if (SERVER_STATE_ONLY_TOOLS.contains(toolName)) return;
+        if (isDeclaredReadOnly(pjp)) return;
+        if (!dataSourceManager.isReadonly(connection)) return;
+        throw new McpToolException(
+                ErrorCode.CONNECTION_READONLY,
+                "Tool '" + toolName + "' modifies state, but connection '" + connection
+                        + "' is registered as read-only. Use a read-only tool, or a connection "
+                        + "registered without readonly=true.",
+                connection);
+    }
+
+    /**
+     * Append a machine-readable classification suffix to the exception message so the LLM can
+     * tell a self-correctable input error from a server-side failure. Returns the original
+     * exception unchanged if it is already annotated.
+     */
+    private McpToolException annotateErrorClassification(McpToolException ex) {
+        String rawMessage = ex.getRawMessage();
+        if (rawMessage == null || rawMessage.contains(CLASSIFICATION_MARKER)) return ex;
+        String suffix = CLASSIFICATION_MARKER + ex.getErrorCode().getCode()
+                + " retryable=" + ex.isAgentError() + "]";
+        return new McpToolException(ex.getErrorCode(), rawMessage + suffix, ex.getCause(), ex.getConnection());
     }
 
     private Throwable enhanceWithDialectHint(Throwable t, String connection) {
@@ -101,8 +170,8 @@ public class McpToolExceptionAspect {
         if (meta == null || meta.dialect() == null) return t;
         String dialect = meta.dialect();
         String hint = " [数据库类型: " + dialect + " — 请将 SQL 改写为兼容 " + dialect + " 的语法]";
-        if (t instanceof McpToolException mcpEx && mcpEx.getMessage() != null) {
-            return new McpToolException(mcpEx.getErrorCode(), mcpEx.getMessage() + hint, t.getCause(), connection);
+        if (t instanceof McpToolException mcpEx && mcpEx.getRawMessage() != null) {
+            return new McpToolException(mcpEx.getErrorCode(), mcpEx.getRawMessage() + hint, t.getCause(), connection);
         }
         if (cause instanceof BadSqlGrammarException bsge && bsge.getMessage() != null) {
             String enhancedMsg = bsge.getMessage() + hint;
@@ -153,5 +222,21 @@ public class McpToolExceptionAspect {
                     try { ((Map<String, Object>) result).putIfAbsent("connection", conn); }
                     catch (Exception e) { log.debug("Could not inject connection hint into result", e); }
                 });
+    }
+
+    /**
+     * Read {@code readOnlyHint} from the intercepted tool's own {@code @McpTool} declaration.
+     * Falls back to false (treat as mutating) when the annotation cannot be resolved.
+     */
+    private boolean isDeclaredReadOnly(ProceedingJoinPoint pjp) {
+        try {
+            Method method = AopUtils.getMostSpecificMethod(
+                    ((MethodSignature) pjp.getSignature()).getMethod(), pjp.getTarget().getClass());
+            McpTool annotation = method.getAnnotation(McpTool.class);
+            return annotation != null && annotation.annotations().readOnlyHint();
+        } catch (Exception e) {
+            log.debug("Could not resolve @McpTool annotations for {}", pjp.getSignature().getName(), e);
+            return false;
+        }
     }
 }

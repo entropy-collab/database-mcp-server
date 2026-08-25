@@ -81,8 +81,6 @@ public class OptimizerServiceImpl implements OptimizerService {
             return new PerformanceReport(connection, "unknown", sql, null, List.of(),
                     durationMs, List.of("分析失败"),
                     List.of(), List.of(), 0, 0, List.of());
-        } finally {
-            ctx.close();
         }
     }
 
@@ -126,8 +124,6 @@ public class OptimizerServiceImpl implements OptimizerService {
         } catch (Exception e) {
             log.warn("Index recommendation failed for {}: {}", tableName, e.getMessage(), e);
             return List.of();
-        } finally {
-            ctx.close();
         }
     }
 
@@ -256,8 +252,6 @@ public class OptimizerServiceImpl implements OptimizerService {
             return new PerformanceReport(connection, "unknown", null, tableName,
                     List.of(), 0, List.of("分析失败"),
                     List.of(), List.of(), 0, 0, List.of());
-        } finally {
-            ctx.close();
         }
     }
 
@@ -434,18 +428,14 @@ public class OptimizerServiceImpl implements OptimizerService {
                 String table = tables.get(0);
                 // Check if column is already indexed
                 ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-                try {
-                    Set<String> indexedCols = getIndexedColumns(ctx.getJdbcTemplate(), dialect,
-                            dialect.normalizeTableName(table));
-                    if (indexedCols.contains(col)) continue;
+                Set<String> indexedCols = getIndexedColumns(ctx.getJdbcTemplate(), dialect,
+                        dialect.normalizeTableName(table));
+                if (indexedCols.contains(col)) continue;
 
-                    String normalizedTable = dialect.normalizeTableName(table);
-                    String createSql = buildCreateIndexSql(dialect, normalizedTable, col, "BTREE");
-                    recs.add(new IndexRecommendation(normalizedTable, col, "BTREE",
-                            createSql, "WHERE 条件中未索引的列: " + col, 1));
-                } finally {
-                    ctx.close();
-                }
+                String normalizedTable = dialect.normalizeTableName(table);
+                String createSql = buildCreateIndexSql(dialect, normalizedTable, col, "BTREE");
+                recs.add(new IndexRecommendation(normalizedTable, col, "BTREE",
+                        createSql, "WHERE 条件中未索引的列: " + col, 1));
             }
         }
         return recs;
