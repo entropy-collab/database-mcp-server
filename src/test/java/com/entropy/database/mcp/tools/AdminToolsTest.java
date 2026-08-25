@@ -191,12 +191,13 @@ class AdminToolsTest {
     }
 
     @Test
-    void testEstimateTableSize() {
-        Map<String, Object> result = databaseHealthTools.estimateTableSize("MY_TABLE", null, "primary");
-        assertThat(result).containsKey("tableName");
-        assertThat(result.get("tableName")).isEqualTo("MY_TABLE");
-        assertThat(result).containsKey("dialect");
-        assertThat(result.get("rows")).isInstanceOf(List.class);
+    void testEstimateTableSizeIsUnsupportedWithoutASizeSource() {
+        // GenericDialect has no data dictionary to read segment sizes from. It used to answer with a
+        // constant size_mb=0 row, which is indistinguishable from "the table really is empty"; it now
+        // declares the operation unsupported so the model cannot act on a fabricated number.
+        assertThatThrownBy(() -> databaseHealthTools.estimateTableSize("MY_TABLE", null, "primary"))
+                .isInstanceOf(McpToolException.class)
+                .hasMessageContaining("Dialect query execution failed");
     }
 
     @Test

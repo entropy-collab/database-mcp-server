@@ -40,7 +40,7 @@ public class TransformStepHandler implements StepHandler {
         List<String> columnMapping = engine.getListParam(step, "columnMapping", List.of());
         String whereClause = engine.getStringParam(step, "whereClause", null);
 
-        JdbcTemplate jdbcTemplate = source.getJdbcTemplate();
+        JdbcTemplate jdbcTemplate = source.getEtlJdbcTemplate();
         var dialect = source.getDialect();
 
         engine.validateSourceSql(step.sourceSql());
@@ -84,11 +84,12 @@ public class TransformStepHandler implements StepHandler {
 
         // Column labels come from the SELECT above, which aliases every expression to its target
         // column, so the batch keys are exactly the columns the INSERT names.
-        return EtlRowStream.copyInBatches(jdbcTemplate, selectSql.toString(), batchSize,
+        // 读写同一个 context，所以整个 step 只占一条连接、跑在一个事务里（见 EtlRowStream）。
+        return EtlRowStream.copyInBatches(jdbcTemplate, jdbcTemplate, selectSql.toString(), batchSize,
                 engine.maxSourceRows(step),
-                (columns, batch) -> {
+                (batchJdbc, columns, batch) -> {
                     String insertSql = EtlSql.insertInto(dialect, targetTable, columns);
-                    return EtlSql.sum(jdbcTemplate.batchUpdate(insertSql, batch, batch.size(),
+                    return EtlSql.sum(batchJdbc.batchUpdate(insertSql, batch, batch.size(),
                             EtlSql.bindColumns(columns)));
                 });
     }

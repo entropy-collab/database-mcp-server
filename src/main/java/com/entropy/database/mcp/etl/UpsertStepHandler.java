@@ -34,7 +34,7 @@ public class UpsertStepHandler implements StepHandler {
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
         var dialect = target.getDialect();
-        JdbcTemplate jdbc = target.getJdbcTemplate();
+        JdbcTemplate jdbc = target.getEtlJdbcTemplate();
         List<String> keyColumns = engine.getListParam(step, "keyColumns", List.of());
         String tableName = dialect.normalizeTableName(step.targetTable());
 
@@ -44,15 +44,16 @@ public class UpsertStepHandler implements StepHandler {
 
         // Read the source in batches and upsert each batch; the column list is identical for every
         // batch, so the statement is rebuilt from the batch's own columns without drifting.
-        return EtlRowStream.copyInBatches(source.getJdbcTemplate(), step.sourceSql(), batchSize,
+        // batchJdbc 是钉在本 step 事务连接上的模板：所有批次同一个事务，失败整体回滚。
+        return EtlRowStream.copyInBatches(source.getEtlJdbcTemplate(), jdbc, step.sourceSql(), batchSize,
                 engine.maxSourceRows(step),
-                (columns, batch) -> {
+                (batchJdbc, columns, batch) -> {
                     String upsertSql = dialect.buildUpsertSql(tableName, columns, keyColumns);
                     if (upsertSql == null) {
                         throw new UnsupportedOperationException(
                                 "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName());
                     }
-                    return EtlSql.sum(jdbc.batchUpdate(upsertSql, batch, batch.size(),
+                    return EtlSql.sum(batchJdbc.batchUpdate(upsertSql, batch, batch.size(),
                             EtlSql.bindColumns(columns)));
                 });
     }

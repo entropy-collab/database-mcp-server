@@ -18,6 +18,8 @@ package com.entropy.database.mcp.optimizer;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.ByokInfrastructure;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.byok.StatementTemplates;
+import com.entropy.database.mcp.properties.StatementTimeouts;
 import com.entropy.database.mcp.dialect.H2Dialect;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +31,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -196,6 +199,106 @@ class OptimizerServiceImplTest {
         assertThat(suggestion.reason()).contains("NOT EXISTS");
     }
 
+    @Test
+    @DisplayName("the rewrite carries the NULL guards the equivalence depends on")
+    void notInRewriteEmitsNullGuards() {
+        String rewritten = NotInToNotExistsRewriter.rewrite(
+                "SELECT * FROM a WHERE id NOT IN (SELECT uid FROM b)");
+
+        // 外层列守卫 + 子查询列出现 NULL 的守卫，缺任何一段改写就不再等价
+        assertThat(rewritten).contains("a.id IS NOT NULL");
+        assertThat(rewritten).contains("b.uid IS NULL");
+        assertThat(rewritten).contains("b.uid = a.id");
+        assertThatCode(() -> CCJSqlParserUtil.parse(rewritten)).doesNotThrowAnyException();
+    }
+
+    // ─── NOT IN → NOT EXISTS, behaviour compared on a real database ────────
+
+    @Nested
+    @DisplayName("the NOT IN rewrite returns the same rows as the original")
+    class NotInEquivalence {
+
+        private JdbcTemplate jdbcTemplate;
+
+        @BeforeEach
+        void createSchema() {
+            org.h2.jdbcx.JdbcDataSource ds = new org.h2.jdbcx.JdbcDataSource();
+            ds.setURL("jdbc:h2:mem:notinequiv;DB_CLOSE_DELAY=-1");
+            ds.setUser("sa");
+            ds.setPassword("");
+            jdbcTemplate = new JdbcTemplate(ds);
+            jdbcTemplate.execute("DROP TABLE IF EXISTS A");
+            jdbcTemplate.execute("DROP TABLE IF EXISTS B");
+            jdbcTemplate.execute("CREATE TABLE A (ID INT)");
+            jdbcTemplate.execute("CREATE TABLE B (UID INT, KIND VARCHAR(10))");
+            // 外层含 NULL：原式对该行是 UNKNOWN，不返回
+            for (Integer id : new Integer[]{1, 2, 3, null}) {
+                jdbcTemplate.update("INSERT INTO A VALUES (?)", id);
+            }
+        }
+
+        @Test
+        @DisplayName("with a NULL in the subquery both forms return nothing")
+        void nullInSubqueryYieldsNoRows() {
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", 1, "keep");
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", null, "keep");
+
+            // 裸的 NOT EXISTS 会在这里返回 A 的全部非匹配行，这就是原来那版改写的错处
+            assertSameRows("SELECT ID FROM A WHERE ID NOT IN (SELECT UID FROM B)");
+        }
+
+        @Test
+        @DisplayName("without a NULL in the subquery both forms skip the NULL outer row")
+        void noNullInSubquerySkipsTheNullOuterRow() {
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", 1, "keep");
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", 2, "keep");
+
+            assertSameRows("SELECT ID FROM A WHERE ID NOT IN (SELECT UID FROM B)");
+        }
+
+        @Test
+        @DisplayName("an empty subquery returns every non-NULL outer row in both forms")
+        void emptySubqueryReturnsEveryNonNullRow() {
+            assertSameRows("SELECT ID FROM A WHERE ID NOT IN (SELECT UID FROM B)");
+        }
+
+        @Test
+        @DisplayName("the subquery's own WHERE is preserved by both guards")
+        void subqueryWhereIsPreserved() {
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", 1, "keep");
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", null, "drop");
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", 2, "drop");
+
+            // 过滤掉 kind='drop' 后子查询里没有 NULL 了，两种写法都应返回 2 和 3
+            assertSameRows("SELECT ID FROM A WHERE ID NOT IN "
+                    + "(SELECT UID FROM B WHERE KIND = 'keep')");
+        }
+
+        @Test
+        @DisplayName("the rewrite keeps its meaning when the NOT IN sits under an OR")
+        void rewriteUnderAnOrKeepsPrecedence() {
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", 1, "keep");
+            jdbcTemplate.update("INSERT INTO B VALUES (?, ?)", null, "keep");
+
+            assertSameRows("SELECT ID FROM A WHERE ID = 3 OR ID NOT IN (SELECT UID FROM B)");
+        }
+
+        private void assertSameRows(String sql) {
+            String rewritten = NotInToNotExistsRewriter.rewrite(sql);
+            assertThat(rewritten).isNotEqualTo(sql);   // 这些形态都必须真的被改写过
+
+            assertThat(rows(rewritten))
+                    .describedAs("rewritten [%s]", rewritten)
+                    .isEqualTo(rows(sql));
+        }
+
+        private List<Map<String, Object>> rows(String sql) {
+            return jdbcTemplate.queryForList(sql).stream()
+                    .sorted(java.util.Comparator.comparing(row -> String.valueOf(row.get("ID"))))
+                    .toList();
+        }
+    }
+
     // ─── interpretPlan ────────────────────────────────────────────────────
 
     @Test
@@ -238,7 +341,9 @@ class OptimizerServiceImplTest {
             jdbcTemplate.execute("CREATE INDEX IDX_ORDERS_STATUS ON ORDERS(STATUS)");
 
             ByokDataSourceContext ctx = new ByokDataSourceContext("h2-optimizer",
-                    jdbcTemplate.getDataSource(), new MetadataAwareH2Dialect(), jdbcTemplate,
+                    jdbcTemplate.getDataSource(), new MetadataAwareH2Dialect(),
+                    StatementTemplates.over(jdbcTemplate.getDataSource(), jdbcTemplate,
+                            StatementTimeouts.defaults()),
                     new ByokInfrastructure(null, null, null, null, null, null));
             manager = mock(DynamicDataSourceManager.class);
             when(manager.acquire(anyString())).thenReturn(ctx);
@@ -311,7 +416,9 @@ class OptimizerServiceImplTest {
         @DisplayName("the size query gets the table name bound to its single placeholder")
         void analyzeTableBindsTheTableNameForTheSizeQuery() {
             ByokDataSourceContext ctx = new ByokDataSourceContext("h2-sized",
-                    jdbcTemplate.getDataSource(), new SizeAwareH2Dialect(), jdbcTemplate,
+                    jdbcTemplate.getDataSource(), new SizeAwareH2Dialect(),
+                    StatementTemplates.over(jdbcTemplate.getDataSource(), jdbcTemplate,
+                            StatementTimeouts.defaults()),
                     new ByokInfrastructure(null, null, null, null, null, null));
             when(manager.acquire(anyString())).thenReturn(ctx);
 
@@ -320,6 +427,25 @@ class OptimizerServiceImplTest {
             // The stub echoes 7 only when the placeholder receives 'ORDERS'; an unbound query fails
             // outright and the size falls back to -1.
             assertThat(report.tableSizeMb()).isEqualTo(7);
+        }
+
+        @Test
+        @DisplayName("a NULL size_mb reports -1 rather than borrowing another numeric column")
+        void nullSizeIsReportedAsUnavailable() {
+            ByokDataSourceContext ctx = new ByokDataSourceContext("h2-null-size",
+                    jdbcTemplate.getDataSource(), new NullSizeH2Dialect(),
+                    StatementTemplates.over(jdbcTemplate.getDataSource(), jdbcTemplate,
+                            StatementTimeouts.defaults()),
+                    new ByokInfrastructure(null, null, null, null, null, null));
+            when(manager.acquire(anyString())).thenReturn(ctx);
+
+            PerformanceReport report = service.analyzeTable("ORDERS", "h2-null-size");
+
+            // The fallback used to take the first numeric column — extents, or MySQL's count(*),
+            // which is always >= 1 — and report "1 MB" for a table of unknown size.
+            assertThat(report.tableSizeMb()).isEqualTo(-1);
+            assertThat(report.warnings()).noneSatisfy(warning ->
+                    assertThat(warning).contains("表大小超过 1GB"));
         }
     }
 
@@ -360,6 +486,22 @@ class OptimizerServiceImplTest {
             return """
                     SELECT TABLE_NAME AS segment_name, 'TABLE' AS segment_type,
                            7 AS size_mb, 1 AS extents
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_NAME = ?
+                    """;
+        }
+    }
+
+    /**
+     * Declares {@code size_mb} but leaves it NULL, next to a numeric {@code extents} column — the
+     * exact shape that made the "first numeric column" fallback report 1 MB.
+     */
+    private static final class NullSizeH2Dialect extends MetadataAwareH2Dialect {
+        @Override
+        public String estimateTableSizeSql(String tableName, String schema) {
+            return """
+                    SELECT TABLE_NAME AS segment_name, 'TABLE' AS segment_type,
+                           CAST(NULL AS BIGINT) AS size_mb, 1 AS extents
                     FROM INFORMATION_SCHEMA.TABLES
                     WHERE TABLE_NAME = ?
                     """;

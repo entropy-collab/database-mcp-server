@@ -17,6 +17,7 @@ package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.security.SqlValidator;
@@ -45,7 +46,6 @@ import java.util.stream.Collectors;
 public class JobExecutionEngine implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(JobExecutionEngine.class);
-    private static final int DEFAULT_ETL_THREADS = 4;
     private static final int DEFAULT_BATCH_SIZE = 1000;
 
     /**
@@ -56,6 +56,10 @@ public class JobExecutionEngine implements DisposableBean {
      * the heap budget. Overridable per step via the {@code maxSourceRows} param, or process-wide
      * through {@link #JobExecutionEngine(DynamicDataSourceManager, McpMetricsCollector, EtlConfig,
      * TaskExecutor, SqlValidator, int)}.
+     *
+     * <p>这个值只有在驱动真的能流式取数时才等于内存上界。拿不到流式能力的组合（例如 MySQL 上
+     * 读写共用一条连接）会由 {@code EtlRowStream} 把本次上限降到
+     * {@code EtlRowStream.NON_STREAMING_MAX_ROWS} 并在日志里说明，因为此时整份结果集缓存在客户端。
      */
     public static final int DEFAULT_MAX_SOURCE_ROWS = 1_000_000;
 
@@ -95,11 +99,6 @@ public class JobExecutionEngine implements DisposableBean {
     private final Map<StepType, StepHandler> handlers;
 
     public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
-                              McpMetricsCollector metricsCollector) {
-        this(dataSourceManager, metricsCollector, new EtlConfig(DEFAULT_ETL_THREADS, DEFAULT_BATCH_SIZE), null);
-    }
-
-    public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                               McpMetricsCollector metricsCollector,
                               EtlConfig etlConfig,
                               TaskExecutor taskExecutor) {
@@ -115,6 +114,13 @@ public class JobExecutionEngine implements DisposableBean {
                 DEFAULT_MAX_SOURCE_ROWS);
     }
 
+    /**
+     * @param sqlValidator may be null, which disables source-SQL validation for this engine.
+     *                     Production wiring always passes the real validator
+     *                     ({@code DatabaseConfig.jobExecutionEngine}); a null here is only for
+     *                     tests that are not exercising validation, and it is logged as a warning
+     *                     because it silently removes the only guardrail on ETL source SQL.
+     */
     public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
                               McpMetricsCollector metricsCollector,
                               EtlConfig etlConfig,
@@ -128,12 +134,10 @@ public class JobExecutionEngine implements DisposableBean {
         this.taskExecutor = taskExecutor;
         this.maxSourceRows = maxSourceRows > 0 ? maxSourceRows : DEFAULT_MAX_SOURCE_ROWS;
         this.handlers = buildHandlers();
-    }
-
-    public JobExecutionEngine(DynamicDataSourceManager dataSourceManager,
-                              ExecutorService executor,
-                              McpMetricsCollector metricsCollector) {
-        this(dataSourceManager, metricsCollector, null, executor::submit);
+        if (sqlValidator == null) {
+            log.warn("JobExecutionEngine built without a SqlValidator: ETL source SQL will not be "
+                    + "validated (no table allow-list, join or subquery-depth limits)");
+        }
     }
 
     private static Map<StepType, StepHandler> buildHandlers() {
@@ -317,16 +321,42 @@ public class JobExecutionEngine implements DisposableBean {
      * <p>Uses the root cause — the wrapper is usually {@code DataAccessException}, the cause is
      * what actually went wrong — and strips single-quoted literals, which is where row data shows
      * up in driver messages, plus the step's own SQL if the message echoes it.
+     *
+     * <p>链上如果有 {@link McpToolException}，它的消息优先：搬数失败时那条消息里带着「已写入多少
+     * 行、是否回滚、能不能直接重跑」，而模型看到失败的默认反应就是重跑。只取 root cause 会把这段
+     * 结论丢掉，只剩下驱动的原始报错。
      */
     private String describeFailure(Throwable failure, Step step) {
         Throwable root = rootCause(failure);
         String message = root.getMessage() == null ? "" : root.getMessage();
+        McpToolException advisory = firstToolException(failure);
+        if (advisory != null && advisory != root) {
+            String advice = advisory.getMessage() == null ? "" : advisory.getMessage();
+            if (!advice.isBlank()) {
+                // 通常 advisory 已经把 root 的消息包进去了，再拼一遍只是浪费 500 字的预算
+                message = advice.contains(message) ? advice : advice + " | " + message;
+            }
+        }
         message = redact(message, step.sourceSql());
         String description = root.getClass().getSimpleName() + (message.isBlank() ? "" : ": " + message);
         description = description.replaceAll("\\s+", " ").trim();
         return description.length() > MAX_STEP_ERROR_LENGTH
                 ? description.substring(0, MAX_STEP_ERROR_LENGTH) + "...(truncated)"
                 : description;
+    }
+
+    private McpToolException firstToolException(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof McpToolException tool) {
+                return tool;
+            }
+            if (current.getCause() == current) {
+                return null;
+            }
+            current = current.getCause();
+        }
+        return null;
     }
 
     private String redact(String message, String sourceSql) {

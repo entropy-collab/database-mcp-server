@@ -208,10 +208,29 @@ public class MultiSessionContext {
      * Get all keys in a namespace for the current scope.
      */
     public java.util.Set<String> keys(String namespace) {
-        var nsMap = store.get(currentSessionId());
+        return keysInScope(currentSessionId(), namespace);
+    }
+
+    /**
+     * Get all keys in a namespace for an explicit scope.
+     */
+    public java.util.Set<String> keysInScope(String scope, String namespace) {
+        var nsMap = store.get(scope);
         if (nsMap == null) return Set.of();
         var keyMap = nsMap.get(namespace);
         return keyMap != null ? keyMap.keySet() : Set.of();
+    }
+
+    /**
+     * Drop one scope's entire partition, expired or not.
+     *
+     * <p>调用方给了作用域标识就说明它知道自己在清哪一份数据，所以这里不看 TTL 直接整段丢弃 ——
+     * {@link #purgeExpired()} 只清过期条目，对「我这个会话用完了，现在就释放」这个诉求无效。
+     *
+     * @return whether the scope held anything
+     */
+    public boolean purgeScope(String scope) {
+        return store.remove(scope) != null;
     }
 
     /**

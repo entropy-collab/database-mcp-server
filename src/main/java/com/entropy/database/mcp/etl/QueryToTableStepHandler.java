@@ -22,7 +22,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * Handles QUERY_TO_TABLE steps: executes a source SQL and inserts results into a target table.
  *
  * <p>Reads the source in batches rather than into one list: this is the bulk data-movement step,
- * so the source table's size must not decide peak heap usage.
+ * so the source table's size must not decide peak heap usage. The whole step is one transaction —
+ * 见 {@link EtlRowStream}：分批提交会在中途失败时把半份数据留在目标表里。
  */
 public class QueryToTableStepHandler implements StepHandler {
 
@@ -34,8 +35,8 @@ public class QueryToTableStepHandler implements StepHandler {
     @Override
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
-        JdbcTemplate sourceJdbc = source.getJdbcTemplate();
-        JdbcTemplate targetJdbc = target.getJdbcTemplate();
+        JdbcTemplate sourceJdbc = source.getEtlJdbcTemplate();
+        JdbcTemplate targetJdbc = target.getEtlJdbcTemplate();
         var dialect = target.getDialect();
 
         engine.validateSourceSql(step.sourceSql());
@@ -43,11 +44,12 @@ public class QueryToTableStepHandler implements StepHandler {
         String targetTable = dialect.normalizeTableName(step.targetTable());
         int batchSize = engine.batchSize(step);
 
-        return EtlRowStream.copyInBatches(sourceJdbc, step.sourceSql(), batchSize,
+        return EtlRowStream.copyInBatches(sourceJdbc, targetJdbc, step.sourceSql(), batchSize,
                 engine.maxSourceRows(step),
-                (columns, batch) -> {
+                // batchJdbc 是钉在本 step 事务连接上的模板：所有批次同一个事务，失败整体回滚。
+                (batchJdbc, columns, batch) -> {
                     String insertSql = EtlSql.insertInto(dialect, targetTable, columns);
-                    return EtlSql.sum(targetJdbc.batchUpdate(insertSql, batch, batch.size(),
+                    return EtlSql.sum(batchJdbc.batchUpdate(insertSql, batch, batch.size(),
                             EtlSql.bindColumns(columns)));
                 });
     }

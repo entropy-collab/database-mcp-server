@@ -235,7 +235,10 @@ public class OptimizerServiceImpl implements OptimizerService {
                     "NOT_IN_SUBQUERY",
                     "NOT IN (SELECT ...)",
                     "LEFT JOIN ... IS NULL 或 NOT EXISTS",
-                    "NOT IN 在子查询含 NULL 时结果不可预测，且性能差。改用 NOT EXISTS。",
+                    "NOT IN 在子查询结果含 NULL 时整体退化为 UNKNOWN（一行都不返回），且优化器难以走索引。"
+                            + "transformedSql 中的 NOT EXISTS 改写已补齐 NULL 守卫（外层列 IS NOT NULL，"
+                            + "并在子查询列出现 NULL 时不返回任何行），与原式严格等价；"
+                            + "若 transformedSql 与原 SQL 相同，说明该语句形态不支持安全改写，需人工处理。",
                     rewriteNotInToNotExists(sql)
             ));
         }
@@ -393,18 +396,17 @@ public class OptimizerServiceImpl implements OptimizerService {
         return -1;
     }
 
-    /** {@code size_mb} under either casing, else the first numeric column of the row. */
+    /**
+     * The {@code size_mb} column the dialect's size query declares, or {@code null} when it is
+     * absent or NULL.
+     *
+     * <p>{@code JdbcTemplate.queryForList} 返回大小写不敏感的 map，所以一次查找就覆盖了
+     * {@code size_mb} 与 {@code SIZE_MB}。这里不再回退到「第一个数值列」：MySQL 的 size 查询带
+     * {@code GROUP BY table_name} 且选了 {@code count(*)}/{@code extents} 这类恒 ≥ 1 的列，兜底会把
+     * 「1 MB」当成表大小上报，比诚实返回 -1 更有害——下游用它判断是否超过 1GB 并给出建议。
+     */
     private static Object sizeColumnOf(Map<String, Object> row) {
-        Object value = row.get("size_mb");
-        if (value == null) {
-            value = row.get("SIZE_MB");
-        }
-        if (value == null) {
-            for (Object candidate : row.values()) {
-                if (candidate instanceof Number) return candidate;
-            }
-        }
-        return value;
+        return row.get("size_mb");
     }
 
     /** Oracle and H2 label the column {@code COLUMN_NAME}; MySQL and PostgreSQL use lower case. */

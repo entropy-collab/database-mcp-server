@@ -33,7 +33,7 @@ public class DdlStepHandler implements StepHandler {
     @Override
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
-        JdbcTemplate jdbcTemplate = source.getJdbcTemplate();
+        JdbcTemplate jdbcTemplate = source.getDdlJdbcTemplate();
         List<String> statements = engine.getListParam(step, "statements", List.of());
 
         int totalAffected = 0;

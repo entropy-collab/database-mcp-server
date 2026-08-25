@@ -24,6 +24,7 @@ import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExistsExpression;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
+import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
@@ -48,6 +49,21 @@ import java.util.List;
  * comparison rather than leave its left operand behind, the correlated reference needs a real outer
  * qualifier instead of a made-up alias, and a subquery containing function calls or nested
  * parentheses defeats any {@code [^)]+}-style match.
+ *
+ * <h2>为什么必须带 NULL 守卫</h2>
+ * <p>{@code x NOT IN (SELECT y FROM b)} 与 {@code NOT EXISTS (SELECT 1 FROM b WHERE y = x)} 并不
+ * 等价，差别全在三值逻辑上：子查询结果里只要出现一个 NULL，原式对每一行都是 UNKNOWN（返回 0 行），
+ * 而裸的 NOT EXISTS 会把所有行都返回；外层列本身为 NULL 时原式同样是 UNKNOWN，NOT EXISTS 却为真；
+ * 但子查询为空是例外——{@code NULL NOT IN (空集)} 是 TRUE。这里的 {@code transformedSql} 是直接交给
+ * 模型去执行的，所以不能只快不对。因此改写结果是完整等价式的三段合取：
+ *
+ * <pre>{@code
+ * (a.x IS NOT NULL OR NOT EXISTS (SELECT 1 FROM b WHERE <原 where>))
+ *   AND NOT EXISTS (SELECT 1 FROM b WHERE <原 where> AND b.y = a.x)
+ *   AND NOT EXISTS (SELECT 1 FROM b WHERE <原 where> AND b.y IS NULL)
+ * }</pre>
+ *
+ * <p>三段整体再包一层括号，否则原式处在 OR 之下时会被改写破坏优先级。
  *
  * <p>The rewrite is deliberately conservative. Anything it does not fully understand — a set
  * operation, a multi-column projection, a non-column comparison, an unparseable statement — leaves
@@ -145,21 +161,79 @@ final class NotInToNotExistsRewriter {
                 return in;
             }
 
-            EqualsTo correlation = new EqualsTo(innerQualified, outerQualified);
-            Expression existingWhere = subSelect.getWhere();
-            subSelect.setWhere(existingWhere == null
-                    ? correlation
-                    : new AndExpression(new Parenthesis(existingWhere), correlation));
+            // 在改动 subSelect 之前先拷两份：一份用来判断子查询是否为空，一份用来探测 NULL，
+            // 三份都要保留原始的 WHERE。通过重新解析文本来深拷，JSQLParser 没有公开的 AST 克隆。
+            PlainSelect anyRowSelect = copyOf(subSelect);
+            PlainSelect nullProbeSelect = copyOf(subSelect);
+            if (anyRowSelect == null || nullProbeSelect == null) {
+                return in;
+            }
 
+            Expression originalWhere = subSelect.getWhere();
+
+            // 第一段：相关化的 NOT EXISTS，等价于「没有任何 y 等于 x」
+            subSelect.setWhere(mergeWhere(originalWhere, new EqualsTo(innerQualified, outerQualified)));
+            subSelect.setSelectItems(oneProjection());
+            Expression noMatch = notExists(parenthesed);
+
+            // 第二段：子查询列出现过 NULL 就整体为 UNKNOWN，原式返回 0 行
+            IsNullExpression innerIsNull = new IsNullExpression();
+            innerIsNull.setLeftExpression(innerQualified);
+            nullProbeSelect.setWhere(mergeWhere(nullProbeSelect.getWhere(), innerIsNull));
+            nullProbeSelect.setSelectItems(oneProjection());
+            Expression noNullInSubquery = notExists(parenthesize(nullProbeSelect));
+
+            // 第三段：外层列为 NULL 时原式是 UNKNOWN —— 但子查询为空是例外，
+            // NULL NOT IN (空集) 是 TRUE，所以这个守卫要放过「子查询一行都没有」的情况
+            IsNullExpression outerIsNotNull = new IsNullExpression();
+            outerIsNotNull.setLeftExpression(outerQualified);
+            outerIsNotNull.setNot(true);
+            anyRowSelect.setSelectItems(oneProjection());
+            Expression outerGuard = new Parenthesis(
+                    new OrExpression(outerIsNotNull, notExists(parenthesize(anyRowSelect))));
+
+            changed = true;
+            // 整体加括号：原式可能位于 OR 之下，裸的 AND 链会改变优先级
+            return new Parenthesis(new AndExpression(
+                    new AndExpression(outerGuard, noMatch), noNullInSubquery));
+        }
+
+        private static ParenthesedSelect parenthesize(PlainSelect select) {
+            ParenthesedSelect parenthesed = new ParenthesedSelect();
+            parenthesed.setSelect(select);
+            return parenthesed;
+        }
+
+        private static Expression mergeWhere(Expression existing, Expression added) {
+            return existing == null ? added : new AndExpression(new Parenthesis(existing), added);
+        }
+
+        private static List<SelectItem<?>> oneProjection() {
             List<SelectItem<?>> projection = new ArrayList<>(1);
             projection.add(new SelectItem<>(new LongValue(1)));
-            subSelect.setSelectItems(projection);
+            return projection;
+        }
 
+        private static Expression notExists(ParenthesedSelect subquery) {
             ExistsExpression notExists = new ExistsExpression();
             notExists.setNot(true);
-            notExists.setRightExpression(parenthesed);
-            changed = true;
+            notExists.setRightExpression(subquery);
             return notExists;
+        }
+
+        /**
+         * @return an independent copy of {@code select}, or {@code null} when re-parsing its own
+         *         rendering does not come back as a plain select — in which case no rewrite happens
+         *         rather than one that silently shares AST nodes
+         */
+        private static PlainSelect copyOf(PlainSelect select) {
+            try {
+                Statement parsed = CCJSqlParserUtil.parse(select.toString());
+                return parsed instanceof PlainSelect plain ? plain : null;
+            } catch (Exception e) {
+                log.debug("Subquery copy failed for [{}]: {}", select, e.getMessage());
+                return null;
+            }
         }
 
         private static PlainSelect plainSelectOf(ParenthesedSelect parenthesed) {

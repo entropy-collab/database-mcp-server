@@ -39,7 +39,7 @@ public class ReadStepHandler implements StepHandler {
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
         engine.validateSourceSql(step.sourceSql());
-        long rows = EtlRowStream.countRows(source.getJdbcTemplate(), step.sourceSql(),
+        long rows = EtlRowStream.countRows(source.getEtlJdbcTemplate(), step.sourceSql(),
                 engine.batchSize(step), engine.maxSourceRows(step));
         log.info("Read step: {} rows", rows);
         return rows;

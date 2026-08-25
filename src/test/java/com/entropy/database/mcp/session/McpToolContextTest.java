@@ -128,6 +128,38 @@ class McpToolContextTest {
         assertThat(store.sessionCount()).isEqualTo(2);
     }
 
+    @Test
+    void keysCanBeListedForAnExplicitScope() {
+        MultiSessionContext store = new MultiSessionContext();
+
+        store.set("tenant-a", MultiSessionContext.NAMESPACE_ETL, "k1", 1);
+        store.set("tenant-a", MultiSessionContext.NAMESPACE_ETL, "k2", 2);
+        store.set("tenant-b", MultiSessionContext.NAMESPACE_ETL, "k3", 3);
+
+        assertThat(store.keysInScope("tenant-a", MultiSessionContext.NAMESPACE_ETL))
+                .containsExactlyInAnyOrder("k1", "k2");
+        assertThat(store.keysInScope("tenant-b", MultiSessionContext.NAMESPACE_ETL))
+                .containsExactly("k3");
+        assertThat(store.keysInScope("tenant-c", MultiSessionContext.NAMESPACE_ETL)).isEmpty();
+    }
+
+    @Test
+    void purgingAScopeDropsItsEntriesWithoutWaitingForTheTtl() {
+        MultiSessionContext store = new MultiSessionContext();
+
+        store.set("tenant-a", MultiSessionContext.NAMESPACE_QUERIES, "k", "a-value");
+        store.set("tenant-b", MultiSessionContext.NAMESPACE_QUERIES, "k", "b-value");
+
+        assertThat(store.purgeScope("tenant-a")).isTrue();
+        assertThat(store.purgeScope("tenant-a")).isFalse();
+
+        assertThat(store.<String>getInScope("tenant-a", MultiSessionContext.NAMESPACE_QUERIES, "k"))
+                .isNull();
+        // purgeExpired would have left both alone: the entries are 60 minutes from expiring.
+        assertThat(store.<String>getInScope("tenant-b", MultiSessionContext.NAMESPACE_QUERIES, "k"))
+                .isEqualTo("b-value");
+    }
+
     private static boolean isParseableAsLong(String value) {
         try {
             Long.parseLong(value);
