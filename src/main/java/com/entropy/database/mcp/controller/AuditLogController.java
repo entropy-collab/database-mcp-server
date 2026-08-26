@@ -56,11 +56,17 @@ public class AuditLogController {
      * Polling endpoint: returns the most recent audit log entries from memory buffer.
      *
      * GET /api/audit/logs?limit=50&operation=executeQuery
+     *
+     * <p>{@code @RequestParam} 一律写出显式 name：不写时 Spring 只能靠 class 文件里的
+     * {@code MethodParameters} 反推参数名，而那段信息只有编译带 {@code -parameters} 才会写入。
+     * 下游用自己的构建配置重新编译/重打包（不继承 spring-boot-starter-parent 的 compiler 配置）时参数名会
+     * 退化成 {@code arg0}，请求进来直接 {@code IllegalArgumentException: Name for argument of type [int] not
+     * specified}——是启动后每次调用都失败，而不是编译期报错。
      */
     @GetMapping("/logs")
     public List<Map<String, Object>> getLogs(
-            @RequestParam(defaultValue = "50") int limit,
-            @RequestParam(required = false) String operation) {
+            @RequestParam(name = "limit", defaultValue = "50") int limit,
+            @RequestParam(name = "operation", required = false) String operation) {
         List<Map<String, Object>> all = auditLogger.getRecentLogs(clampLimit(limit));
         if (operation != null && !operation.isBlank()) {
             return all.stream()
@@ -74,14 +80,16 @@ public class AuditLogController {
      * Query persisted audit logs from database with optional filters.
      *
      * GET /api/audit/history?limit=50&tool=executeQuery&connectionKey=primary&startTime=2024-01-01T00:00:00Z&endTime=2024-01-02T00:00:00Z
+     *
+     * <p>参数名同样显式写出，理由见 {@link #getLogs}。
      */
     @GetMapping("/history")
     public List<Map<String, Object>> getHistory(
-            @RequestParam(defaultValue = "100") int limit,
-            @RequestParam(required = false) String tool,
-            @RequestParam(required = false) String connectionKey,
-            @RequestParam(required = false) String startTime,
-            @RequestParam(required = false) String endTime) {
+            @RequestParam(name = "limit", defaultValue = "100") int limit,
+            @RequestParam(name = "tool", required = false) String tool,
+            @RequestParam(name = "connectionKey", required = false) String connectionKey,
+            @RequestParam(name = "startTime", required = false) String startTime,
+            @RequestParam(name = "endTime", required = false) String endTime) {
         if (auditLogRepository == null) {
             // No persistence configured: report it rather than 500, and point at the in-memory endpoint.
             throw new org.springframework.web.server.ResponseStatusException(
