@@ -43,7 +43,8 @@ public class PoolMonitorTools extends McpToolBase {
             【全部连接池统计】返回所有已建立连接池的 HikariCP 实时指标与健康判定，并给出健康、降级池的数量。无入参。
             前置条件：只统计已实际获取过连接、池已创建的连接；已注册但尚未使用的连接不会出现在结果中。
             使用场景：巡检整体连接资源使用情况、定位是哪个连接的池接近打满或有等待线程。
-            返回字段：totalConnections（有池的连接数）、healthyPools、degradedPools、pools（数组，每项含 connectionName、dialect、jdbcUrlMasked、totalConnections、activeConnections、idleConnections、pendingThreads、maxPoolSize、minIdle、connectionTimeoutMs、idleTimeoutMs、maxLifetimeMs、leakDetectionThresholdMs、isPoolHealthy、utilizationRatio、healthWarnings）。
+            口径说明：内容相同的连接会共用同一个物理池，多出来的名字是别名（canonicalName 指向规范名、isAlias 为 true）；totalConnections、healthyPools、degradedPools 均按物理池去重计数，pools 数组仍按连接名逐条返回。
+            返回字段：totalConnections（去重后的物理池数量）、totalConnectionNames（连接名个数，含别名）、healthyPools、degradedPools、aliasNames（属于别名的连接名列表）、pools（数组，每项含 connectionName、canonicalName、isAlias、dialect、jdbcUrlMasked、totalConnections、activeConnections、idleConnections、pendingThreads、maxPoolSize、minIdle、connectionTimeoutMs、idleTimeoutMs、maxLifetimeMs、leakDetectionThresholdMs、isPoolHealthy、utilizationRatio、healthWarnings）。
             不要用于：只关心某一个连接的池（用 getPoolStatsForConnection）；查看连接注册元数据与租约到期（用 listConnections 或 describeConnection）；查看工具调用耗时与缓存命中率（用 getMetrics）。
             标签：[read, monitor, pool, metrics]
             """,
@@ -54,10 +55,26 @@ public class PoolMonitorTools extends McpToolBase {
             List<Map<String, Object>> poolDetails = stats.values().stream()
                     .map(HikariPoolStats::toMap)
                     .toList();
+
+            // 别名与规范名在注册表里是两个名字指向同一个 Hikari 池，所以 stats 里会有 N 条记录描述同一个池。
+            // 过去直接用 stats.size() 和 filter().count()，池数量与健康池数量就按别名个数放大，
+            // 运维看到的资源占用是虚高的。这里按 canonicalName 折叠成物理池后再计数，
+            // 同时保留每个名字的明细，否则按别名查 getPoolStatsForConnection 会变成「连接不存在」。
+            Map<String, HikariPoolStats> physicalPools = new java.util.LinkedHashMap<>();
+            for (HikariPoolStats s : stats.values()) {
+                physicalPools.putIfAbsent(s.canonicalName(), s);
+            }
+            List<String> aliasNames = stats.values().stream()
+                    .filter(HikariPoolStats::isAlias)
+                    .map(HikariPoolStats::connectionName)
+                    .toList();
+
             return success(Map.of(
-                    "totalConnections", stats.size(),
-                    "healthyPools", stats.values().stream().filter(HikariPoolStats::isPoolHealthy).count(),
-                    "degradedPools", stats.values().stream().filter(s -> !s.isPoolHealthy()).count(),
+                    "totalConnections", physicalPools.size(),
+                    "totalConnectionNames", stats.size(),
+                    "healthyPools", physicalPools.values().stream().filter(HikariPoolStats::isPoolHealthy).count(),
+                    "degradedPools", physicalPools.values().stream().filter(s -> !s.isPoolHealthy()).count(),
+                    "aliasNames", aliasNames,
                     "pools", poolDetails
             ));
         });
@@ -67,7 +84,8 @@ public class PoolMonitorTools extends McpToolBase {
             【单连接池统计】返回指定连接的 HikariCP 池实时指标与健康判定。
             前置条件：该连接必须已实际建立过池；连接虽已注册但从未使用过时报连接不存在或尚未获取。
             使用场景：已经锁定某个连接有性能问题，需要看它的活跃、空闲、等待线程与使用率。
-            返回字段：connectionName、dialect、jdbcUrlMasked、totalConnections、activeConnections、idleConnections、pendingThreads、maxPoolSize、minIdle、connectionTimeoutMs、idleTimeoutMs、maxLifetimeMs、leakDetectionThresholdMs、isPoolHealthy、utilizationRatio、healthWarnings。
+            口径说明：传入别名同样能查到，返回的是它所复用的物理池指标，canonicalName 指向规范名、isAlias 为 true。
+            返回字段：connectionName、canonicalName、isAlias、dialect、jdbcUrlMasked、totalConnections、activeConnections、idleConnections、pendingThreads、maxPoolSize、minIdle、connectionTimeoutMs、idleTimeoutMs、maxLifetimeMs、leakDetectionThresholdMs、isPoolHealthy、utilizationRatio、healthWarnings。
             不要用于：横向对比所有连接的池状况（用 getPoolStats）；查看连接注册状态与租约（用 describeConnection）。
             标签：[read, monitor, pool, metrics]
             """,

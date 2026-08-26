@@ -115,17 +115,91 @@ public record ConnectionProperties(
     }
 
     /**
-     * Normalize JDBC URL to a canonical form for deduplication.
-     * Strips query parameters and fragments, keeping only the protocol + host + database path.
-     * e.g. "jdbc:postgresql://host:5432/db?useSSL=false&stringtype=unspecified"
-     *     → "jdbc:postgresql://host:5432/db"
+     * 把 JDBC URL 归一成用于去重的规范形式：<b>保留</b>全部参数的语义，只消除无意义差异
+     * （参数顺序、键的大小写、键值两侧的空白、空参数段）。
+     *
+     * <p>为什么不能「截掉参数」：这个结果直接进 {@link #getCacheKey()}，而指纹相同就意味着两个连接名
+     * 共用同一个 Hikari 池。参数里有<em>语义</em>参数——SQL Server / DB2 的 {@code ;databaseName=...}、
+     * PostgreSQL 的 {@code ?currentSchema=...}、MySQL 的 {@code ?connectionTimeZone=...}——一旦被丢弃，
+     * {@code ;databaseName=a} 与 {@code ;databaseName=b} 会被判成同一个物理连接，两个不同的库共用一个池，
+     * 调用方以为在读 a 其实读到 b，这是数据串库。旧实现「{@code ?} 之后整段丢弃」已经在 PostgreSQL 的
+     * {@code ?currentSchema=a} / {@code ?currentSchema=b} 上踩到了这个坑；而分号风格的参数旧实现完全没识别，
+     * 所以口径必须往<em>保守</em>方向改：宁可少去重一次（多开一个池，只是多占资源），也绝不合并语义不同的 URL。
+     *
+     * <p>覆盖两种参数风格：{@code ?k=v&k2=v2}（MySQL / PostgreSQL）与 {@code ;k=v;k2=v2}
+     * （SQL Server / DB2 / H2）。切分点取第一个 {@code ?} 或 {@code ;}，其前面整段是 base——分号风格的
+     * base 本身带 {@code //host:port}，不能把 host 当成参数处理。
+     *
+     * <p>同一个键出现多次时保持原有顺序不排序：多数驱动是「后者覆盖前者」，
+     * {@code ?currentSchema=a&currentSchema=b} 与 {@code ?currentSchema=b&currentSchema=a} 生效值不同，
+     * 排序会把它们抹成同一个指纹。这里也不再丢弃 {@code #} 之后的内容，理由同上——凡是丢弃就有合并风险。
+     *
+     * <p>e.g. {@code "jdbc:sqlserver://host:1433;encrypt=true;databaseName=db"}
+     *     → {@code "jdbc:sqlserver://host:1433;databasename=db;encrypt=true"}
      */
     static String normalizeJdbcUrl(String jdbcUrl) {
         if (jdbcUrl == null || jdbcUrl.isBlank()) return jdbcUrl;
-        int questionMark = jdbcUrl.indexOf('?');
-        int hash = jdbcUrl.indexOf('#');
-        int end = questionMark > 0 ? questionMark : (hash > 0 ? hash : jdbcUrl.length());
-        return jdbcUrl.substring(0, end);
+
+        int split = firstParameterDelimiter(jdbcUrl);
+        if (split < 0) {
+            return jdbcUrl;
+        }
+        String base = jdbcUrl.substring(0, split);
+        char opener = jdbcUrl.charAt(split);
+        String separator = opener == '?' ? "&" : ";";
+
+        // 两种风格可能混用（如 ";databaseName=db?foo=1"），所以两种分隔符都切。
+        // 空参数段（";;" 或结尾的 ";"）没有语义，丢掉是安全的。
+        java.util.List<String> params = new java.util.ArrayList<>();
+        for (String raw : jdbcUrl.substring(split + 1).split("[;&]")) {
+            String normalized = normalizeParameter(raw);
+            if (!normalized.isEmpty()) {
+                params.add(normalized);
+            }
+        }
+        if (params.isEmpty()) {
+            return base;
+        }
+
+        java.util.Set<String> seenKeys = new java.util.HashSet<>();
+        boolean duplicateKeys = params.stream()
+                .map(ConnectionProperties::parameterKey)
+                .anyMatch(key -> !seenKeys.add(key));
+        java.util.List<String> ordered = duplicateKeys ? params : params.stream().sorted().toList();
+
+        return base + opener + String.join(separator, ordered);
+    }
+
+    /**
+     * 第一个参数分隔符（{@code ?} 或 {@code ;}）的下标，都没有时返回 -1。
+     * 取两者中更靠前的那个，避免把 {@code ";databaseName=db?foo=1"} 的分号段误当成 base。
+     */
+    private static int firstParameterDelimiter(String jdbcUrl) {
+        int query = jdbcUrl.indexOf('?');
+        int semicolon = jdbcUrl.indexOf(';');
+        if (query <= 0) return semicolon > 0 ? semicolon : -1;
+        if (semicolon <= 0) return query;
+        return Math.min(query, semicolon);
+    }
+
+    /** 键统一小写、键值两侧去空白；值本身<b>原样保留</b>，因为值就是语义。 */
+    private static String normalizeParameter(String rawParameter) {
+        String token = rawParameter.trim();
+        if (token.isEmpty()) {
+            return "";
+        }
+        int equals = token.indexOf('=');
+        if (equals < 0) {
+            return token.toLowerCase(java.util.Locale.ROOT);
+        }
+        String key = token.substring(0, equals).trim().toLowerCase(java.util.Locale.ROOT);
+        String value = token.substring(equals + 1).trim();
+        return key + "=" + value;
+    }
+
+    private static String parameterKey(String normalizedParameter) {
+        int equals = normalizedParameter.indexOf('=');
+        return equals < 0 ? normalizedParameter : normalizedParameter.substring(0, equals);
     }
 
     public static ConnectionProperties fromEnv() {

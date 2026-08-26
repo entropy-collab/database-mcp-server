@@ -19,6 +19,7 @@ import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpValidationException;
+import com.entropy.database.mcp.monitor.HikariPoolStats;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.ByokProperties;
 import com.entropy.database.mcp.security.DataMaskingService;
@@ -514,8 +515,7 @@ class DynamicDataSourceManagerImplTest {
         assertThat(manager.getConnectionMetadata("a")).isNotNull();
     }
 
-    /** 最后一个名字消失时池才关闭，而且只关一次。 */
-    @Test
+    /** 最后一个名字消失时池才关闭，而且只关一次。 */    @Test
     void sharedPoolIsClosedOnceTheLastNameIsGone() {
         DeferringExecutor cacheExecutor = new DeferringExecutor();
         DynamicDataSourceManagerImpl manager = createManager(Duration.ofMinutes(30), cacheExecutor);
@@ -540,6 +540,40 @@ class DynamicDataSourceManagerImplTest {
         verify(context, times(1)).closePool();
         assertThat(manager.getConnectionCount()).isZero();
         assertThat(fingerprintIndexOf(manager)).isEmpty();
+    }
+
+    /**
+     * 别名与规范名共用一个 Hikari 池，但 {@code getPoolStats()} 必须为每个名字保留一条记录
+     * （{@code getPoolStatsForConnection} 是按名字查 map 的），因此每条记录要带上物理池身份，
+     * 否则汇总方无法区分「3 个名字」和「3 个池」。
+     */
+    @Test
+    void poolStatsTagEveryNameWithTheCanonicalPoolItActuallyUses() {
+        DynamicDataSourceManagerImpl manager = createManager();
+        ConnectionProperties props = connection("jdbc:mysql://localhost:3306/test", false);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+        HikariDataSource hikari = mock(HikariDataSource.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create(eq("a"), any(ConnectionProperties.class), eq(dialect)))
+                .thenReturn(context);
+        when(context.getDataSource()).thenReturn(hikari);
+        when(hikari.getHikariPoolMXBean()).thenReturn(mock(com.zaxxer.hikari.HikariPoolMXBean.class));
+
+        manager.acquire("a", props);
+        manager.acquire("b", props);
+
+        java.util.Map<String, HikariPoolStats> stats = manager.getPoolStats();
+
+        // 两个名字都要能按名字查到，别名条目不能从 map 里消失
+        assertThat(stats).containsOnlyKeys("a", "b");
+        assertThat(stats.get("a").canonicalName()).isEqualTo("a");
+        assertThat(stats.get("a").isAlias()).isFalse();
+        // 别名指向规范名，汇总时按这个字段折叠就只剩 1 个物理池
+        assertThat(stats.get("b").canonicalName()).isEqualTo("a");
+        assertThat(stats.get("b").isAlias()).isTrue();
+        assertThat(stats.values().stream().map(HikariPoolStats::canonicalName).distinct()).hasSize(1);
     }
 
     // ─── JDBC URL guard ─────────────────────────────────────────────────────

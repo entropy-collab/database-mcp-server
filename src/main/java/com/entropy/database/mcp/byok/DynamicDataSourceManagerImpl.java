@@ -632,6 +632,15 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         leasedCache.cleanUp();
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>每个缓存 key 仍然产出一条记录——{@code getPoolStatsForConnection} 是按名字查 map 的，别名条目一旦
+     * 缺失，用别名查就会变成「连接不存在」。但同一个物理池会挂在规范名和若干别名下（见 {@link #adoptAlias}），
+     * 所以每条记录都带上 {@code canonicalName = leased.getKey()}：{@link LeasedDataSource} 是别名与规范名
+     * 共享的同一个对象，它的 key 就是当初建池时用的规范名。汇总方（{@code PoolMonitorTools.getPoolStats}）
+     * 按这个字段去重计数，否则池数量和健康池数量都会按别名个数放大。
+     */
     @Override
     public Map<String, HikariPoolStats> getPoolStats() {
         Map<String, HikariPoolStats> result = new java.util.LinkedHashMap<>();
@@ -645,6 +654,8 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 log.debug("Skipping closed datasource: {}", key);
                 continue;
             }
+            // 别名与规范名是两个 key 指向同一个 LeasedDataSource，它的 key 即物理池身份
+            String canonicalName = leased.getKey() != null ? leased.getKey() : key;
             ByokDataSourceContext context = leased.getContext();
             DataSource ds = context.getDataSource();
             ConnectionMetadata meta = getConnectionMetadata(key);
@@ -669,6 +680,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                         }
                         result.put(key, new HikariPoolStats(
                                 key,
+                                canonicalName,
                                 meta != null ? meta.dialect() : "unknown",
                                 meta != null ? meta.jdbcUrlMasked() : "unknown",
                                 total, active, idle, waiting,
@@ -685,6 +697,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                         // Pool not initialized yet (HikariCP lazy init)
                         result.put(key, new HikariPoolStats(
                                 key,
+                                canonicalName,
                                 meta != null ? meta.dialect() : "unknown",
                                 meta != null ? meta.jdbcUrlMasked() : "unknown",
                                 0, 0, 0, 0,

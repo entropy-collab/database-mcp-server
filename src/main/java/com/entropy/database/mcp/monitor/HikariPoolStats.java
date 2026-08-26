@@ -23,6 +23,9 @@ import java.util.Map;
  * All values are captured atomically per-pool on each read.
  *
  * @param connectionName   logical name of the BYOK connection
+ * @param canonicalName    名字所指向的<b>物理池</b>身份：规范名自身填自己，别名填它复用的规范名。
+ *                         一个 Hikari 池可以同时挂在规范名和若干别名下，汇总统计必须按这个字段去重，
+ *                         否则「池数量 / 健康池数量」会按别名个数放大
  * @param dialect          database dialect (e.g. OracleDialect)
  * @param jdbcUrlMasked    masked JDBC URL for identification
  * @param totalConnections current total pool size
@@ -40,6 +43,7 @@ import java.util.Map;
  */
 public record HikariPoolStats(
         String connectionName,
+        String canonicalName,
         String dialect,
         String jdbcUrlMasked,
         int totalConnections,
@@ -59,7 +63,17 @@ public record HikariPoolStats(
         if (connectionName == null || connectionName.isBlank()) {
             throw new IllegalArgumentException("connectionName is required");
         }
+        // 缺省指向自己：调用方漏填时退化成「每个名字一个池」，只会少去重一次，
+        // 不会把某个池误判成别名而从汇总里消失
+        if (canonicalName == null || canonicalName.isBlank()) {
+            canonicalName = connectionName;
+        }
         healthWarnings = healthWarnings != null ? healthWarnings : List.of();
+    }
+
+    /** 该名字是否只是别名，即它与另一个名字共用同一个物理 Hikari 池。 */
+    public boolean isAlias() {
+        return !connectionName.equals(canonicalName);
     }
 
     /**
@@ -68,6 +82,9 @@ public record HikariPoolStats(
     public Map<String, Object> toMap() {
         java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
         m.put("connectionName", connectionName);
+        // 暴露物理池身份，运维才能看出「6 条记录其实是 2 个池」
+        m.put("canonicalName", canonicalName);
+        m.put("isAlias", isAlias());
         m.put("dialect", dialect);
         m.put("jdbcUrlMasked", jdbcUrlMasked);
         m.put("totalConnections", totalConnections);
