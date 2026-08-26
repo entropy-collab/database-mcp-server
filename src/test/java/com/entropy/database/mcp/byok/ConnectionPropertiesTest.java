@@ -233,21 +233,37 @@ class ConnectionPropertiesTest {
         assertThat(first.getCacheKey()).isEqualTo(second.getCacheKey());
     }
 
-    /** 查询串风格的顺序、大小写归一同样成立，但值必须原样参与比较。 */
+    /**
+     * 非目标参数（SSL、时区、超时等）不改变读到的数据，必须<b>不</b>参与指纹：BYOK 下连接由调用方
+     * 运行时创建，参数写法的随意差异如果都各开一个池，后端连接数会被推高到数据库扛不住。
+     */
     @Test
-    void fingerprintIgnoresQueryParameterOrderButNotValues() {
-        ConnectionProperties first = new ConnectionProperties(
+    void fingerprintIgnoresParametersThatDoNotChangeTheConnectionTarget() {
+        ConnectionProperties ssl = new ConnectionProperties(
                 "jdbc:mysql://host:3306/db?useSSL=true&serverTimezone=UTC", "user", "pass", null, null, null
         );
-        ConnectionProperties reordered = new ConnectionProperties(
-                "jdbc:mysql://host:3306/db?serverTimezone=UTC&usessl=true", "user", "pass", null, null, null
+        ConnectionProperties noSsl = new ConnectionProperties(
+                "jdbc:mysql://host:3306/db?useSSL=false&serverTimezone=Asia/Shanghai", "user", "pass", null, null, null
         );
-        ConnectionProperties otherTimezone = new ConnectionProperties(
-                "jdbc:mysql://host:3306/db?useSSL=true&serverTimezone=Asia/Shanghai", "user", "pass", null, null, null
+        ConnectionProperties bare = new ConnectionProperties(
+                "jdbc:mysql://host:3306/db", "user", "pass", null, null, null
         );
 
-        assertThat(first.getCacheKey()).isEqualTo(reordered.getCacheKey());
-        assertThat(first.getCacheKey()).isNotEqualTo(otherTimezone.getCacheKey());
+        assertThat(ssl.getCacheKey()).isEqualTo(noSsl.getCacheKey());
+        assertThat(ssl.getCacheKey()).isEqualTo(bare.getCacheKey());
+    }
+
+    /** 目标参数与非目标参数混在一起时，只有目标参数留在归一结果里。 */
+    @Test
+    void normalizeKeepsOnlyTargetParametersAndKeepsTheHostInTheBase() {
+        assertThat(ConnectionProperties.normalizeJdbcUrl(
+                "jdbc:sqlserver://host:1433;encrypt=true;databaseName=db"))
+                .isEqualTo("jdbc:sqlserver://host:1433;databasename=db");
+        assertThat(ConnectionProperties.normalizeJdbcUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1"))
+                .isEqualTo("jdbc:h2:mem:testdb");
+        assertThat(ConnectionProperties.normalizeJdbcUrl(
+                "jdbc:postgresql://host:5432/db?ssl=true&currentSchema=sales&connectTimeout=10"))
+                .isEqualTo("jdbc:postgresql://host:5432/db?currentschema=sales");
     }
 
     /**
@@ -264,16 +280,6 @@ class ConnectionPropertiesTest {
         );
 
         assertThat(lastWinsB.getCacheKey()).isNotEqualTo(lastWinsA.getCacheKey());
-    }
-
-    /** 分号风格的 base 自带 {@code //host:port}，不能被当成参数拆走。 */
-    @Test
-    void normalizeKeepsTheHostInTheBaseForSemicolonStyleUrls() {
-        assertThat(ConnectionProperties.normalizeJdbcUrl(
-                "jdbc:sqlserver://host:1433;encrypt=true;databaseName=db"))
-                .isEqualTo("jdbc:sqlserver://host:1433;databasename=db;encrypt=true");
-        assertThat(ConnectionProperties.normalizeJdbcUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1"))
-                .isEqualTo("jdbc:h2:mem:testdb;db_close_delay=-1");
     }
 
     /** 无参数的 URL 原样返回，避免归一化本身引入新的差异。 */

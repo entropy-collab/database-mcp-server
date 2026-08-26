@@ -115,27 +115,34 @@ public record ConnectionProperties(
     }
 
     /**
-     * 把 JDBC URL 归一成用于去重的规范形式：<b>保留</b>全部参数的语义，只消除无意义差异
-     * （参数顺序、键的大小写、键值两侧的空白、空参数段）。
+     * 把 JDBC URL 归一成用于去重的规范形式：只保留<b>决定连接目标</b>的参数
+     * （见 {@link #TARGET_PARAMETER_KEYS}），其余参数一律丢弃，并消除顺序、键大小写与空白差异。
      *
-     * <p>为什么不能「截掉参数」：这个结果直接进 {@link #getCacheKey()}，而指纹相同就意味着两个连接名
-     * 共用同一个 Hikari 池。参数里有<em>语义</em>参数——SQL Server / DB2 的 {@code ;databaseName=...}、
-     * PostgreSQL 的 {@code ?currentSchema=...}、MySQL 的 {@code ?connectionTimeZone=...}——一旦被丢弃，
-     * {@code ;databaseName=a} 与 {@code ;databaseName=b} 会被判成同一个物理连接，两个不同的库共用一个池，
-     * 调用方以为在读 a 其实读到 b，这是数据串库。旧实现「{@code ?} 之后整段丢弃」已经在 PostgreSQL 的
-     * {@code ?currentSchema=a} / {@code ?currentSchema=b} 上踩到了这个坑；而分号风格的参数旧实现完全没识别，
-     * 所以口径必须往<em>保守</em>方向改：宁可少去重一次（多开一个池，只是多占资源），也绝不合并语义不同的 URL。
+     * <p>为什么不能「把参数全丢掉」：这个结果直接进 {@link #getCacheKey()}，而指纹相同就意味着两个连接名
+     * 共用同一个 Hikari 池。{@code ;databaseName=...}（SQL Server / DB2）、{@code ?currentSchema=...}
+     * （PostgreSQL）决定的是「读哪个库、哪个 schema」——同一套账号密码下这两个值不同却共用一个池，
+     * 调用方以为在读 a 其实读到 b，这是数据串库。旧实现「{@code ?} 之后整段丢弃」正是这个形状，
+     * 而分号风格的参数旧实现完全没识别。账号密码本来就在指纹里（见 {@link #getCacheKey()}），
+     * 但它<em>区分不出</em>同一个账号连不同库/schema 的情况，所以目标类参数必须参与指纹。
+     *
+     * <p>为什么不能「把参数全留下」：{@code useSSL}、{@code serverTimezone}、各类超时与缓存开关
+     * 都不改变读到的数据，却会让「同一个库换个参数写法」变成一个新池。BYOK 下连接是调用方运行时创建的，
+     * 参数写法的随意差异会把后端连接数推高（上限为 {@code byok.max-cached-connections} ×
+     * {@code byok.pool-size}），数据库先扛不住。
+     *
+     * <p>代价：{@link #TARGET_PARAMETER_KEYS} 之外的冷门驱动可能还有别的「改变可见数据」的参数，
+     * 那种情况会被误合并成同一个池。这是明确选择的权衡——名单要随遇到的驱动扩充，不是一劳永逸的。
      *
      * <p>覆盖两种参数风格：{@code ?k=v&k2=v2}（MySQL / PostgreSQL）与 {@code ;k=v;k2=v2}
      * （SQL Server / DB2 / H2）。切分点取第一个 {@code ?} 或 {@code ;}，其前面整段是 base——分号风格的
      * base 本身带 {@code //host:port}，不能把 host 当成参数处理。
      *
-     * <p>同一个键出现多次时保持原有顺序不排序：多数驱动是「后者覆盖前者」，
+     * <p>同一个目标参数键出现多次时保持原有顺序不排序：多数驱动是「后者覆盖前者」，
      * {@code ?currentSchema=a&currentSchema=b} 与 {@code ?currentSchema=b&currentSchema=a} 生效值不同，
-     * 排序会把它们抹成同一个指纹。这里也不再丢弃 {@code #} 之后的内容，理由同上——凡是丢弃就有合并风险。
+     * 排序会把它们抹成同一个指纹。
      *
      * <p>e.g. {@code "jdbc:sqlserver://host:1433;encrypt=true;databaseName=db"}
-     *     → {@code "jdbc:sqlserver://host:1433;databasename=db;encrypt=true"}
+     *     → {@code "jdbc:sqlserver://host:1433;databasename=db"}
      */
     static String normalizeJdbcUrl(String jdbcUrl) {
         if (jdbcUrl == null || jdbcUrl.isBlank()) return jdbcUrl;
@@ -153,7 +160,7 @@ public record ConnectionProperties(
         java.util.List<String> params = new java.util.ArrayList<>();
         for (String raw : jdbcUrl.substring(split + 1).split("[;&]")) {
             String normalized = normalizeParameter(raw);
-            if (!normalized.isEmpty()) {
+            if (!normalized.isEmpty() && TARGET_PARAMETER_KEYS.contains(parameterKey(normalized))) {
                 params.add(normalized);
             }
         }
@@ -169,6 +176,22 @@ public record ConnectionProperties(
 
         return base + opener + String.join(separator, ordered);
     }
+
+    /**
+     * 参数键（小写）白名单：只有这些会改变「连到哪个库、默认哪个 schema」，即改变调用方能看到的数据。
+     * 其余参数（SSL、时区、超时、缓存、驱动行为开关）不参与指纹，避免同一个库因为参数写法不同就多开一个池。
+     *
+     * <p>不含 H2 的 {@code INIT} 之类可执行 SQL 的参数：那类参数由 {@code ByokUrlGuard} 的危险参数
+     * 黑名单直接拒绝，不该走到指纹这一步。
+     */
+    private static final java.util.Set<String> TARGET_PARAMETER_KEYS = java.util.Set.of(
+            "databasename",   // SQL Server / DB2
+            "database",       // 部分驱动（jTDS、ClickHouse 等）
+            "currentschema",  // PostgreSQL / DB2
+            "schema",
+            "searchpath"
+    );
+
 
     /**
      * 第一个参数分隔符（{@code ?} 或 {@code ;}）的下标，都没有时返回 -1。
