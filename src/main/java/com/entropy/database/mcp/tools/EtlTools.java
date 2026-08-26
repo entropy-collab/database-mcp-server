@@ -270,7 +270,7 @@ public class EtlTools extends McpToolBase {
 
     @McpTool(description = """
             【表数据质量校验】统计指定列的空值、整表在这些列上的重复行，并给出通过率评分。
-            前置条件：需开启 entropy.mcp.gateway.enabled=true；连接已注册。省略 columns 时会读取 Oracle 数据字典 user_tab_columns 自动取列，非 Oracle 库请显式传入 columns。
+            前置条件：需开启 entropy.mcp.gateway.enabled=true；连接已注册。省略 columns 时按连接所用方言读取该表的列元数据自动取列，8 种方言均支持。
             使用场景：数据搬运后做落地校验、排查主键或唯一键重复、快速评估某张表的数据整洁度。
             检查项：每个列各做一次 IS NULL 计数（发现即记 NULL_VALUES，severity=WARNING）；对全部列组合做一次重复行计数（发现即记 DUPLICATES，severity=ERROR）；再统计整表行数。
             返回字段：summary（含 table、totalRows、columnsChecked、issuesFound、totalChecks、passed、failed、qualityScore）、issues（数组，每项含 type、column 或 columns、count、severity）、message。
@@ -281,16 +281,20 @@ public class EtlTools extends McpToolBase {
     public Map<String, Object> validateDataQuality(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
             @McpToolParam(description = "要校验的表名，须为该方言下的合法标识符") String tableName,
-            @McpToolParam(description = "要检查的列名列表；省略或传空列表时自动读取表的全部列（该自动读取依赖 Oracle 的 user_tab_columns）", required = false) List<String> columns) {
+            @McpToolParam(description = "要检查的列名列表；省略或传空列表时按连接方言的列元数据查询自动读取表的全部列", required = false) List<String> columns) {
         return safeExecute(() -> {
             DatabaseDialect dialect = routingFacade.getDialect(connectionName);
             if (!dialect.isValidIdentifier(tableName)) {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid table name: " + tableName + " (connectionName=" + connectionName + ", tableName=" + tableName + ")");
             }
             String validatedTable = dialect.normalizeTableName(tableName);
+            // 自动取列原来直接查 Oracle 专有的数据字典 user_tab_columns。那张表只有 Oracle 有，所以在
+            // MySQL/PostgreSQL/SQL Server/DB2/SQLite/H2/Generic 上，调用方只要省略 columns，这条查询就会以
+            // 「表/视图不存在」的 SQL 错误终止整个工具——即工具在 8 个方言里只有 1 个能用。改走方言层的
+            // columnsQuery：各方言各自指向自己的列元数据来源（information_schema.columns、SYSCAT.COLUMNS、
+            // pragma_table_info、all_tab_columns），语义一致且不依赖任何单一厂商的字典表。
             List<String> colList = (columns == null || columns.isEmpty())
-                    ? routingFacade.queryRows("SELECT column_name FROM user_tab_columns WHERE table_name = ?", connectionName, validatedTable)
-                            .stream().map(row -> (String) row.get("column_name")).toList()
+                    ? readColumnNames(dialect, connectionName, validatedTable)
                     : columns;
             for (String column : colList) {
                 if (!dialect.isValidIdentifier(column)) {
@@ -583,6 +587,43 @@ public class EtlTools extends McpToolBase {
         }
         Object value = rows.get(0).values().iterator().next();
         return value instanceof Number number ? number.longValue() : null;
+    }
+
+    /**
+     * 表的列名清单，取自方言层的列元数据查询。
+     *
+     * <p>绑定参数契约（见 {@link DatabaseDialect} 类注释）：单表元数据查询有且只有 1 个 {@code ?}，
+     * 绑定值必须是方言归一化后的表名；schema 永不作为占位符，由方言内联进 SQL。多绑一个 schema 或
+     * 一个都不绑，都会在 8 个方言里立刻炸（Oracle 会把 owner 绑成 NULL 从而一列都查不到）。
+     *
+     * @param normalizedTable 已经过 {@link DatabaseDialect#normalizeTableName(String)} 的表名
+     */
+    private List<String> readColumnNames(DatabaseDialect dialect, String connectionName, String normalizedTable) {
+        return routingFacade.queryRows(dialect.columnsQuery(normalizedTable, null), connectionName, normalizedTable)
+                .stream()
+                .map(EtlTools::columnNameOf)
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    /**
+     * 从元数据结果行里大小写不敏感地取 {@code column_name}。
+     *
+     * <p>结果集列标签的大小写因库而异：Oracle/H2/DB2/SQL Server 报 {@code COLUMN_NAME}，MySQL/
+     * PostgreSQL 报 {@code column_name}。按固定拼写直接取会读成 null，列清单静默变空——校验会声称
+     * 「0 列全部通过、质量分 100」，且与「表真的没有可检查的列」不可区分。与
+     * {@code QualityCheckService.columnNameOf} 保持同一读法。
+     */
+    private static String columnNameOf(Map<String, Object> row) {
+        if (row == null) {
+            return null;
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase("column_name")) {
+                return entry.getValue() == null ? null : String.valueOf(entry.getValue());
+            }
+        }
+        return null;
     }
 
     private void validateTransformParams(String connectionName, String sourceTable,
