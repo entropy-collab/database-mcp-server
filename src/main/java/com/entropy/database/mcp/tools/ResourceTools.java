@@ -15,8 +15,8 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.byok.ConnectionUtils;
 import com.entropy.database.mcp.facade.DatabaseOperations;
-import com.entropy.database.mcp.util.ConnectionUtils;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.spec.McpSchema;

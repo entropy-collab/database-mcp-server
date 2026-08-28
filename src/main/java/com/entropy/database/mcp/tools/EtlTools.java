@@ -15,7 +15,7 @@
  */
 package com.entropy.database.mcp.tools;
 
-import com.entropy.database.mcp.config.DatabaseConstants;
+import com.entropy.database.mcp.properties.DatabaseConstants;
 import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
