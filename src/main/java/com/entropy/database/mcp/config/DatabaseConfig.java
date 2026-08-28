@@ -34,6 +34,7 @@ import com.entropy.database.mcp.properties.OptimizerProperties;
 import com.entropy.database.mcp.properties.QualityProperties;
 import com.entropy.database.mcp.properties.QueryConfig;
 import com.entropy.database.mcp.properties.StatementTimeoutProperties;
+import com.entropy.database.mcp.properties.ToolExposureProperties;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
@@ -55,7 +56,7 @@ import java.util.function.Supplier;
  * following Spring's DataSourceBuilder pattern.
  */
 @Configuration
-@EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class, BackupProperties.class, CatalogProperties.class, CdcProperties.class, LineageProperties.class, OptimizerProperties.class, QualityProperties.class, StatementTimeoutProperties.class})
+@EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class, BackupProperties.class, CatalogProperties.class, CdcProperties.class, LineageProperties.class, OptimizerProperties.class, QualityProperties.class, StatementTimeoutProperties.class, ToolExposureProperties.class})
 public class DatabaseConfig {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseConfig.class);

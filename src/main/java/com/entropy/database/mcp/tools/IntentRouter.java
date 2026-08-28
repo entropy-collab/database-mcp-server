@@ -15,153 +15,194 @@
  */
 package com.entropy.database.mcp.tools;
 
+import com.entropy.database.mcp.tools.ToolCatalog.ToolDescriptor;
+import org.springframework.ai.mcp.annotation.McpTool;
+import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 
-import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * 意图驱动的白名单过滤路由器。
+ * 工具推荐器：把一句自然语言诉求映射到本服务真实注册的 MCP 工具上。
  *
- * <p>根据用户输入的自然语言意图，通过关键词匹配返回推荐使用的工具名称列表。
- * 支持 QUERY、SCHEMA、ANALYSIS、DDL、BACKUP、ETL、LINEAGE、CROSS_DB、HEALTH、AUDIT、
- * ADMIN、CDC、QUALITY、SESSION、ORACLE_SESSION、EXPORT 等意图类别。
+ * <p>候选集完全来自 {@link ToolCatalog}（运行期反射得到的真实工具名、分组、标签、摘要），
+ * 因此不存在会漂移的静态工具名清单。
+ *
+ * <p><b>破坏性变更（0.1.4）</b>：本类曾是 {@code ToolWhitelistAspect} 的判定依据，在
+ * {@code entropy.mcp.intent.filter.enabled=true} 时会对不在推荐列表里的工具调用抛
+ * {@code SEC003 TOOL_FILTERED}。该拦截语义已彻底移除，原因有二：
+ * <ul>
+ *   <li>它不省任何 token —— {@code tools/list} 仍把全部工具交给模型，只是在调用落地后才拒绝；</li>
+ *   <li>它依赖硬编码工具名表，已与真实方法名漂移，一旦启用就会大面积误杀。</li>
+ * </ul>
+ * 真正的暴露面收敛改由 {@link ToolExposureFilter} 在启动期裁剪工具清单实现。配置项
+ * {@code entropy.mcp.intent.filter.enabled} 与错误码 {@code SEC003} 同步删除，
+ * 升级时若外部配置里仍有该键，它将被忽略。
  */
 @Component
-public class IntentRouter {
+public class IntentRouter extends McpToolBase {
 
-    private static final Map<String, List<String>> INTENT_KEYWORDS;
+    private static final int DEFAULT_LIMIT = 8;
+    private static final int MAX_LIMIT = 30;
 
-    private static final Map<String, List<String>> INTENT_TOOLS;
+    /** 命中工具名或标签的权重，明显高于仅命中摘要正文。 */
+    private static final int STRONG_MATCH_WEIGHT = 3;
+    private static final int WEAK_MATCH_WEIGHT = 1;
 
-    static {
-        INTENT_KEYWORDS = new HashMap<>();
-        INTENT_KEYWORDS.put("QUERY", List.of(
-                "query", "select", "查询", "查询一下", "搜一下", "查找", "检索"
-        ));
-        INTENT_KEYWORDS.put("SCHEMA", List.of(
-                "table", "schema", "表", "字段", "结构", "列", "describe", "list",
-                "查看表", "查看schema", "表结构", "字段列表"
-        ));
-        INTENT_KEYWORDS.put("ANALYSIS", List.of(
-                "explain", "analyze", "分析", "优化", "索引建议", "重写", "性能",
-                "风险", "评估", "plan", "plan analysis"
-        ));
-        INTENT_KEYWORDS.put("DDL", List.of(
-                "ddl", "create", "alter", "drop", "truncate", "建表", "修改表",
-                "删除表", "执行ddl", "dml"
-        ));
-        INTENT_KEYWORDS.put("BACKUP", List.of(
-                "backup", "restore", "备份", "恢复", "quick restore", "list backup", "snapshot"
-        ));
-        INTENT_KEYWORDS.put("ETL", List.of(
-                "etl", "insert", "transform", "upsert", "load", "数据加载",
-                "批量插入", "转换", "同步", "validate data"
-        ));
-        INTENT_KEYWORDS.put("LINEAGE", List.of(
-                "lineage", "upstream", "downstream", "impact", "血缘", "上游",
-                "下游", "影响分析", "依赖"
-        ));
-        INTENT_KEYWORDS.put("CROSS_DB", List.of(
-                "cross db", "cross-database", "remote table", "dblink", "db link",
-                "跨库", "远程表", "dblink"
-        ));
-        INTENT_KEYWORDS.put("HEALTH", List.of(
-                "health", "session", "lock", "blocking", "tablespace", "监控",
-                "会话", "锁", "阻塞", "健康"
-        ));
-        INTENT_KEYWORDS.put("AUDIT", List.of(
-                "audit", "slow query", "sql pattern", "审计", "慢查询", "sql模式", "日志"
-        ));
-        INTENT_KEYWORDS.put("ADMIN", List.of(
-                "admin", "connection", "pool", "cache", "statistics", "配置",
-                "连接", "缓存", "统计"
-        ));
-        INTENT_KEYWORDS.put("CDC", List.of(
-                "cdc", "change data", "捕获", "增量", "同步数据", "lsn"
-        ));
-        INTENT_KEYWORDS.put("QUALITY", List.of(
-                "quality", "数据质量", "质量规则", "质量报告"
-        ));
-        INTENT_KEYWORDS.put("SESSION", List.of(
-                "session store", "session get", "session keys", "session remove",
-                "session purge", "会话管理", "session info"
-        ));
-        INTENT_KEYWORDS.put("ORACLE_SESSION", List.of(
-                "kill session", "终止会话", "杀会话"
-        ));
-        INTENT_KEYWORDS.put("EXPORT", List.of(
-                "export", "导出", "csv", "json"
-        ));
+    private static final int HIGH_CONFIDENCE_SCORE = 6;
+    private static final int MEDIUM_CONFIDENCE_SCORE = 3;
 
-        INTENT_TOOLS = new HashMap<>();
-        INTENT_TOOLS.put("QUERY", List.of("executeQuery", "batchQuery", "executeSqlTemplate", "exportCsv", "exportJson"));
-        INTENT_TOOLS.put("SCHEMA", List.of("listTables", "searchTables", "describeTable", "listIndexes", "listViews", "listSchemas", "listSequences"));
-        INTENT_TOOLS.put("ANALYSIS", List.of("explainPlan", "assessQueryRisk", "analyzeQuery", "recommendIndexes", "suggestRewrites", "interpretPlan"));
-        INTENT_TOOLS.put("DDL", List.of("executeDdl", "executeDdlRemote", "executeDdlBatch", "validateDdl"));
-        INTENT_TOOLS.put("BACKUP", List.of("backupTable", "backupSchema", "restoreBackup", "quickRestore", "listBackups", "getBackup", "deleteBackup", "cleanupBackups"));
-        INTENT_TOOLS.put("ETL", List.of("createNamedConnection", "insertData", "insertQueryResult", "transformAndInsert", "upsertData", "validateDataQuality", "exportQueryToTable", "submitEtlJob", "getEtlJobStatus", "listEtlJobs", "stopEtlJob"));
-        INTENT_TOOLS.put("LINEAGE", List.of("getUpstream", "getDownstream", "analyzeLineage", "getImpactAnalysis", "exportMermaid", "exportDot", "listAllEdges"));
-        INTENT_TOOLS.put("CROSS_DB", List.of("queryCrossDatabaseJoin", "listRemoteTables", "describeRemoteTable", "queryComplexCrossDatabaseAnalytics", "getCrossDatabaseTemplates", "listDatabases", "createDbLink", "dropDbLink", "testDbLink"));
-        INTENT_TOOLS.put("HEALTH", List.of("checkHealth", "listActiveSessions", "showLocks", "showBlockingTree", "listTablespaces", "listDataFiles", "estimateTableSize", "listInvalidObjects", "gatherTableStats", "showIndexStatus", "flashbackQuery", "showUndoUsage", "listCurrentPrivileges", "listGrants"));
-        INTENT_TOOLS.put("AUDIT", List.of("getAuditLogs", "getSlowQueries", "getSqlPatternStats", "getDataAccessReport", "getProtectionReport", "getAuditMetrics"));
-        INTENT_TOOLS.put("ADMIN", List.of("listConnections", "describeConnection", "getConnectionCount", "getPoolStats", "getPoolStatsForConnection", "clearCache", "getStatistics", "getMetrics", "getOptimizerConfig", "getCatalogConfig", "getLineageConfig", "getCdcConfig"));
-        INTENT_TOOLS.put("CDC", List.of("checkCdcSupport", "readChanges", "getCurrentLsn", "createMirrorTable", "registerSubscription", "listSubscriptions", "unregisterSubscription", "getCdcStatus", "getCdcConfig"));
-        INTENT_TOOLS.put("QUALITY", List.of("checkTableQuality", "listQualityRuleTemplates", "getQualityAlertSummary"));
-        INTENT_TOOLS.put("SESSION", List.of("sessionStore", "sessionGet", "sessionKeys", "sessionRemove", "sessionPurge", "getSessionInfo"));
-        INTENT_TOOLS.put("ORACLE_SESSION", List.of("killSession"));
-        INTENT_TOOLS.put("EXPORT", List.of("exportCsv", "exportJson"));
+    /** 参与匹配的最短拉丁词长度，过滤 of/in 之类噪声。 */
+    private static final int MIN_LATIN_TOKEN_LENGTH = 3;
+
+    private final ToolCatalog catalog;
+
+    public IntentRouter(ToolCatalog catalog) {
+        this.catalog = catalog;
+    }
+
+    @McpTool(name = "suggestTools", description = """
+            【推荐工具】根据一句自然语言诉求，从本服务真实注册的工具里挑出最相关的若干个，返回工具名与用途摘要。
+            前置条件：无，不访问数据库，不需要 connection。
+            使用场景：不确定该调哪个工具时先问一次；工具数量多、名称相近（如 getStatistics 与 getPoolStats、backupTable 与 exportQueryToTable）时用它缩小范围。
+            返回字段：intent（回显输入）、confidence（high/medium/low/none，反映匹配强度而非结果正确性）、totalTools（当前实际注册的工具总数）、suggestions（数组，每项含 name、group、summary、tags、score）。
+            注意：这是建议而非授权，返回列表之外的工具同样可以直接调用；confidence=none 表示没有任何关键词命中，此时 suggestions 为空数组，应改用更具体的措辞重试。
+            不要用于：获取表结构或字段（用 describeTable）；执行查询（用 executeQuery）；查看连接清单（用 listConnections）。
+            标签：[read, meta, discovery, routing]
+            """,
+            annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
+    public Map<String, Object> suggestTools(
+            @McpToolParam(description = """
+                    自然语言诉求，中文或英文均可，例如"想看某张表的字段和索引"、"备份一张表"、"export csv"。
+                    直接传 SQL 语句意义不大：匹配依据是工具用途描述，不是 SQL 语义。
+                    """) String intent,
+            @McpToolParam(description = "返回条数上限，默认 8，最大 30；超出范围会被收敛到边界值。",
+                    required = false) Integer limit) {
+        validateRequired(intent, "intent");
+        int effectiveLimit = limit == null ? DEFAULT_LIMIT : Math.clamp(limit, 1, MAX_LIMIT);
+
+        Set<String> tokens = tokenize(intent);
+        List<Map<String, Object>> suggestions = new ArrayList<>();
+        int topScore = 0;
+
+        List<Scored> scored = new ArrayList<>();
+        for (ToolDescriptor descriptor : catalog.descriptors()) {
+            // 跳过自身，避免"推荐工具"把自己排进结果里
+            if (descriptor.name().equals("suggestTools")) {
+                continue;
+            }
+            int score = score(descriptor, tokens);
+            if (score > 0) {
+                scored.add(new Scored(descriptor, score));
+            }
+        }
+        scored.sort(Comparator.comparingInt(Scored::score).reversed()
+                .thenComparing(s -> s.descriptor().name()));
+
+        for (Scored s : scored.stream().limit(effectiveLimit).toList()) {
+            topScore = Math.max(topScore, s.score());
+            suggestions.add(Map.of(
+                    "name", s.descriptor().name(),
+                    "group", s.descriptor().group(),
+                    "summary", s.descriptor().summary(),
+                    "tags", s.descriptor().tags(),
+                    "score", s.score()));
+        }
+
+        return success(Map.of(
+                "intent", intent,
+                "confidence", confidenceOf(topScore),
+                "totalTools", catalog.size(),
+                "suggestions", suggestions));
+    }
+
+    private record Scored(ToolDescriptor descriptor, int score) {
+    }
+
+    private static int score(ToolDescriptor descriptor, Set<String> tokens) {
+        String name = descriptor.name().toLowerCase();
+        String text = descriptor.searchableText();
+        int score = 0;
+        for (String token : tokens) {
+            if (name.contains(token) || descriptor.tags().contains(token)
+                    || descriptor.group().contains(token)) {
+                score += STRONG_MATCH_WEIGHT;
+            } else if (text.contains(token)) {
+                score += WEAK_MATCH_WEIGHT;
+            }
+        }
+        return score;
+    }
+
+    private static String confidenceOf(int topScore) {
+        if (topScore >= HIGH_CONFIDENCE_SCORE) {
+            return "high";
+        }
+        if (topScore >= MEDIUM_CONFIDENCE_SCORE) {
+            return "medium";
+        }
+        return topScore > 0 ? "low" : "none";
     }
 
     /**
-     * 根据用户输入路由意图并返回推荐工具列表。
+     * 切词：拉丁串按非字母数字切分并丢掉过短的词，CJK 串取全部二字连续片段。
      *
-     * @param userInput 用户的自然语言查询或指令
-     * @return 包含 intent、recommendedTools、confidence 的结果 Map
+     * <p>取二字片段而不是整串，是因为中文诉求里的有效关键词长度不定（"备份"、"表结构"、
+     * "慢查询"），二字片段能同时覆盖这几种情况，且不需要引入分词依赖。
      */
-    public Map<String, Object> route(String userInput) {
-        if (userInput == null || userInput.isBlank()) {
-            return Map.of("intent", "UNKNOWN", "recommendedTools", List.of(), "confidence", "none");
+    static Set<String> tokenize(String input) {
+        Set<String> tokens = new LinkedHashSet<>();
+        String lower = input.toLowerCase();
+        for (String word : lower.split("[^\\p{IsHan}a-z0-9]+")) {
+            if (word.isEmpty()) {
+                continue;
+            }
+            if (word.codePoints().anyMatch(Character::isIdeographic)) {
+                collectHanTokens(word, tokens);
+            } else if (word.length() >= MIN_LATIN_TOKEN_LENGTH) {
+                tokens.add(word);
+            }
         }
+        return tokens;
+    }
 
-        String lowerInput = userInput.toLowerCase();
-        String matchedIntent = null;
-        int maxScore = 0;
-
-        for (Map.Entry<String, List<String>> entry : INTENT_KEYWORDS.entrySet()) {
-            int score = 0;
-            for (String keyword : entry.getValue()) {
-                if (lowerInput.contains(keyword.toLowerCase())) {
-                    score += keyword.length(); // 较长的关键词权重更高
+    private static void collectHanTokens(String word, Set<String> tokens) {
+        StringBuilder han = new StringBuilder();
+        for (int i = 0; i < word.length(); i++) {
+            char c = word.charAt(i);
+            if (Character.isIdeographic(c)) {
+                han.append(c);
+            } else {
+                flushHan(han, tokens);
+                if (Character.isLetterOrDigit(c)) {
+                    // 中英混排片段里的拉丁/数字部分单独成词，如 "csv导出" 里的 csv
+                    int start = i;
+                    while (i < word.length() && !Character.isIdeographic(word.charAt(i))) {
+                        i++;
+                    }
+                    String latin = word.substring(start, i);
+                    if (latin.length() >= MIN_LATIN_TOKEN_LENGTH) {
+                        tokens.add(latin);
+                    }
+                    i--;
                 }
             }
-            if (score > maxScore) {
-                maxScore = score;
-                matchedIntent = entry.getKey();
-            }
         }
+        flushHan(han, tokens);
+    }
 
-        String intent = matchedIntent != null ? matchedIntent : "UNKNOWN";
-        List<String> tools = matchedIntent != null
-                ? INTENT_TOOLS.get(matchedIntent)
-                : List.of();
-
-        String confidence;
-        if (matchedIntent == null) {
-            confidence = "none";
-        } else if (maxScore >= 10) {
-            confidence = "high";
-        } else if (maxScore >= 5) {
-            confidence = "medium";
-        } else {
-            confidence = "low";
+    private static void flushHan(StringBuilder han, Set<String> tokens) {
+        if (han.length() == 1) {
+            tokens.add(han.toString());
         }
-
-        return Map.of(
-                "intent", intent,
-                "recommendedTools", tools,
-                "confidence", confidence
-        );
+        for (int i = 0; i + 2 <= han.length(); i++) {
+            tokens.add(han.substring(i, i + 2));
+        }
+        han.setLength(0);
     }
 }

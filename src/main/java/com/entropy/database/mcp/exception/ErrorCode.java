@@ -27,7 +27,9 @@ public enum ErrorCode {
     // ── Security (安全/权限) ───────────────────────────────────────────────
     SECURITY_VIOLATION("SEC001", "Security violation"),
     SQL_OPERATION_NOT_ALLOWED("SEC002", "SQL operation not allowed"),
-    TOOL_FILTERED("SEC003", "Tool is not available for the current request"),
+    // 注意：SEC003 (TOOL_FILTERED) 已在 0.1.4 随 ToolWhitelistAspect 一并移除，
+    // 工具暴露面改由 ToolExposureFilter 在启动期裁剪，不再有"调用时被过滤"这种错误。
+    // 该编码不要复用，避免与旧客户端的错误处理逻辑冲突。
 
     // ── Federated (跨库/网关) ──────────────────────────────────────────────
     FEDERATED_QUERY_FAILED("FED001", "Federated query failed"),

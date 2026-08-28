@@ -100,7 +100,6 @@ public class McpToolException extends RuntimeException {
                 || errorCode == ErrorCode.DATA_VALIDATION_FAILED
                 || errorCode == ErrorCode.CONNECTION_NOT_FOUND
                 || errorCode == ErrorCode.CONNECTION_READONLY
-                || errorCode == ErrorCode.TOOL_FILTERED
                 || errorCode == ErrorCode.SQL_OPERATION_NOT_ALLOWED;
     }
 }

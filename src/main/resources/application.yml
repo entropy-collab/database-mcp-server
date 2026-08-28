@@ -50,8 +50,6 @@ spring:
         name: database-mcp-server
         version: 0.1.3
         protocol: STATELESS
-        tool-callback:
-          auto-detect: true
 
   main:
     banner-mode: off
@@ -207,3 +205,30 @@ entropy:
     monitoring:
       pool:
         enabled: true
+    # MCP 工具暴露面。126 个工具全量进 tools/list 时，模型每轮都要读完整的工具描述，
+    # 既涨 token 也让相近工具（getStatistics / getPoolStats、backupTable /
+    # exportQueryToTable）更容易被选错。这里的裁剪发生在启动期：不在清单里的工具根本不会
+    # 出现在 tools/list，而不是调用时才报错。
+    #
+    # 三个开关全空（当前默认）= 不裁剪，行为与 0.1.3 一致。生效顺序：
+    #   groups（非空则只留这些分组） → 并入 include → 减去 exclude（优先级最高）
+    #
+    # 分组名由工具类名推导，去掉尾部 Tools 后转 kebab-case，可用值：
+    #   query / schema / ddl-execution / export / query-analysis / optimization
+    #   database-health / pool-monitor / cache-admin / connection-admin / sql-audit
+    #   etl / cdc / backup / catalog / lineage / quality / cross-database
+    #   mcp-session-dispatch / oracle-session / intent-router
+    # 启动日志会打印 "MCP tool exposure: X of Y tools registered" 与每组保留数量。
+    #
+    # 注意：include/exclude/groups 里写了不存在的名字会直接启动失败，不会静默忽略。
+    # 这是刻意的——工具改名后配置悄悄失效比启动报错难查得多。改工具名时记得同步这里。
+    #
+    # 数据面（只读查询，高并发）参考配置：
+    #   groups: [query, schema, query-analysis, export, intent-router]
+    #   include: [checkHealth]
+    # 收敛专家级低频操作参考配置：
+    #   exclude: [flashbackQuery, createDbLink, dropDbLink, showBlockingTree, killSession]
+    tools:
+      groups: []
+      include: []
+      exclude: []
