@@ -48,7 +48,8 @@ import org.slf4j.LoggerFactory;
  * {@code spring-ai-starter-mcp-server-webmvc}. In that mode the MCP protocol has no session:
  * {@code HttpServletStatelessServerTransport} never issues or reads an {@code Mcp-Session-Id},
  * the stateless server handler has no {@code McpSyncServerExchange}, and the only per-request
- * object reaching application code is {@link io.modelcontextprotocol.common.McpTransportContext},
+ * object reaching application code is {@code io.modelcontextprotocol.common.McpTransportContext}
+ * (referenced as text on purpose: core must not depend on the MCP SDK),
  * an opaque key/value bag filled from the HTTP request by a {@code McpTransportContextExtractor}.
  * There is therefore nothing at the protocol layer to derive a stable, cross-call session identity
  * from.

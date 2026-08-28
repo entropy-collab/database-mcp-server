@@ -19,6 +19,58 @@
             <groupId>com.entropy.agent</groupId>
             <artifactId>database-mcp-core</artifactId>
         </dependency>
+
+        <!-- JdbcTemplate + HikariCP（monitor 包直接读 HikariPoolMXBean） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!--
+            SecurityConfig 住在这一层：它是 HTTP 入口的鉴权规则，不是 app 的装配细节。
+            oauth2-resource-server 提供 JwtAuthenticationConverter 那一族类型。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
+        <!--
+            只要 micrometer-core（MeterRegistry / Counter / Timer）。具体的 registry 实现是
+            部署选择，留在 app；换 Prometheus 以外的后端不需要改 infra。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.github.jsqlparser</groupId>
+            <artifactId>jsqlparser</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
+        <!--
+            H2 只出现在测试里：主代码对 H2 的唯一"引用"是 DialectUtils 里的驱动类名字符串，
+            编译期不需要它。
+        -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
 </project>

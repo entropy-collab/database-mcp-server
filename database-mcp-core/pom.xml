@@ -14,4 +14,42 @@
     <name>Entropy Database MCP Core</name>
     <description>内核层：异常、领域模型、配置属性、会话、缓存与工具方法，不依赖任何本仓库模块</description>
 
+    <!--
+        core 刻意不依赖 spring-jdbc / spring-web / MCP SDK：它不碰数据库连接，也不知道自己
+        被 MCP 暴露。spring-boot 只为 @ConfigurationProperties 与 Binder 而来，它顺带带入
+        spring-core / spring-context（@Component 等 stereotype 注解在这里）。
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot</artifactId>
+        </dependency>
+        <!--
+            只要 slf4j 门面，不要 spring-boot-starter（它会把 logback 钉进来）。日志实现
+            由最终应用决定，core 作为库不该替它选。
+        -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <!-- ValidationUtils 用 JSQLParser 做 WHERE 片段的白名单校验 -->
+        <dependency>
+            <groupId>com.github.jsqlparser</groupId>
+            <artifactId>jsqlparser</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+        <!-- BloomFilter -->
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
+    </dependencies>
+
 </project>

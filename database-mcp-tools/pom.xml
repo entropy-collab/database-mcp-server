@@ -19,6 +19,27 @@
             <groupId>com.entropy.agent</groupId>
             <artifactId>database-mcp-features</artifactId>
         </dependency>
+
+        <!--
+            MCP 暴露只在这一层：@McpTool 注解、McpSchema、SyncToolSpecification 都来自这里，
+            spring-web 的 @RestController 也由它带入。下层模块因此看不到 MCP SDK。
+        -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
+        </dependency>
+
+        <!-- aop 包的切面用到 AspectJ 注解 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aspectj</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.github.jsqlparser</groupId>
+            <artifactId>jsqlparser</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

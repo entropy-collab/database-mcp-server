@@ -33,6 +33,30 @@
         </dependency>
 
         <!--
+            可观测性的"出口"选择留在 app：infra 只依赖 micrometer-core 打点，换后端不需要
+            改下层模块。actuator 端点同理，是部署形态而非能力。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <!--
+            H2 是 runtime 而不是 test：application-test.yml 是随包发布的运行 profile，
+            配 dialect=h2 + test-data.enabled=true 由 TestDataInitializer 建样例库，
+            所以 H2 必须在可执行 jar 的运行期 classpath 上。
+        -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
             JDBC 驱动只在这里：没有任何代码直接引用驱动类，它们纯粹要求出现在运行期
             classpath 上。放在 app 意味着 core/infra/features 可以在不拖驱动的前提下被复用。
         -->
