@@ -1,0 +1,13 @@
+# 内置方言的 SPI 注册。这是 infra 模块唯一的 resources 文件：它不是配置（配置一律只放在
+# app 的 application*.yml），而是 ServiceLoader 的注册清单，按 JDK 约定必须随实现所在的 jar 一起发布。
+#
+# 第三方方言在自己的 jar 里放一份同名文件即可，两份会被 ServiceLoader 合并；重名时第三方胜出，
+# 见 DialectProvider#isBuiltIn。
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$Oracle
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$MySql
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$Postgres
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$SqlServer
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$Sqlite
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$Db2
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$H2
+com.entropy.database.mcp.dialect.BuiltInDialectProviders$Generic
