@@ -30,11 +30,16 @@ import org.springframework.stereotype.Component;
  * AOP aspect for automatic SQL validation before execution.
  *
  * <p>The pointcut can only ever take effect on {@link
- * com.entropy.database.mcp.facade.RoutingDatabaseFacade}, which is a {@code @Service} and therefore
+ * com.entropy.database.mcp.routing.RoutingDatabaseFacade}, which is a {@code @Service} and therefore
  * proxied. Its delegate {@code ByokDatabaseFacade} is package-private and constructed with
  * {@code new} per connection, so it is not a Spring bean and Spring AOP never weaves it — a pointcut
  * aimed at the delegate matches nothing at runtime, which is how SQL validation came to be declared
  * but inert.
+ *
+ * <p>The pointcut names the {@code routing} package, not {@code facade}: {@code facade} holds only
+ * capability interfaces, the implementations live in {@code routing}. Moving an implementation out of
+ * {@code routing} silently disarms this aspect, which is why {@code SqlValidationAspectTest} asserts
+ * that validation actually fires rather than merely that the aspect bean exists.
  *
  * <p>The same proxy constraint means calls the routing facade makes to its own methods bypass the
  * advice: {@code copyRows} reads its source through an internal {@code queryRows} call and is not
@@ -60,10 +65,10 @@ public class SqlValidationAspect {
      * tools use for arbitrary dialect SQL; without them the majority of statements reaching the
      * database would never be validated.
      */
-    @Pointcut("(execution(* com.entropy.database.mcp.facade..*.execute*(..))"
-            + " || execution(* com.entropy.database.mcp.facade..*.explain*(..))"
-            + " || execution(* com.entropy.database.mcp.facade..*.queryRows(..))"
-            + " || execution(* com.entropy.database.mcp.facade..*.copyRows(..)))"
+    @Pointcut("(execution(* com.entropy.database.mcp.routing..*.execute*(..))"
+            + " || execution(* com.entropy.database.mcp.routing..*.explain*(..))"
+            + " || execution(* com.entropy.database.mcp.routing..*.queryRows(..))"
+            + " || execution(* com.entropy.database.mcp.routing..*.copyRows(..)))"
             + " && args(java.lang.String, ..)")
     public void sqlExecutionMethod() {}
 

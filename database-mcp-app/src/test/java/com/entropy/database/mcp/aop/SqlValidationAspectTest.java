@@ -17,7 +17,7 @@ package com.entropy.database.mcp.aop;
 
 import com.entropy.database.mcp.config.TestSecurityConfig;
 import com.entropy.database.mcp.exception.McpSqlValidationException;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.routing.RoutingDatabaseFacade;
 import org.junit.jupiter.api.Test;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.annotation.Autowired;

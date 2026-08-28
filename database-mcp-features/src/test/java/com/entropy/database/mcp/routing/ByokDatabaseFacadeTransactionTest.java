@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.facade;
+package com.entropy.database.mcp.routing;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.exception.McpToolException;

@@ -18,7 +18,7 @@ package com.entropy.database.mcp.tools;
 import com.entropy.database.mcp.config.TestSecurityConfig;
 import com.entropy.database.mcp.dialect.GenericDialect;
 import com.entropy.database.mcp.exception.McpToolException;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.routing.RoutingDatabaseFacade;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;

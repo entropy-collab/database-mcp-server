@@ -22,7 +22,7 @@ import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.DynamicDataSourceManagerImpl;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.etl.JobExecutionEngine;
-import com.entropy.database.mcp.facade.RoutingDatabaseFacade;
+import com.entropy.database.mcp.routing.RoutingDatabaseFacade;
 import com.entropy.database.mcp.properties.ByokProperties;
 import com.entropy.database.mcp.properties.BackupProperties;
 import com.entropy.database.mcp.properties.CacheConfig;

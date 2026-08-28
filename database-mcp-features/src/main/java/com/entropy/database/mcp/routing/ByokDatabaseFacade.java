@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.facade;
+package com.entropy.database.mcp.routing;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
@@ -22,6 +22,13 @@ import com.entropy.database.mcp.domain.PlanAnalysis;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.exception.McpValidationException;
+import com.entropy.database.mcp.facade.DatabaseAdminOperations;
+import com.entropy.database.mcp.facade.DatabaseMetadataOperations;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
+import com.entropy.database.mcp.facade.DatabaseWriteOperations;
+import com.entropy.database.mcp.facade.MetaDataCallback;
+import com.entropy.database.mcp.facade.TransactionContext;
+import com.entropy.database.mcp.facade.TransactionalWork;
 import com.entropy.database.mcp.repository.BatchInsertHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

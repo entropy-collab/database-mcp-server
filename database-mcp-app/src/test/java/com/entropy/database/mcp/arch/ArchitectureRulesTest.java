@@ -63,6 +63,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Baselines must only ever be <em>lowered</em>. Raising one is the same as deleting the rule, and the
  * legitimate exceptions below are expressed as explicit predicates on the rules, never as baseline
  * padding, so the reason for every allowance stays readable in code.
+ *
+ * <h2>What Maven already enforces, and what it does not</h2>
+ * Since the repository was split into five Maven modules the <em>layer</em> direction is a
+ * compile-time constraint, so a rule that only restates it is dead weight — R3 ("lower layers must
+ * not depend back on tools") was removed for exactly that reason: {@code gateway} lives in
+ * {@code features}, {@code repository}/{@code byok}/{@code dialect} in {@code infra}, and neither
+ * module can see {@code tools} at all.
+ *
+ * <p>R1 and R2 are <strong>not</strong> covered by the module split and stay here. Both forbid
+ * dependencies that are perfectly visible to {@code tools} at compile time: {@code JdbcTemplate}
+ * arrives transitively via {@code features}' {@code spring-boot-starter-jdbc}, and the BYOK registry
+ * is a public type in {@code infra}. Maven has no opinion on either; only these rules do.
  */
 class ArchitectureRulesTest {
 
@@ -136,8 +148,7 @@ class ArchitectureRulesTest {
      * management-plane exceptions, so this rule is effectively enforced.
      */
     private static final int R2_BASELINE = 0;
-    /** R3 - lower layers depending back on tools. Enforced at 0. */
-    private static final int R3_BASELINE = 0;
+    /** R3 was removed: the Maven module split enforces it at compile time. See the class Javadoc. */
     /** R4 - facade contract interfaces depending on Spring JDBC / pool types. Enforced at 0. */
     private static final int R4_BASELINE = 0;
     /**
@@ -182,21 +193,6 @@ class ArchitectureRulesTest {
                 .allowEmptyShould(true);
 
         assertWithinBaseline("R2", rule, R2_BASELINE);
-    }
-
-    @Test
-    void r3_lowerLayersMustNotDependOnTools() {
-        ArchRule rule = noClasses()
-                .that().resideInAnyPackage(
-                        BASE_PACKAGE + ".gateway..",
-                        BASE_PACKAGE + ".repository..",
-                        BASE_PACKAGE + ".byok..",
-                        BASE_PACKAGE + ".dialect..")
-                .should().dependOnClassesThat().resideInAPackage(TOOLS_PACKAGE)
-                .as("R3: gateway/repository/byok/dialect must not depend back on tools")
-                .allowEmptyShould(true);
-
-        assertWithinBaseline("R3", rule, R3_BASELINE);
     }
 
     @Test

@@ -50,8 +50,8 @@ public class PerformanceTimingAspect {
         this.auditLogger = auditLogger;
     }
 
-    @Around("execution(* com.entropy.database.mcp.facade.RoutingDatabaseFacade.*(..)) || " +
-            "execution(* com.entropy.database.mcp.facade.ByokDatabaseFacade.*(..)) || " +
+    @Around("execution(* com.entropy.database.mcp.routing.RoutingDatabaseFacade.*(..)) || " +
+            "execution(* com.entropy.database.mcp.routing.ByokDatabaseFacade.*(..)) || " +
             "execution(* com.entropy.database.mcp.repository.ExecutionPlanRepositoryImpl.*(..)) || " +
             "execution(* com.entropy.database.mcp.byok.DynamicDataSourceManagerImpl.*(..)) || " +
             "execution(* com.entropy.database.mcp.etl.JobExecutionEngine.*(..))")

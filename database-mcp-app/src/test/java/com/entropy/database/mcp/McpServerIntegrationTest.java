@@ -41,7 +41,8 @@ import static org.assertj.core.api.Assertions.assertThat;
                   "spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration,org.springframework.boot.autoconfigure.security.servlet.SecurityFilterAutoConfiguration",
                   "entropy.mcp.database.dialect=generic",
                   "entropy.mcp.gateway.enabled=false",
-                  "entropy.mcp.security.test-mode=true"})
+                  "entropy.mcp.security.test-mode=true",
+                  "entropy.mcp.tools.exclude=batchQuery"})
 @Import(TestSecurityConfig.class)
 class McpServerIntegrationTest {
 
@@ -156,5 +157,49 @@ class McpServerIntegrationTest {
         // Compare only the result part (ignore the id field)
         assertThat(objectMapper.readTree(response1).get("result"))
             .isEqualTo(objectMapper.readTree(response2).get("result"));
+    }
+
+    /**
+     * 被 {@code entropy.mcp.tools.exclude} 摘掉的工具不仅要从 {@code tools/list} 消失，
+     * 按名字直接 {@code tools/call} 也必须调不到。
+     *
+     * <p>这两件事并不等价：CVE-2026-59318 的成因正是 tools/call 在已注册清单里找不到名字时
+     * 回退到全局 resolver，于是"未公布"的工具照样能被调用。裁剪如果只作用在 list 上，暴露面
+     * 收敛就只是障眼法。
+     */
+    @Test
+    void excludedToolIsNeitherListedNorCallable() throws Exception {
+        HttpHeaders headers = buildHeaders();
+
+        String listResponse = restTemplate.postForObject(
+            "http://localhost:" + port + "/mcp",
+            new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}", headers),
+            String.class);
+        assertThat(listResponse).doesNotContain("batchQuery");
+
+        String callResponse = restTemplate.postForObject(
+            "http://localhost:" + port + "/mcp",
+            new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                + "\"params\":{\"name\":\"batchQuery\",\"arguments\":{}}}", headers),
+            String.class);
+
+        JsonNode call = objectMapper.readTree(callResponse);
+        assertThat(call.get("error")).as("dispatching an unexposed tool must be a protocol error: %s",
+                callResponse).isNotNull();
+        assertThat(call.get("result")).isNull();
+
+        // 对照组，防止上面的断言空转：一个仍然暴露的工具、同样传空参数，走的是"执行失败"路径，
+        // 回的是 result（isError=true）而不是 JSON-RPC error。两者形状不同，才说明上面测到的
+        // 是"调不到"而不是"调到了但报错"。
+        String exposedResponse = restTemplate.postForObject(
+            "http://localhost:" + port + "/mcp",
+            new HttpEntity<>("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+                + "\"params\":{\"name\":\"executeQuery\",\"arguments\":{}}}", headers),
+            String.class);
+
+        JsonNode exposed = objectMapper.readTree(exposedResponse);
+        assertThat(exposed.get("error")).as("executeQuery is exposed, so this must not be an "
+                + "unknown-tool error: %s", exposedResponse).isNull();
+        assertThat(exposed.get("result")).isNotNull();
     }
 }
