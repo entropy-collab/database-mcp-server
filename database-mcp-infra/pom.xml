@@ -58,6 +58,22 @@
         </dependency>
 
         <!--
+            JSpecify：Spring Framework 7 起 org.springframework.lang.@Nullable 已
+            @Deprecated(since="7.0")，null 性注解统一走 JSpecify。虽然它经 spring-core 传递可见，
+            但这里是直接使用，显式声明。
+        -->
+        <dependency>
+            <groupId>org.jspecify</groupId>
+            <artifactId>jspecify</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!--
             H2 只出现在测试里：主代码对 H2 的唯一"引用"是 DialectUtils 里的驱动类名字符串，
             编译期不需要它。
         -->

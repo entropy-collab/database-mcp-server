@@ -32,6 +32,12 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- JSpecify null 性注解，见 infra 的同名依赖说明 -->
+        <dependency>
+            <groupId>org.jspecify</groupId>
+            <artifactId>jspecify</artifactId>
+        </dependency>
+
         <!--
             可观测性的"出口"选择留在 app：infra 只依赖 micrometer-core 打点，换后端不需要
             改下层模块。actuator 端点同理，是部署形态而非能力。

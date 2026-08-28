@@ -38,6 +38,12 @@
 
     <properties>
         <java.version>25</java.version>
+        <!--
+            JDK 23 起 javac 默认关闭"隐式注解处理"：光把 spring-boot-configuration-processor
+            放进 classpath 不会生成任何东西，也不会报错，只是静默什么都不做。必须显式打开，
+            否则 spring-configuration-metadata.json 永远不会出现。
+        -->
+        <maven.compiler.proc>full</maven.compiler.proc>
         <oracle.jdbc.version>23.26.3.0.0</oracle.jdbc.version>
         <mysql.jdbc.version>26.7.0</mysql.jdbc.version>
         <postgresql.jdbc.version>42.7.13</postgresql.jdbc.version>

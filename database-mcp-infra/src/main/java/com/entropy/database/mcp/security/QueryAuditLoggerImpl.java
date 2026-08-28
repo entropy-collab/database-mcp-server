@@ -26,9 +26,9 @@ import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.Values;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.lang.Nullable;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
@@ -136,7 +136,7 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     private final com.entropy.database.mcp.properties.DatabaseProperties properties;
     private final SqlAuditService sqlAuditService;
 
-    public QueryAuditLoggerImpl(@org.springframework.lang.Nullable AuditLogRepository auditLogRepository,
+    public QueryAuditLoggerImpl(@Nullable AuditLogRepository auditLogRepository,
                                 com.entropy.database.mcp.properties.DatabaseProperties properties,
                                 SqlAuditService sqlAuditService) {
         this.auditLogRepository = auditLogRepository;

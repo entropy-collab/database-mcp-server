@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.config;
 
+import com.entropy.database.mcp.audit.AuditLogRepository;
 import com.entropy.database.mcp.audit.SqlAuditService;
 import com.entropy.database.mcp.backup.DatabaseBackupService;
 import com.entropy.database.mcp.byok.ByokDataSourceFactory;
@@ -39,9 +40,9 @@ import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.security.SqlValidatorImpl;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.lang.Nullable;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -133,7 +134,7 @@ public class DatabaseConfig {
     public ByokDataSourceFactory byokDataSourceFactory(
             SqlValidator sqlValidator,
             DataMaskingService maskingService,
-            @Nullable com.entropy.database.mcp.audit.AuditLogRepository auditLogRepository,
+            @Nullable AuditLogRepository auditLogRepository,
             DatabaseProperties properties,
             ByokProperties byokProperties,
             SqlAuditService sqlAuditService,
@@ -144,7 +145,7 @@ public class DatabaseConfig {
         // This avoids circular dependency during bean initialization.
         Supplier<SqlValidator> sv = () -> sqlValidator;
         Supplier<DataMaskingService> ms = () -> maskingService;
-        Supplier<com.entropy.database.mcp.audit.AuditLogRepository> ar = () -> auditLogRepository;
+        Supplier<AuditLogRepository> ar = () -> auditLogRepository;
         Supplier<DatabaseProperties> dp = () -> properties;
         Supplier<ByokProperties> bp = () -> byokProperties;
         Supplier<SqlAuditService> sas = () -> sqlAuditService;

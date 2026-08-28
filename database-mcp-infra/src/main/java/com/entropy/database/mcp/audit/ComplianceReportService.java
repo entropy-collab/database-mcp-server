@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.audit;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -35,7 +36,7 @@ public class ComplianceReportService {
     private final AuditLogRepository auditLogRepository;
     private final SqlAuditService sqlAuditService;
 
-    public ComplianceReportService(@org.springframework.lang.Nullable AuditLogRepository auditLogRepository,
+    public ComplianceReportService(@Nullable AuditLogRepository auditLogRepository,
                                    SqlAuditService sqlAuditService) {
         this.auditLogRepository = auditLogRepository;
         this.sqlAuditService = sqlAuditService;

@@ -17,6 +17,10 @@ entropy:
         allowed: true
       security:
         allowed-tables: []
+      # 注意：这几行以前是静默失效的（DataMaskingServiceImpl 有 @ConfigurationProperties
+      # 但没有 setter，Boot 一个键都绑不上），实际生效的一直是代码里 17 项的默认列表。
+      # 绑定修好之后它才真正起作用，也就是本 profile 的脱敏范围从 17 项收窄到这 2 项。
+      # 如果当初写这两行只是举例、并不想收窄，删掉整个 masking 块即可回到默认列表。
       masking:
         column-patterns:
           - email

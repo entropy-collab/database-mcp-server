@@ -18,6 +18,7 @@ package com.entropy.database.mcp.controller;
 import com.entropy.database.mcp.audit.AuditLogEntity;
 import com.entropy.database.mcp.audit.AuditLogRepository;
 import com.entropy.database.mcp.security.QueryAuditLogger;
+import org.jspecify.annotations.Nullable;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -47,7 +48,7 @@ public class AuditLogController {
     private final AuditLogRepository auditLogRepository;
 
     public AuditLogController(QueryAuditLogger auditLogger,
-                              @org.springframework.lang.Nullable AuditLogRepository auditLogRepository) {
+                              @Nullable AuditLogRepository auditLogRepository) {
         this.auditLogger = auditLogger;
         this.auditLogRepository = auditLogRepository;
     }

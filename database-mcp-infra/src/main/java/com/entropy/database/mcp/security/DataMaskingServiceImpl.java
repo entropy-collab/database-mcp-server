@@ -70,6 +70,28 @@ public class DataMaskingServiceImpl implements DataMaskingService {
         "salary", "income", "bank_account"
     );
 
+    /**
+     * 让 {@code entropy.mcp.database.masking.column-patterns} 真正生效。
+     *
+     * <p>在这个 setter 出现之前，本类只有 {@code @ConfigurationProperties} 注解而没有任何
+     * setter。Boot 对 {@code @Component} 上的 {@code @ConfigurationProperties} 走 JavaBean
+     * 绑定，没有 setter 就一个键都绑不上，而且不报错——配置文件里写了也只是静默失效。
+     * {@code application-test.yml} 正是这种情况：它配了 email/phone 两个模式，实际跑的却
+     * 一直是上面这份 17 项的硬编码默认值。
+     *
+     * <p>{@code customRules} 刻意不提供 setter：{@link MaskingRule} 里带一个
+     * {@code Function}，无法从配置文件绑定，它只能由代码提供。
+     */
+    public void setColumnPatterns(List<String> columnPatterns) {
+        this.columnPatterns = columnPatterns == null || columnPatterns.isEmpty()
+                ? this.columnPatterns
+                : List.copyOf(columnPatterns);
+    }
+
+    List<String> getColumnPatterns() {
+        return columnPatterns;
+    }
+
     @Override
     public List<Map<String, Object>> maskResults(
             List<Map<String, Object>> rows,

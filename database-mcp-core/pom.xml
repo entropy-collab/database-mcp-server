@@ -50,6 +50,17 @@
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
         </dependency>
+
+        <!--
+            为 16 个 @ConfigurationProperties 类生成 META-INF/spring-configuration-metadata.json：
+            entropy.mcp.* 有一百多个键，没有元数据时 IDE 补全、/actuator/configprops 的说明、
+            以及"键写错了"的提示全都拿不到。纯注解处理器，optional 保证不传递给下游模块。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
     </dependencies>
 
 </project>
