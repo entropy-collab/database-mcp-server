@@ -25,17 +25,10 @@ import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.etl.JobExecutionEngine;
 import com.entropy.database.mcp.routing.RoutingDatabaseFacade;
 import com.entropy.database.mcp.properties.ByokProperties;
-import com.entropy.database.mcp.properties.BackupProperties;
 import com.entropy.database.mcp.properties.CacheConfig;
-import com.entropy.database.mcp.properties.CatalogProperties;
-import com.entropy.database.mcp.properties.CdcProperties;
 import com.entropy.database.mcp.properties.EtlConfig;
-import com.entropy.database.mcp.properties.LineageProperties;
-import com.entropy.database.mcp.properties.OptimizerProperties;
-import com.entropy.database.mcp.properties.QualityProperties;
 import com.entropy.database.mcp.properties.QueryConfig;
 import com.entropy.database.mcp.properties.StatementTimeoutProperties;
-import com.entropy.database.mcp.properties.ToolExposureProperties;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
@@ -45,7 +38,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -55,9 +47,12 @@ import java.util.function.Supplier;
  * Database configuration for MCP server.
  * Uses Supplier-based dependency injection for shared components,
  * following Spring's DataSourceBuilder pattern.
+ *
+ * <p>这里没有 {@code @EnableConfigurationProperties}：{@code properties} 包由
+ * {@link com.entropy.database.mcp.DatabaseMcpApplication} 上的
+ * {@code @ConfigurationPropertiesScan} 统一注册。
  */
 @Configuration
-@EnableConfigurationProperties({DatabaseProperties.class, ByokProperties.class, BackupProperties.class, CatalogProperties.class, CdcProperties.class, LineageProperties.class, OptimizerProperties.class, QualityProperties.class, StatementTimeoutProperties.class, ToolExposureProperties.class})
 public class DatabaseConfig {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseConfig.class);
