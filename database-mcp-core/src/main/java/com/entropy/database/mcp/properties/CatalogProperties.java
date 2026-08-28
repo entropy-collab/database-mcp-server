@@ -24,7 +24,19 @@ public record CatalogProperties(
     boolean enableSensitiveDetection,
     int maxSearchResults
 ) {
+    public static final int DEFAULT_MAX_SEARCH_RESULTS = 100;
+
+    /**
+     * 与本包其余 8 个 properties 类一致：非正数按"未配置"处理，回落到默认值。
+     * <p>这里刻意不用 {@code @Validated} + {@code @Positive}：紧凑构造器先跑，Bean Validation
+     * 看到的是归一化之后的值，约束永远不会失败；而且 {@code 0} 在本包里是"用默认值"的哨兵
+     * （见 {@link ThreadPoolProperties#defaults()}），把它变成启动失败会推翻这个约定。
+     */
+    public CatalogProperties {
+        maxSearchResults = maxSearchResults > 0 ? maxSearchResults : DEFAULT_MAX_SEARCH_RESULTS;
+    }
+
     public CatalogProperties() {
-        this(true, true, true, 100);
+        this(true, true, true, DEFAULT_MAX_SEARCH_RESULTS);
     }
 }

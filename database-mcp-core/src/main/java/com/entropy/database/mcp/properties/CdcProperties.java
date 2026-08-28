@@ -30,7 +30,19 @@ public record CdcProperties(
     int maxMirrorTasks,
     boolean enableEventListeners
 ) {
+    public static final int DEFAULT_MAX_EVENTS_PER_POLL = 1000;
+    public static final long DEFAULT_POLL_INTERVAL_MS = 1000L;
+    public static final int DEFAULT_MAX_MIRROR_TASKS = 10;
+
+    /** 归一化理由同 {@link CatalogProperties}：非正数按"未配置"处理，而不是启动失败。 */
+    public CdcProperties {
+        maxEventsPerPoll = maxEventsPerPoll > 0 ? maxEventsPerPoll : DEFAULT_MAX_EVENTS_PER_POLL;
+        defaultPollIntervalMs = defaultPollIntervalMs > 0 ? defaultPollIntervalMs : DEFAULT_POLL_INTERVAL_MS;
+        maxMirrorTasks = maxMirrorTasks > 0 ? maxMirrorTasks : DEFAULT_MAX_MIRROR_TASKS;
+    }
+
     public CdcProperties() {
-        this(true, false, 1000, 1000L, true, 10, true);
+        this(true, false, DEFAULT_MAX_EVENTS_PER_POLL, DEFAULT_POLL_INTERVAL_MS, true,
+                DEFAULT_MAX_MIRROR_TASKS, true);
     }
 }
