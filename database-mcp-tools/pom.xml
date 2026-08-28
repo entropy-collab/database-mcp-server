@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.entropy.agent</groupId>
+        <artifactId>database-mcp-parent</artifactId>
+        <version>0.1.4</version>
+    </parent>
+
+    <artifactId>database-mcp-tools</artifactId>
+    <name>Entropy Database MCP Tools</name>
+    <description>MCP 暴露层：@McpTool 工具类、切面、扩展工具与 HTTP 控制器</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.entropy.agent</groupId>
+            <artifactId>database-mcp-features</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                产出 test-jar：SampleTools 与 FixedObjectProvider 是工具暴露相关的测试夹具，
+                需要 @SpringBootTest 才能跑的 ToolExposureFilterTest 住在 app 模块（那里才有
+                @SpringBootConfiguration），要跨模块复用这两个夹具。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>test-jar</id>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

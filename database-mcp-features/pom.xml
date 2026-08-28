@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.entropy.agent</groupId>
+        <artifactId>database-mcp-parent</artifactId>
+        <version>0.1.4</version>
+    </parent>
+
+    <artifactId>database-mcp-features</artifactId>
+    <name>Entropy Database MCP Features</name>
+    <description>能力层：门面契约、备份、ETL、CDC、编目、血缘、优化器、质量、网关、流式导出</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.entropy.agent</groupId>
+            <artifactId>database-mcp-infra</artifactId>
+        </dependency>
+    </dependencies>
+
+</project>

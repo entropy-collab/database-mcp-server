@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.entropy.agent</groupId>
+        <artifactId>database-mcp-parent</artifactId>
+        <version>0.1.4</version>
+    </parent>
+
+    <artifactId>database-mcp-infra</artifactId>
+    <name>Entropy Database MCP Infrastructure</name>
+    <description>基础设施层：方言、SQL 校验与审计、连接池监控、数据访问、BYOK 连接管理</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.entropy.agent</groupId>
+            <artifactId>database-mcp-core</artifactId>
+        </dependency>
+    </dependencies>
+
+</project>

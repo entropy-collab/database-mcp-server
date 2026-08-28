@@ -93,7 +93,7 @@
 mvn clean package -DskipTests
 
 # 启动
-java -jar target/database-mcp-server-0.1.4.jar
+java -jar database-mcp-app/target/database-mcp-server-0.1.4.jar
 
 # 验证
 curl http://localhost:8686/actuator/health

@@ -14,8 +14,8 @@ RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g; s/security.ubuntu.com/mir
 
 WORKDIR /app
 
-# Copy locally built jar
-COPY target/database-mcp-server-*.jar app.jar
+# Copy locally built jar (可执行 jar 由 database-mcp-app 模块产出)
+COPY database-mcp-app/target/database-mcp-server-*.jar app.jar
 
 # Debug: list jar contents
 RUN unzip -l app.jar | grep "application-.*.yml" || echo "No application yml files found in jar"

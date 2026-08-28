@@ -11,10 +11,30 @@
     </parent>
 
     <groupId>com.entropy.agent</groupId>
-    <artifactId>database-mcp-server</artifactId>
+    <artifactId>database-mcp-parent</artifactId>
     <version>0.1.4</version>
-    <name>Entropy Database MCP Server</name>
+    <packaging>pom</packaging>
+    <name>Entropy Database MCP Server (parent)</name>
     <description>Oracle Database MCP Server</description>
+
+    <!--
+        分层聚合。模块依赖方向只允许自下而上，Maven 会在编译期强制这一点：
+            core     ← 无出边的内核：exception / domain / properties / session / cache / util
+            infra    ← core：dialect / audit / security / monitor / repository / byok
+            features ← infra：facade / backup / etl / cdc / catalog / lineage / optimizer /
+                              quality / gateway / stream
+            tools    ← features：tools / aop / extension / controller（MCP 暴露层）
+            app      ← tools：DatabaseMcpApplication / config / init + application.yml
+        包名一律保持 com.entropy.database.mcp.*，不随模块改名——改包名会把"移动"变成
+        "重写"，review 无法进行。
+    -->
+    <modules>
+        <module>database-mcp-core</module>
+        <module>database-mcp-infra</module>
+        <module>database-mcp-features</module>
+        <module>database-mcp-tools</module>
+        <module>database-mcp-app</module>
+    </modules>
 
     <properties>
         <java.version>25</java.version>
@@ -57,9 +77,44 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+
+            <!-- 本仓库自己的模块，子模块引用时不再写版本号 -->
+            <dependency>
+                <groupId>com.entropy.agent</groupId>
+                <artifactId>database-mcp-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.entropy.agent</groupId>
+                <artifactId>database-mcp-infra</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.entropy.agent</groupId>
+                <artifactId>database-mcp-features</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.entropy.agent</groupId>
+                <artifactId>database-mcp-tools</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.entropy.agent</groupId>
+                <artifactId>database-mcp-tools</artifactId>
+                <version>${project.version}</version>
+                <type>test-jar</type>
+                <scope>test</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 
+    <!--
+        这些三方依赖对所有模块可见。之所以不按模块收窄：模块化这一步的目标是把"分层"
+        变成编译期约束，一次改动只做一件事。依赖收窄是独立的后续工作，收窄错了会以
+        NoClassDefFoundError 的形式在运行期才暴露，不该和大规模文件移动混在一个提交里。
+        例外是 JDBC 驱动：没有任何代码直接引用驱动类，它们是纯 runtime，只留在 app。
+    -->
     <dependencies>
         <!-- Spring AI MCP Server (WebMVC) -->
         <dependency>
@@ -79,64 +134,10 @@
             <artifactId>jackson-databind</artifactId>
         </dependency>
 
-        <!-- Oracle JDBC -->
-        <dependency>
-            <groupId>com.oracle.database.jdbc</groupId>
-            <artifactId>ojdbc11</artifactId>
-            <version>${oracle.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.oracle.database.nls</groupId>
-            <artifactId>orai18n</artifactId>
-            <version>${oracle.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-
-        <!-- H2 for testing -->
+        <!-- H2：dialect 包里有 H2Dialect，主代码编译期就需要 -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-        </dependency>
-
-        <!-- MySQL JDBC -->
-        <dependency>
-            <groupId>com.mysql</groupId>
-            <artifactId>mysql-connector-j</artifactId>
-            <version>${mysql.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-
-        <!-- PostgreSQL JDBC -->
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <version>${postgresql.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-
-        <!-- SQL Server JDBC -->
-        <dependency>
-            <groupId>com.microsoft.sqlserver</groupId>
-            <artifactId>mssql-jdbc</artifactId>
-            <version>${sqlserver.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-
-        <!-- SQLite JDBC -->
-        <dependency>
-            <groupId>org.xerial</groupId>
-            <artifactId>sqlite-jdbc</artifactId>
-            <version>${sqlite.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-
-        <!-- DB2 JDBC -->
-        <dependency>
-            <groupId>com.ibm.db2</groupId>
-            <artifactId>jcc</artifactId>
-            <version>${db2.jdbc.version}</version>
-            <scope>runtime</scope>
         </dependency>
 
         <!-- Spring Boot Actuator -->
@@ -226,20 +227,14 @@
             <version>${archunit.version}</version>
             <scope>test</scope>
         </dependency>
-
     </dependencies>
 
     <build>
         <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-
             <!--
                 JaCoCo coverage. Measurement only: no `check` goal and no thresholds, so coverage
-                can never break the build. Report is produced during the `test` phase (after
-                surefire) into target/site/jacoco/.
+                can never break the build. 每个模块产出自己的 exec 与报告；跨模块汇总报告由
+                app 模块的 report-aggregate 生成（它依赖全部模块）。
             -->
             <plugin>
                 <groupId>org.jacoco</groupId>

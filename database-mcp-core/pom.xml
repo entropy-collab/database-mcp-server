@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.entropy.agent</groupId>
+        <artifactId>database-mcp-parent</artifactId>
+        <version>0.1.4</version>
+    </parent>
+
+    <artifactId>database-mcp-core</artifactId>
+    <name>Entropy Database MCP Core</name>
+    <description>内核层：异常、领域模型、配置属性、会话、缓存与工具方法，不依赖任何本仓库模块</description>
+
+</project>
