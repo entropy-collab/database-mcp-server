@@ -24,7 +24,6 @@ import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.NotExpression;
-import net.sf.jsqlparser.expression.Parenthesis;
 import net.sf.jsqlparser.expression.SignedExpression;
 import net.sf.jsqlparser.expression.WhenClause;
 import net.sf.jsqlparser.expression.operators.relational.Between;
@@ -33,7 +32,10 @@ import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
 import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.JSQLParserException;
+import net.sf.jsqlparser.statement.ExplainStatement;
 import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.select.Fetch;
 import net.sf.jsqlparser.statement.select.FromItem;
 import net.sf.jsqlparser.statement.select.Join;
@@ -102,7 +104,7 @@ public class SqlValidatorImpl implements SqlValidator {
         if (sql.contains(EXECUTABLE_COMMENT))
             throw new McpSqlValidationException(sql, "Executable comments are not allowed");
         Statement stmt;
-        try { stmt = CCJSqlParserUtil.parse(sql.trim()); }
+        try { stmt = onlyStatementOf(sql.trim()); }
         catch (Exception e) { throw new McpSqlValidationException(sql, "SQL validation error", e); }
         String op = extractOp(stmt);
         if (!allowedOperations.contains(op.toUpperCase()) && !isDdl)
@@ -125,11 +127,32 @@ public class SqlValidatorImpl implements SqlValidator {
         if (max > getMaxRows()) throw new McpSqlValidationException(sql, "Exceeds max rows: " + max);
     }
 
+    /**
+     * 解析出唯一一条语句。必须走 {@code parseStatements}：JSQLParser 5.x 的
+     * {@code parse("SELECT 1; DROP TABLE t")} 不再抛异常，而是静默只返回第一条语句，
+     * 于是堆叠语句会带着未被审查的第二条原样交给 JDBC。
+     *
+     * @throws JSQLParserException 语句无法解析
+     * @throws IllegalArgumentException 输入包含多于一条语句
+     */
+    private static Statement onlyStatementOf(String sql) throws JSQLParserException {
+        Statements statements = CCJSqlParserUtil.parseStatements(sql);
+        if (statements.size() != 1) {
+            throw new IllegalArgumentException("Expected a single statement but found " + statements.size());
+        }
+        return statements.get(0);
+    }
+
     private String extractOp(Statement stmt) {
         String cls = stmt.getClass().getSimpleName();
         if (cls.contains("Select")) return "SELECT";
         if (cls.contains("Describe")) return "DESCRIBE";
         if (cls.contains("Show")) return "SHOW";
+        // Oracle 的 EXPLAIN PLAN FOR 会写入 PLAN_TABLE，不是只读语句，
+        // 因此与 MySQL 的 EXPLAIN SELECT 区别对待，只允许后者。
+        if (stmt instanceof ExplainStatement explain) {
+            return explain.getOption(ExplainStatement.OptionType.PLAN_FOR) != null ? "EXPLAIN PLAN" : "EXPLAIN";
+        }
         if (cls.contains("Explain")) return "EXPLAIN";
         return "UNKNOWN";
     }
@@ -205,9 +228,9 @@ public class SqlValidatorImpl implements SqlValidator {
         }
         Fetch fetch = select.getFetch();
         if (fetch != null) {
+            // JSQLParser 5.x 起 FETCH 的行数一律进 getExpression()，getRowCount() 已废弃
             Long value = longValueOf(fetch.getExpression());
             if (value != null) return value;
-            if (fetch.getRowCount() > 0) return fetch.getRowCount();
         }
         if (select instanceof ParenthesedSelect parenthesed) return explicitRowLimit(parenthesed.getSelect());
         return null;
@@ -307,7 +330,6 @@ public class SqlValidatorImpl implements SqlValidator {
                     expressionDepth(in.getRightExpression(), depth));
         }
         if (expr instanceof ExistsExpression exists) return expressionDepth(exists.getRightExpression(), depth);
-        if (expr instanceof Parenthesis parenthesis) return expressionDepth(parenthesis.getExpression(), depth);
         if (expr instanceof NotExpression not) return expressionDepth(not.getExpression(), depth);
         if (expr instanceof SignedExpression signed) return expressionDepth(signed.getExpression(), depth);
         if (expr instanceof IsNullExpression isNull) return expressionDepth(isNull.getLeftExpression(), depth);

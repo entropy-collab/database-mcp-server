@@ -18,13 +18,13 @@ package com.entropy.database.mcp.optimizer;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.LongValue;
-import net.sf.jsqlparser.expression.Parenthesis;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExistsExpression;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
 import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
+import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
@@ -123,9 +123,8 @@ final class NotInToNotExistsRewriter {
                 or.setRightExpression(apply(or.getRightExpression()));
                 return or;
             }
-            if (expression instanceof Parenthesis parenthesis) {
-                parenthesis.setExpression(apply(parenthesis.getExpression()));
-                return parenthesis;
+            if (expression instanceof ParenthesedExpressionList<?> group && group.size() == 1) {
+                return parens(apply((Expression) group.get(0)));
             }
             if (expression instanceof InExpression in) {
                 return applyToIn(in);
@@ -189,13 +188,22 @@ final class NotInToNotExistsRewriter {
             outerIsNotNull.setLeftExpression(outerQualified);
             outerIsNotNull.setNot(true);
             anyRowSelect.setSelectItems(oneProjection());
-            Expression outerGuard = new Parenthesis(
+            Expression outerGuard = parens(
                     new OrExpression(outerIsNotNull, notExists(parenthesize(anyRowSelect))));
 
             changed = true;
             // 整体加括号：原式可能位于 OR 之下，裸的 AND 链会改变优先级
-            return new Parenthesis(new AndExpression(
+            return parens(new AndExpression(
                     new AndExpression(outerGuard, noMatch), noNullInSubquery));
+        }
+
+        /**
+         * 括号节点。JSQLParser 5.x 起 {@code Parenthesis} 已废弃且无法手工构造
+         * （无参构造出来的实例是空列表，setExpression 会 IndexOutOfBounds），
+         * 括号统一用单元素的 {@code ParenthesedExpressionList} 表示。
+         */
+        private static Expression parens(Expression expression) {
+            return new ParenthesedExpressionList<>(expression);
         }
 
         private static ParenthesedSelect parenthesize(PlainSelect select) {
@@ -205,7 +213,7 @@ final class NotInToNotExistsRewriter {
         }
 
         private static Expression mergeWhere(Expression existing, Expression added) {
-            return existing == null ? added : new AndExpression(new Parenthesis(existing), added);
+            return existing == null ? added : new AndExpression(parens(existing), added);
         }
 
         private static List<SelectItem<?>> oneProjection() {

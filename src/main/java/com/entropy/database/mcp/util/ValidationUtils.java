@@ -24,7 +24,6 @@ import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.expression.NotExpression;
 import net.sf.jsqlparser.expression.NullValue;
-import net.sf.jsqlparser.expression.Parenthesis;
 import net.sf.jsqlparser.expression.SignedExpression;
 import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.expression.TimeValue;
@@ -42,6 +41,7 @@ import net.sf.jsqlparser.expression.operators.relational.LikeExpression;
 import net.sf.jsqlparser.expression.operators.relational.MinorThan;
 import net.sf.jsqlparser.expression.operators.relational.MinorThanEquals;
 import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.statement.Statement;
@@ -292,7 +292,14 @@ public final class ValidationUtils {
             return;
         }
         switch (expression) {
-            case Parenthesis parenthesis -> assertAllowedExpression(parenthesis.getExpression(), paramName);
+            // JSQLParser 5.x 把括号表达式解析成 ParenthesedExpressionList（Parenthesis 是它的子类），
+            // 括号里必须只有一个谓词；多元素形式是行构造器 (a, b)，此处一律拒绝。
+            case ParenthesedExpressionList<?> group -> {
+                if (group.size() != 1) {
+                    throw reject(paramName, "may not use a row constructor: " + group);
+                }
+                assertAllowedExpression((Expression) group.get(0), paramName);
+            }
             case NotExpression not -> assertAllowedExpression(not.getExpression(), paramName);
             case SignedExpression signed -> assertAllowedExpression(signed.getExpression(), paramName);
             case IsNullExpression isNull -> assertAllowedExpression(isNull.getLeftExpression(), paramName);

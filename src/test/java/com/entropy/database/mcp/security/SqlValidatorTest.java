@@ -225,13 +225,19 @@ class SqlValidatorTest {
             "SELECT * FROM",
             "SELECT * FROM users WHERE",
             "SELCT 1",
-            "EXPLAIN PLAN FOR SELECT * FROM users",
             "not sql at all"
         })
         void refusesUnparseableSql(String sql) {
             McpSqlValidationException ex = rejectedSelect(validator(), sql);
             assertThat(ex.getMessage()).isEqualTo("SQL validation error");
             assertThat(ex.getCause()).isNotNull();
+        }
+
+        @Test
+        @DisplayName("Oracle EXPLAIN PLAN FOR is refused: it writes to PLAN_TABLE")
+        void refusesExplainPlanFor() {
+            McpSqlValidationException ex = rejectedSelect(validator(), "EXPLAIN PLAN FOR SELECT * FROM users");
+            assertThat(ex.getMessage()).isEqualTo("Operation not allowed: EXPLAIN PLAN");
         }
 
         @ParameterizedTest(name = "stacked statements [{0}] are refused")
@@ -242,7 +248,9 @@ class SqlValidatorTest {
             "SELECT 1; -- DROP TABLE users\nDROP TABLE users"
         })
         void refusesStackedStatements(String sql) {
-            // Multi-statement input never reaches the operation whitelist: the parser rejects it.
+            // Multi-statement input never reaches the operation whitelist: parsing insists on
+            // exactly one statement, because JSQLParser 5.x would otherwise silently keep only
+            // the first one and let the rest through unchecked.
             McpSqlValidationException ex = rejectedSelect(validator(), sql);
             assertThat(ex.getMessage()).isEqualTo("SQL validation error");
         }
