@@ -7,19 +7,26 @@
     <parent>
         <groupId>com.entropy.agent</groupId>
         <artifactId>database-mcp-parent</artifactId>
-        <version>0.3.0</version>
+        <version>0.4.0</version>
     </parent>
 
     <artifactId>database-mcp-core</artifactId>
     <name>Entropy Database MCP Core</name>
-    <description>内核层：异常、领域模型、配置属性、会话、缓存与工具方法，不依赖任何本仓库模块</description>
+    <description>内核层：领域模型、配置属性、会话、缓存与工具方法，只依赖 contract</description>
 
     <!--
         core 刻意不依赖 spring-jdbc / spring-web / MCP SDK：它不碰数据库连接，也不知道自己
         被 MCP 暴露。spring-boot 只为 @ConfigurationProperties 与 Binder 而来，它顺带带入
         spring-core / spring-context（@Component 等 stereotype 注解在这里）。
+
+        0.4.0 起 exception 包下沉到 database-mcp-contract（零第三方依赖），dialect 只依赖那一层
+        就不会再顺着 core 吃到下面这一堆。core 自己大量使用 McpToolException 家族，显式声明。
     -->
     <dependencies>
+        <dependency>
+            <groupId>com.entropy.agent</groupId>
+            <artifactId>database-mcp-contract</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot</artifactId>

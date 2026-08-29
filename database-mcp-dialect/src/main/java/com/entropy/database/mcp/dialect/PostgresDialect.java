@@ -15,8 +15,6 @@
  */
 package com.entropy.database.mcp.dialect;
 
-import com.entropy.database.mcp.properties.DatabaseProperties;
-
 import java.util.List;
 import java.util.Map;
 
@@ -190,7 +188,7 @@ public class PostgresDialect extends AbstractDatabaseDialect {
     }
 
     @Override
-    public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
+    public Map<String, String> dataSourceProperties(PreparedStatementCaching statementCaching) {
         return Map.of("prepareThreshold", "3");
     }
 

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.entropy.agent</groupId>
+        <artifactId>database-mcp-parent</artifactId>
+        <version>0.4.0</version>
+    </parent>
+
+    <artifactId>database-mcp-contract</artifactId>
+    <name>Entropy Database MCP Contract</name>
+    <description>契约层：ErrorCode 与 McpToolException 家族。零第三方依赖，是本仓库唯一可以对外当扩展点用的底座</description>
+
+    <!--
+        这个模块存在的唯一理由：让 database-mcp-dialect 的编译期闭包真正变小。
+
+        0.3.0 把方言拆成独立模块后，第三方方言作者名义上只需依赖 database-mcp-dialect，
+        但实测（仓库外建样例工程跑 dependency:tree）编译期闭包仍有 23 个 artifact：
+        dialect -> core 把 spring-boot 4.1.0、spring-core/context/aop/beans/expression、
+        micrometer、jackson-databind、jsqlparser、caffeine、guava 全带上了。方言用到 core
+        的只有三个类型，其中 DatabaseProperties 带 @ConfigurationProperties —— Spring 就是
+        从这里进来的。
+
+        0.4.0 的做法是两头都断：
+          - DatabaseProperties 从 SPI 参数里去掉，换成方言模块自己的 PreparedStatementCaching；
+          - ErrorCode / McpToolException 家族下沉到本模块，dialect 只依赖它。
+
+        <dependencies> 是空的，而且必须一直是空的。这里加任何一个三方依赖，都会直接
+        出现在第三方方言作者的 classpath 上。ErrorDiagnosticBuilder（本包里唯一用 Jackson
+        的类）在 0.4.0 一并删掉了：全仓库无引用，是死代码。
+    -->
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

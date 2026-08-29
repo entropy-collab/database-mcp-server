@@ -15,8 +15,6 @@
  */
 package com.entropy.database.mcp.dialect;
 
-import com.entropy.database.mcp.properties.DatabaseProperties;
-
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -155,12 +153,12 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
     }
 
     @Override
-    public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
+    public Map<String, String> dataSourceProperties(PreparedStatementCaching statementCaching) {
         Map<String, String> props = new LinkedHashMap<>();
         props.put("cachePrepStmts", "true");
-        if (properties != null && properties.preparedStatement() != null) {
-            props.put("prepStmtCacheSize", String.valueOf(properties.preparedStatement().cacheSize()));
-            props.put("prepStmtCacheSqlLimit", String.valueOf(properties.preparedStatement().sqlLimit()));
+        if (statementCaching != null) {
+            props.put("prepStmtCacheSize", String.valueOf(statementCaching.cacheSize()));
+            props.put("prepStmtCacheSqlLimit", String.valueOf(statementCaching.sqlLimit()));
         }
         return Map.copyOf(props);
     }

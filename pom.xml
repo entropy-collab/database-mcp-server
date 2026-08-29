@@ -12,16 +12,17 @@
 
     <groupId>com.entropy.agent</groupId>
     <artifactId>database-mcp-parent</artifactId>
-    <version>0.3.0</version>
+    <version>0.4.0</version>
     <packaging>pom</packaging>
     <name>Entropy Database MCP Server (parent)</name>
     <description>Oracle Database MCP Server</description>
 
     <!--
         分层聚合。模块依赖方向只允许自下而上，Maven 会在编译期强制这一点：
-            core     ← 无出边的内核：exception / domain / properties / session / cache / util
-            dialect  ← core：DatabaseDialect 契约 + DialectProvider SPI + 8 个内置方言
-            infra    ← dialect：audit / security / monitor / repository / byok
+            contract ← 零依赖的叶子：ErrorCode + McpToolException 家族
+            core     ← contract：domain / properties / session / cache / util
+            dialect  ← contract：DatabaseDialect 契约 + DialectProvider SPI + 8 个内置方言
+            infra    ← core + dialect：audit / security / monitor / repository / byok
             features ← infra：facade / backup / etl / cdc / catalog / lineage / optimizer /
                               quality / gateway / stream
             tools    ← features：tools / aop / extension / controller（MCP 暴露层）
@@ -32,8 +33,13 @@
         dialect 从 infra 里独立出来是为了给第三方方言一个不含连接池的编译期契约，理由写在
         database-mcp-dialect/pom.xml 里。它同时把方向反过来钉住了：方言编译不到 HikariCP、
         spring-jdbc 和 byok 包，想在方言里偷偷拿连接会编译失败。
+
+        contract 是 0.4.0 加的，与 core 并列而不是在 core 之下的一段：dialect 现在只依赖
+        contract，不再经由 core 吃到 spring-boot / jackson / guava。理由与实测数据写在
+        database-mcp-contract/pom.xml 里。
     -->
     <modules>
+        <module>database-mcp-contract</module>
         <module>database-mcp-core</module>
         <module>database-mcp-dialect</module>
         <module>database-mcp-infra</module>
@@ -124,6 +130,11 @@
             </dependency>
 
             <!-- 本仓库自己的模块，子模块引用时不再写版本号 -->
+            <dependency>
+                <groupId>com.entropy.agent</groupId>
+                <artifactId>database-mcp-contract</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.entropy.agent</groupId>
                 <artifactId>database-mcp-core</artifactId>

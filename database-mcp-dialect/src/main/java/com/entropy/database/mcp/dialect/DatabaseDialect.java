@@ -15,8 +15,6 @@
  */
 package com.entropy.database.mcp.dialect;
 
-import com.entropy.database.mcp.properties.DatabaseProperties;
-
 import java.util.Map;
 
 /**
@@ -240,13 +238,6 @@ public interface DatabaseDialect {
      */
     default String getPaginationSql(String sql, int offset, int limit) {
         return null;
-    }
-
-    /**
-     * Check if this dialect supports EXPLAIN PLAN.
-     */
-    default boolean supportsExplainPlan() {
-        return false;
     }
 
     /**
@@ -597,9 +588,15 @@ public interface DatabaseDialect {
      * implementations that only ever called {@code addDataSourceProperty}. A dialect describes a
      * database, not the pool in front of it.
      *
-     * @param properties may be null; implementations must tolerate that
+     * <p>The parameter is {@link PreparedStatementCaching} for the same reason it is not
+     * {@code DatabaseProperties}: that type carries {@code @ConfigurationProperties} and pulled all
+     * of Spring into the extension point, for the sake of the two ints MySQL and SQL Server read
+     * from it.
+     *
+     * @param statementCaching may be null when the application configures no cache sizing;
+     *                         implementations must tolerate that
      */
-    default Map<String, String> dataSourceProperties(DatabaseProperties properties) {
+    default Map<String, String> dataSourceProperties(PreparedStatementCaching statementCaching) {
         return Map.of();
     }
 

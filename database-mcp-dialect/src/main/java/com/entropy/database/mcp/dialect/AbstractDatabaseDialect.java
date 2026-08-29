@@ -77,11 +77,6 @@ public abstract class AbstractDatabaseDialect implements DatabaseDialect {
     }
 
     @Override
-    public boolean supportsExplainPlan() {
-        return false;
-    }
-
-    @Override
     public boolean supportsTableStatistics() {
         return false;
     }

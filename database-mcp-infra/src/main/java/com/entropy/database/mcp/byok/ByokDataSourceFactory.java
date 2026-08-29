@@ -21,6 +21,7 @@ import com.entropy.database.mcp.cache.ConnectionScopedCache;
 import com.entropy.database.mcp.cache.DatabaseCache;
 import com.entropy.database.mcp.cache.DatabaseCacheImpl;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.dialect.PreparedStatementCaching;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitorImpl;
 import com.entropy.database.mcp.properties.ByokProperties;
@@ -147,8 +148,9 @@ public class ByokDataSourceFactory {
         config.setMaxLifetime(byokProps.maxLifetime().toMillis());
         config.setConnectionTestQuery(dialect.connectionTestQuery());
         // 方言只描述"这个数据库想要哪些驱动级参数"，往 HikariConfig 上贴是这里的事——
-        // dialect 模块刻意不依赖 HikariCP。
-        dialect.dataSourceProperties(dbProps).forEach(config::addDataSourceProperty);
+        // dialect 模块刻意不依赖 HikariCP。把 DatabaseProperties 收窄成 PreparedStatementCaching
+        // 也是同一个理由：方言不该为了两个 int 而编译依赖 @ConfigurationProperties。
+        dialect.dataSourceProperties(statementCaching(dbProps)).forEach(config::addDataSourceProperty);
         // Milliseconds, and derived from the longest statement ceiling. The previous value was the
         // literal 60 against this millisecond setter, which is below HikariCP's 2s floor — so leak
         // detection was silently off, not the 60s the comment claimed. Deriving it also keeps a
@@ -162,6 +164,21 @@ public class ByokDataSourceFactory {
                 timeouts.readSeconds(), timeouts.writeSeconds(), timeouts.ddlSeconds(),
                 timeouts.etlSeconds(), timeouts.leakDetectionThresholdMs());
         return new HikariDataSource(config);
+    }
+
+    /**
+     * Narrows the application's configuration down to what a dialect is allowed to see. Returns
+     * {@code null} when prepared-statement sizing is unconfigured, which the SPI documents as
+     * "no sizing known" — the previous shape passed the whole {@code DatabaseProperties} and let each
+     * dialect null-check its way to the same two ints.
+     */
+    private static PreparedStatementCaching statementCaching(DatabaseProperties dbProps) {
+        if (dbProps == null || dbProps.preparedStatement() == null) {
+            return null;
+        }
+        return new PreparedStatementCaching(
+                dbProps.preparedStatement().cacheSize(),
+                dbProps.preparedStatement().sqlLimit());
     }
 
     private ByokInfrastructure createInfrastructure(String key, StatementTemplates templates, DatabaseDialect dialect) {

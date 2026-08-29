@@ -176,9 +176,9 @@ class ArchitectureRulesTest {
 
     /**
      * Lower bound on the imported class count, guarding against a vacuous import. The full import is
-     * currently 274 classes (core 57 / dialect 24 / infra 52 / features 90 / tools 45 / app 6); this
-     * bound only has to be high enough that "app module only" (6 classes) cannot satisfy it, so
-     * there is no need to keep it in step with the real number as the codebase grows.
+     * currently 273 classes (contract 11 / core 44 / dialect 25 / infra 52 / features 90 / tools 45 /
+     * app 6); this bound only has to be high enough that "app module only" (6 classes) cannot satisfy
+     * it, so there is no need to keep it in step with the real number as the codebase grows.
      */
     private static final int MINIMUM_IMPORTED_CLASSES = 200;
 
