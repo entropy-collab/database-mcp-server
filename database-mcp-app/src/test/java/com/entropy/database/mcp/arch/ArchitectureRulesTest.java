@@ -161,14 +161,99 @@ class ArchitectureRulesTest {
      */
     private static final int R5_BASELINE = 0;
 
+    /**
+     * Rejects test code that {@link ImportOption.Predefined#DO_NOT_INCLUDE_TESTS} misses.
+     *
+     * <p>That predefined option matches on the path {@code /target/test-classes/}, which only
+     * covers test classes still sitting in their output directory. {@code database-mcp-tools} also
+     * publishes a {@code -tests.jar} (app's tests reuse its fixtures), and once jars are imported
+     * that archive comes in as production code: the first measurement after enabling jar import
+     * reported two R2 violations that were both {@code PoolMonitorToolsTest} touching
+     * {@code DynamicDataSourceManager} — a test doing exactly what a test should do.
+     */
+    private static final ImportOption DO_NOT_INCLUDE_TEST_JARS =
+            location -> !location.contains("-tests.jar");
+
+    /**
+     * Lower bound on the imported class count, guarding against a vacuous import. The full import is
+     * currently 274 classes (core 57 / dialect 24 / infra 52 / features 90 / tools 45 / app 6); this
+     * bound only has to be high enough that "app module only" (6 classes) cannot satisfy it, so
+     * there is no need to keep it in step with the real number as the codebase grows.
+     */
+    private static final int MINIMUM_IMPORTED_CLASSES = 200;
+
     private static JavaClasses productionClasses;
 
+    /**
+     * Imports every production class of this repository, <strong>including the ones that arrive as
+     * jars</strong>.
+     *
+     * <p>{@code DO_NOT_INCLUDE_JARS} used to be set here, and after the Maven module split that
+     * quietly emptied R1/R2/R4: {@code tools}, {@code features}, {@code infra} and {@code dialect}
+     * reach this test as jars on the classpath, so the importer skipped them and only app's own
+     * {@code config}/{@code init}/{@code arch} classes remained. Every rule then reported 0
+     * violations against 0 candidate classes — and {@code allowEmptyShould(true)} kept that silent.
+     * Dropping the option is safe because {@code importPackages(BASE_PACKAGE)} already restricts the
+     * import to {@code com.entropy.database.mcp}, a package only this repository's own modules use.
+     *
+     * <p><strong>Run this in a full reactor.</strong> Because the other layers now arrive as jars,
+     * {@code mvn -pl database-mcp-app test} resolves them from {@code ~/.m2} and evaluates the rules
+     * against whatever was last {@code install}ed — a green run then says nothing about the working
+     * tree. Use {@code mvn verify} (or {@code -am}) when the verdict matters.
+     */
     @BeforeAll
     static void importProductionClasses() {
         productionClasses = new ClassFileImporter()
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-                .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_JARS)
+                .withImportOption(DO_NOT_INCLUDE_TEST_JARS)
                 .importPackages(BASE_PACKAGE);
+    }
+
+    /**
+     * The rules below are all {@code noClasses().that().resideInAPackage(...)}, which passes
+     * trivially when nothing matches. So assert first that the import actually saw the layers the
+     * rules are about; without this, a classpath or packaging change turns the whole class into a
+     * no-op that still reports green.
+     */
+    @Test
+    void importIsNotVacuous() {
+        assertThat(productionClasses.size())
+                .withFailMessage("Only %d classes imported: the importer is not seeing the module jars, "
+                                + "so every rule below would pass against zero candidates.",
+                        productionClasses.size())
+                .isGreaterThanOrEqualTo(MINIMUM_IMPORTED_CLASSES);
+
+        assertThat(productionClasses.stream()
+                .anyMatch(javaClass -> javaClass.getPackageName().startsWith(BASE_PACKAGE + ".tools")))
+                .withFailMessage("No class from the tools package was imported, so R1 and R2 "
+                        + "have nothing to check.")
+                .isTrue();
+        assertThat(productionClasses.stream()
+                .anyMatch(javaClass -> javaClass.getPackageName().equals(FACADE_PACKAGE)))
+                .withFailMessage("No class from the facade package was imported, so R4 "
+                        + "has nothing to check.")
+                .isTrue();
+    }
+
+    /**
+     * Test code must never reach the rules; it legitimately touches what production may not.
+     *
+     * <p>Asserted on where each class came from rather than on its name: a name filter such as
+     * {@code endsWith("Test")} would miss the fixtures and helpers that a {@code -tests.jar} carries
+     * alongside the obvious {@code *Test} classes ({@code McpTestHttp}, for one), and those are the
+     * classes most likely to slip through unnoticed.
+     */
+    @Test
+    void importExcludesTestCode() {
+        assertThat(productionClasses.stream()
+                .filter(javaClass -> javaClass.getSource()
+                        .map(source -> source.getUri().toString())
+                        .filter(uri -> uri.contains("-tests.jar") || uri.contains("/test-classes/"))
+                        .isPresent())
+                .map(JavaClass::getName)
+                .toList())
+                .as("classes from a test artifact leaked into the production import")
+                .isEmpty();
     }
 
     @Test
