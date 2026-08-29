@@ -106,6 +106,21 @@
                 <groupId>com.github.jsqlparser</groupId>
                 <artifactId>jsqlparser</artifactId>
                 <version>${jsqlparser.version}</version>
+                <!--
+                    jsqlparser 5.3 把它自己跑基准用的 jmh-core 声明成 compile 依赖，于是
+                    JMH + jopt-simple + commons-math3 三个 jar 会流进每一个依赖它的模块、
+                    进可执行 jar，也进第三方方言作者的编译期 classpath。仓库里没有任何一处
+                    import org.openjdk.jmh —— 基准测试框架不是运行时依赖。
+
+                    排除写在 dependencyManagement 而不是各模块：core / infra / features / app
+                    都直接声明了 jsqlparser，写在 core 只能管住 core 自己那一条边。
+                -->
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.openjdk.jmh</groupId>
+                        <artifactId>jmh-core</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <!-- 本仓库自己的模块，子模块引用时不再写版本号 -->
