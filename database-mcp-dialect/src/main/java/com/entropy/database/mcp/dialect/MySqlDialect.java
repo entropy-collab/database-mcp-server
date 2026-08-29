@@ -176,6 +176,11 @@ public class MySqlDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String getExplainPlanSql(String sql) {
+        return "EXPLAIN " + sql;
+    }
+
+    @Override
     public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
         Map<String, String> props = new LinkedHashMap<>();
         props.put("cachePrepStmts", "true");

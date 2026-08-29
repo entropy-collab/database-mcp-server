@@ -185,6 +185,11 @@ public class PostgresDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String getExplainPlanSql(String sql) {
+        return "EXPLAIN " + sql;
+    }
+
+    @Override
     public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
         return Map.of("prepareThreshold", "3");
     }

@@ -142,8 +142,29 @@ public interface DatabaseDialect {
     /**
      * Generate EXPLAIN PLAN SQL for the given query.
      * Returns null if not supported.
+     *
+     * <p>Every dialect that can explain a query must answer here. Callers are expected to treat
+     * {@code null} as "not supported" and nothing else — <strong>do not add a per-database
+     * {@code switch} on {@link #getDialectName()} in the caller.</strong> That is exactly what
+     * {@code QueryAnalysisTools.buildExplainSql} used to do: Postgres / MySQL / SQL Server only
+     * worked because of a fallback switch in the MCP tool layer, while Oracle answered here. The
+     * three fallbacks have moved into their dialects.
      */
     String getExplainPlanSql(String sql);
+
+    /**
+     * Whether the statement from {@link #getExplainPlanSql(String)} hands the plan back as a
+     * result set. Almost always true; SQL Server is the exception, because
+     * {@code SET SHOWPLAN_TEXT ON} emits the plan as session output and the batch itself returns
+     * nothing useful.
+     *
+     * <p>This exists so that callers do not have to sniff the SQL string to find out. The previous
+     * check was {@code explainSql.contains("SET SHOWPLAN")} in the tool layer, which silently
+     * relied on how this dialect happens to spell its statement.
+     */
+    default boolean explainPlanReturnsRows() {
+        return true;
+    }
 
     /**
      * SQL that counts the rows of {@code tableName} <em>exactly</em>.

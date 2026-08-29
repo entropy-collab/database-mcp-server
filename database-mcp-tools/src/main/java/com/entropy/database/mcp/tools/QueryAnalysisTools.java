@@ -79,12 +79,12 @@ public class QueryAnalysisTools extends McpToolBase {
 
             DatabaseDialect dialect = resolveDialect(connection);
 
-            String explainSql = buildExplainSql(dialect, trimmedSql);
+            String explainSql = dialect.getExplainPlanSql(trimmedSql);
             if (explainSql == null) {
                 throw new McpToolException(ErrorCode.EXPLAIN_NOT_SUPPORTED, "EXPLAIN PLAN not supported for this dialect (connection=" + connection + ")");
             }
 
-            List<Map<String, String>> planRows = executeExplainPlan(connection, explainSql);
+            List<Map<String, String>> planRows = executeExplainPlan(connection, dialect, explainSql);
             List<String> warnings = analyzePlan(planRows, dialect);
             return success(context(
                     "connection", connection, "dialect", dialect.getDialectName(),
@@ -148,24 +148,11 @@ public class QueryAnalysisTools extends McpToolBase {
         return adminOperations.getDialect(connection);
     }
 
-    private String buildExplainSql(DatabaseDialect dialect, String sql) {
-        String dialectExplain = dialect.getExplainPlanSql(sql);
-        if (dialectExplain != null) return dialectExplain;
-        return switch (dialect.getDialectName().toLowerCase()) {
-            case "oracle" -> "EXPLAIN PLAN FOR " + sql;
-            case "postgres", "postgresql" -> "EXPLAIN " + sql;
-            case "mysql" -> "EXPLAIN " + sql;
-            case "sqlserver", "mssql" -> "SET SHOWPLAN_TEXT ON; " + sql + "; SET SHOWPLAN_TEXT OFF";
-            default -> null;
-        };
-    }
-
-    private List<Map<String, String>> executeExplainPlan(String connection, String explainSql) {
-        if (explainSql.contains("SET SHOWPLAN")) {
-            // SQL Server emits the plan as session output rather than as a result set, so whatever
-            // the batch returns is discarded.
+    private List<Map<String, String>> executeExplainPlan(String connection, DatabaseDialect dialect, String explainSql) {
+        if (!dialect.explainPlanReturnsRows()) {
+            // 计划以会话输出的形式产生（SQL Server 的 SET SHOWPLAN_TEXT），批处理本身返回的东西没用。
             readOperations.queryRows(explainSql, connection);
-            return List.of(Map.of("note", "SQL Server execution plan captured in output"));
+            return List.of(Map.of("note", "Execution plan captured in session output, not as a result set"));
         }
         List<Map<String, String>> planRows = new ArrayList<>();
         for (Map<String, Object> row : readOperations.queryRows(explainSql, connection)) {

@@ -139,6 +139,21 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
             """.formatted(schemaFilter);
     }
 
+    /**
+     * SQL Server has no {@code EXPLAIN}; the plan is produced by wrapping the statement in
+     * {@code SET SHOWPLAN_TEXT ON/OFF}. Note that the plan arrives as session output rather than
+     * as a result set — see {@link #explainPlanReturnsRows()}.
+     */
+    @Override
+    public String getExplainPlanSql(String sql) {
+        return "SET SHOWPLAN_TEXT ON; " + sql + "; SET SHOWPLAN_TEXT OFF";
+    }
+
+    @Override
+    public boolean explainPlanReturnsRows() {
+        return false;
+    }
+
     @Override
     public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
         Map<String, String> props = new LinkedHashMap<>();
