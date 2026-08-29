@@ -145,9 +145,32 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 ? deps.cacheMaintenanceExecutor()
                 : ForkJoinPool.commonPool();
 
+        // Pinned connections (entropy.mcp.database.connections) must survive for the life of the
+        // process. A flag on LeasedDataSource is not enough: expireAfterAccess and maximumSize are
+        // Caffeine's own policies and ignore anything on the value. Both are therefore replaced by
+        // pinned-aware equivalents — otherwise a configured Oracle connection vanishes after one
+        // idle hour, or gets squeezed out once max-cached-connections BYOK pools show up.
         this.leasedCache = com.github.benmanes.caffeine.cache.Caffeine.newBuilder()
-                .maximumSize(maxCachedConnections)
-                .expireAfterAccess(leaseDuration)
+                .maximumWeight(maxCachedConnections)
+                .weigher((String key, LeasedDataSource value) -> value.isPinned() ? 0 : 1)
+                .expireAfter(new com.github.benmanes.caffeine.cache.Expiry<String, LeasedDataSource>() {
+                    @Override
+                    public long expireAfterCreate(String key, LeasedDataSource value, long currentTime) {
+                        return value.isPinned() ? Long.MAX_VALUE : leaseDuration.toNanos();
+                    }
+
+                    @Override
+                    public long expireAfterUpdate(String key, LeasedDataSource value,
+                                                  long currentTime, long currentDuration) {
+                        return expireAfterCreate(key, value, currentTime);
+                    }
+
+                    @Override
+                    public long expireAfterRead(String key, LeasedDataSource value,
+                                                long currentTime, long currentDuration) {
+                        return expireAfterCreate(key, value, currentTime);
+                    }
+                })
                 .executor(cacheExecutor)
                 .removalListener(this::onCacheRemoval)
                 .build();
@@ -370,6 +393,54 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             log.info("Registered existing datasource as BYOK connection: {}", key);
             if (metricsCollector != null) {
                 metricsCollector.recordByokConnectionCreated();
+            }
+        }
+    }
+
+    @Override
+    public void registerPinned(String key, ConnectionProperties connection) {
+        // Configured connections go through the same URL guard as caller-supplied ones. The guard's
+        // real job is rejecting code-execution parameters (H2 INIT/RUNSCRIPT, MySQL
+        // allowLoadLocalInfile); a typo or a copy-pasted URL in application.yml deserves that check
+        // just as much as a tool call does.
+        guardJdbcUrl(key, connection.jdbcUrl());
+
+        DatabaseDialect dialect = dialectResolver.resolve(connection.dialect(), null);
+
+        Object lock = lockFor(key);
+        synchronized (lock) {
+            LeasedDataSource previous = leasedCache.getIfPresent(key);
+            if (previous != null) {
+                log.warn("Connection {} already registered, replacing with the configured one", key);
+                evictIfCurrent(key, previous);
+            }
+
+            ByokDataSourceContext context = null;
+            try {
+                context = dataSourceFactory.create(key, connection, dialect);
+                LeasedDataSource leased = LeasedDataSource.pinned(key, context);
+
+                // Same ordering rule as acquire(): registry first, cache second.
+                // Fingerprint is deliberately null: a pinned pool must not become the alias target of
+                // a later BYOK acquire() with matching credentials, or that caller would silently
+                // inherit a connection that never expires.
+                register(key, leased, connection, dialect.getDialectName(), null);
+                leasedCache.put(key, leased);
+
+                log.info("Registered pinned connection '{}' (dialect={}, readonly={})",
+                        key, dialect.getDialectName(), connection.readonly());
+                if (metricsCollector != null) {
+                    metricsCollector.recordByokConnectionCreated();
+                }
+            } catch (Exception e) {
+                if (context != null) {
+                    try {
+                        context.closePool();
+                    } catch (Exception closeEx) {
+                        log.warn("Failed to close pool after failed pinned registration: {}", key, closeEx);
+                    }
+                }
+                throw e;
             }
         }
     }

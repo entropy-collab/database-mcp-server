@@ -53,6 +53,20 @@ public interface DynamicDataSourceManager extends PoolStatsSource {
     void registerExisting(String key, DataSource existingDataSource, DatabaseDialect dialect);
 
     /**
+     * Register a connection declared in configuration ({@code entropy.mcp.database.connections}) as a
+     * <em>pinned</em> connection.
+     *
+     * <p>Unlike {@link #acquire(String, ConnectionProperties)} the result never expires: no lease, no
+     * max lifetime, and it does not count against {@code byok.max-cached-connections}. The lease model
+     * exists because BYOK callers bring connections at runtime; a connection the deployment declared
+     * has the opposite requirement and must stay available for the life of the process.
+     *
+     * <p>The pool is built through the same {@code ByokDataSourceFactory} as BYOK connections, so SQL
+     * validation, masking, auditing and statement timeouts apply identically.
+     */
+    void registerPinned(String key, ConnectionProperties connection);
+
+    /**
      * Get metadata for a specific connection.
      *
      * @return ConnectionMetadata or null if not found

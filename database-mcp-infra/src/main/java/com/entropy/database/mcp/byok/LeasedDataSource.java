@@ -28,6 +28,22 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Leased datasource with TTL-based lifecycle management.
  * Wraps ByokDataSourceContext with lease renewal and expiry detection.
+ *
+ * <h2>Leased vs. pinned</h2>
+ * The lease model exists for BYOK: the caller brings a connection at runtime, so it must not live
+ * forever — {@code leaseDuration} reclaims idle pools and {@code maxLifetime} is a hard ceiling that
+ * forces credentials to be re-presented.
+ *
+ * <p>Connections declared in configuration ({@code entropy.mcp.database.connections}) have the
+ * opposite requirement: the deployment owns them and they must stay available for the life of the
+ * process. Those are {@linkplain #pinned pinned} — no lease expiry, no max lifetime, never closed by
+ * the cleanup task.
+ *
+ * <p><strong>A pinned flag here is not sufficient on its own.</strong> The flag only governs
+ * {@link #isExpired()} / {@link #renewLease()}, which is application-level logic. Eviction is
+ * Caffeine's, so {@code DynamicDataSourceManagerImpl} must also exempt pinned entries from
+ * {@code expireAfterAccess} and from the size cap — see the {@code Expiry} and {@code weigher} in
+ * its constructor. Without that, a pinned connection silently disappears after one idle hour.
  */
 public class LeasedDataSource {
     private static final Logger log = LoggerFactory.getLogger(LeasedDataSource.class);
@@ -39,6 +55,7 @@ public class LeasedDataSource {
     private final AtomicReference<Instant> leaseExpiry;
     private final java.time.Duration leaseDuration;
     private final boolean closeable;
+    private final boolean pinned;
 
     public LeasedDataSource(String key,
                             ByokDataSourceContext context,
@@ -64,14 +81,48 @@ public class LeasedDataSource {
         this.leaseDuration = leaseDuration;
         this.leaseExpiry = new AtomicReference<>(Instant.now().plus(leaseDuration));
         this.closeable = closeable;
+        this.pinned = false;
+    }
+
+    /** Pinned constructor: no lease, no max lifetime. */
+    private LeasedDataSource(String key, ByokDataSourceContext context) {
+        this.key = key;
+        this.context = context;
+        this.createdAt = Instant.now();
+        // Instant.MAX rather than null so getMaxLifetime()/getLeaseExpiry() keep their contract for
+        // the monitoring and listConnections paths, which read them unconditionally.
+        this.maxLifetime = Instant.MAX;
+        this.leaseDuration = java.time.Duration.ZERO;
+        this.leaseExpiry = new AtomicReference<>(Instant.MAX);
+        this.closeable = true;
+        this.pinned = true;
+    }
+
+    /**
+     * A connection that lives for the life of the process, for
+     * {@code entropy.mcp.database.connections} entries.
+     *
+     * <p>{@code closeable} is {@code true} on purpose even though nothing evicts it: this server
+     * created the pool, so {@link #close()} during {@code shutdown()} must actually release it.
+     */
+    public static LeasedDataSource pinned(String key, ByokDataSourceContext context) {
+        return new LeasedDataSource(key, context);
+    }
+
+    /** Whether this connection is exempt from lease expiry and the connection-count cap. */
+    public boolean isPinned() {
+        return pinned;
     }
 
     /**
      * Renew the lease (called on each access).
      */
     public synchronized ByokDataSourceContext renewLease() {
+        if (pinned) {
+            return context;
+        }
         Instant now = Instant.now();
-        
+
         // Check max lifetime first
         if (now.isAfter(maxLifetime)) {
             log.warn("Datasource {} exceeded max lifetime, will be replaced", key);
@@ -104,17 +155,17 @@ public class LeasedDataSource {
     }
 
     /**
-     * Check if the lease has expired.
+     * Check if the lease has expired. Always {@code false} for a pinned connection.
      */
     public boolean isExpired() {
-        return Instant.now().isAfter(leaseExpiry.get());
+        return !pinned && Instant.now().isAfter(leaseExpiry.get());
     }
 
     /**
-     * Check if max lifetime has been exceeded.
+     * Check if max lifetime has been exceeded. Always {@code false} for a pinned connection.
      */
     public boolean isMaxLifetimeExceeded() {
-        return Instant.now().isAfter(maxLifetime);
+        return !pinned && Instant.now().isAfter(maxLifetime);
     }
 
     private final AtomicBoolean closed = new AtomicBoolean(false);
@@ -145,6 +196,7 @@ public class LeasedDataSource {
     public String toString() {
         return "LeasedDataSource{" +
                 "key='" + key + '\'' +
+                ", pinned=" + pinned +
                 ", createdAt=" + createdAt +
                 ", maxLifetime=" + maxLifetime +
                 ", leaseExpiry=" + leaseExpiry.get() +
