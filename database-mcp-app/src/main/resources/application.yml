@@ -52,7 +52,9 @@ spring:
     mcp:
       server:
         name: database-mcp-server
-        version: 0.1.4
+        # 由 Maven 资源过滤填入 project.version（spring-boot-starter-parent 对
+        # application*.yml 开启了 @..@ 分隔符的 filtering），避免每次发版手工同步漏改。
+        version: @project.version@
         protocol: STATELESS
 
   main:
