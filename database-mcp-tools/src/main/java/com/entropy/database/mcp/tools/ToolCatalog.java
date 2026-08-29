@@ -111,6 +111,11 @@ public class ToolCatalog {
         return d == null ? null : d.group();
     }
 
+    /** 返回工具的完整元数据；工具名未出现在索引里时返回 {@code null}。 */
+    public ToolDescriptor describe(String toolName) {
+        return index().get(toolName);
+    }
+
     /** 判断工具名是否存在于索引。 */
     public boolean contains(String toolName) {
         return index().containsKey(toolName);

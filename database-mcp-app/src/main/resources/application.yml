@@ -229,12 +229,18 @@ entropy:
     # 注意：include/exclude/groups 里写了不存在的名字会直接启动失败，不会静默忽略。
     # 这是刻意的——工具改名后配置悄悄失效比启动报错难查得多。改工具名时记得同步这里。
     #
-    # 数据面（只读查询，高并发）参考配置：
-    #   groups: [query, schema, query-analysis, export, intent-router]
-    #   include: [checkHealth]
+    # 数据面（只读查询，高并发，可多副本）：plane=data 按工具描述里的 标签：[...] 自动切分，
+    #   带 read 且不带 write/ddl/destructive/admin 的才留下。实测保留 89/116。
+    #   比手写 groups 白名单准：cross-database 里的联邦查询留下、createDbLink/dropDbLink 摘掉。
+    # 控制面（连接注册、备份恢复、ETL、CDC、DDL，单副本）：plane=control，是 data 的补集。
+    # 标签缺失的新工具会落进 control——对暴露面最大的数据面 fail-closed。
+    # include 刻意能穿透 plane，用于"数据面额外放一个受控写工具"。
+    # plane 是暴露面收敛手段，不是安全边界：真正的闸是 ddl.allowed 与 entropy.mcp.security.*。
+    #
     # 收敛专家级低频操作参考配置：
     #   exclude: [flashbackQuery, createDbLink, dropDbLink, showBlockingTree, killSession]
     tools:
+      plane: all          # all / data / control；写别的值直接启动失败
       groups: []
       include: []
       exclude: []

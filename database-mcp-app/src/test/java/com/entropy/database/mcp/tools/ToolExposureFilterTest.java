@@ -45,8 +45,13 @@ class ToolExposureFilterTest {
     private final ToolCatalog catalog = new ToolCatalog(
             FixedObjectProvider.of(new QueryLikeTools(), new HealthLikeTools()));
 
-    private static final ToolExposureProperties NO_FILTER =
-            new ToolExposureProperties(Set.of(), Set.of(), Set.of());
+    private static final ToolExposureProperties NO_FILTER = props(Set.of(), Set.of(), Set.of());
+
+    /** 绝大多数用例与 plane 无关，走默认值 {@code all}。 */
+    private static ToolExposureProperties props(
+            Set<String> groups, Set<String> include, Set<String> exclude) {
+        return new ToolExposureProperties(ToolExposureProperties.PLANE_ALL, groups, include, exclude);
+    }
 
     private static SyncToolSpecification spec(String name) {
         // 裁剪只看 tool().name()，调用处理器在本测试里不会被触发
@@ -79,20 +84,20 @@ class ToolExposureFilterTest {
 
     @Test
     void keepsOnlyConfiguredGroups() {
-        assertThat(keptNames(new ToolExposureProperties(Set.of("query-like"), Set.of(), Set.of())))
+        assertThat(keptNames(props(Set.of("query-like"), Set.of(), Set.of())))
                 .containsExactly("executeSample");
     }
 
     @Test
     void includeAddsToolsOutsideTheConfiguredGroups() {
-        assertThat(keptNames(new ToolExposureProperties(
+        assertThat(keptNames(props(
                 Set.of("query-like"), Set.of("checkSampleHealth"), Set.of())))
                 .containsExactly("executeSample", "checkSampleHealth");
     }
 
     @Test
     void excludeWinsOverGroupsAndInclude() {
-        assertThat(keptNames(new ToolExposureProperties(
+        assertThat(keptNames(props(
                 Set.of("query-like", "health-like"),
                 Set.of("flashbackSample"),
                 Set.of("flashbackSample", "untemplatedSample"))))
@@ -101,14 +106,14 @@ class ToolExposureFilterTest {
 
     @Test
     void excludeAloneKeepsEverythingElse() {
-        assertThat(keptNames(new ToolExposureProperties(Set.of(), Set.of(), Set.of("flashbackSample"))))
+        assertThat(keptNames(props(Set.of(), Set.of(), Set.of("flashbackSample"))))
                 .containsExactly("executeSample", "checkSampleHealth", "untemplatedSample");
     }
 
     @Test
     void failsFastOnUnknownToolName() {
         assertThatThrownBy(() -> keptNames(
-                new ToolExposureProperties(Set.of(), Set.of(), Set.of("getEtlJobStatus"))))
+                props(Set.of(), Set.of(), Set.of("getEtlJobStatus"))))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("unknown tool names")
                 .hasMessageContaining("getEtlJobStatus");
@@ -117,14 +122,14 @@ class ToolExposureFilterTest {
     @Test
     void failsFastOnUnknownGroup() {
         assertThatThrownBy(() -> keptNames(
-                new ToolExposureProperties(Set.of("no-such-group"), Set.of(), Set.of())))
+                props(Set.of("no-such-group"), Set.of(), Set.of())))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("unknown groups");
     }
 
     @Test
     void failsFastWhenEverythingWouldBeFilteredOut() {
-        assertThatThrownBy(() -> keptNames(new ToolExposureProperties(
+        assertThatThrownBy(() -> keptNames(props(
                 Set.of(), Set.of(),
                 Set.of("executeSample", "checkSampleHealth", "flashbackSample", "untemplatedSample"))))
                 .isInstanceOf(IllegalStateException.class)
@@ -132,9 +137,46 @@ class ToolExposureFilterTest {
     }
 
     @Test
+    void failsFastOnUnknownPlane() {
+        assertThatThrownBy(() -> keptNames(
+                new ToolExposureProperties("edge", Set.of(), Set.of(), Set.of())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("entropy.mcp.tools.plane");
+    }
+
+    /** {@code untemplatedSample} 没有标签行，按 fail-closed 规则不属于数据面。 */
+    @Test
+    void dataPlaneKeepsOnlyReadOnlyTools() {
+        assertThat(keptNames(new ToolExposureProperties("data", Set.of(), Set.of(), Set.of())))
+                .containsExactly("executeSample", "checkSampleHealth", "flashbackSample");
+    }
+
+    @Test
+    void controlPlaneIsTheComplementOfTheDataPlane() {
+        assertThat(keptNames(new ToolExposureProperties("control", Set.of(), Set.of(), Set.of())))
+                .containsExactly("untemplatedSample");
+    }
+
+    /** plane 是暴露面收敛手段而非安全边界，{@code include} 必须能穿透它。 */
+    @Test
+    void includePunchesThroughThePlane() {
+        assertThat(keptNames(new ToolExposureProperties(
+                "data", Set.of(), Set.of("untemplatedSample"), Set.of())))
+                .containsExactly(
+                        "executeSample", "checkSampleHealth", "flashbackSample", "untemplatedSample");
+    }
+
+    @Test
+    void excludeStillWinsOverThePlane() {
+        assertThat(keptNames(new ToolExposureProperties(
+                "data", Set.of(), Set.of(), Set.of("flashbackSample"))))
+                .containsExactly("executeSample", "checkSampleHealth");
+    }
+
+    @Test
     void ignoresBeansThatAreNotToolSpecificationLists() {
         ToolExposureFilter filter = filterWith(
-                new ToolExposureProperties(Set.of("query-like"), Set.of(), Set.of()));
+                props(Set.of("query-like"), Set.of(), Set.of()));
 
         assertThat(filter.postProcessAfterInitialization(List.of("a", "b"), "otherList"))
                 .isEqualTo(List.of("a", "b"));
@@ -194,6 +236,65 @@ class ToolExposureFilterTest {
                     Set.of("query", "schema").contains(catalog.groupOf(name)) || "checkHealth".equals(name))
                     .isTrue());
             assertThat(names.size()).isLessThan(catalog.size());
+        }
+    }
+
+    /**
+     * 对着真实的 116 个工具验证按标签推导的数据面。
+     *
+     * <p>单测用的假工具只有 4 个，证明不了"真实描述里的标签行足以支撑切分"——这个用例才是
+     * {@code plane=data} 敢用在生产上的依据。
+     */
+    @Nested
+    @SpringBootTest(properties = {
+        "entropy.mcp.database.enabled=true",
+        "entropy.mcp.database.dialect=generic",
+        "entropy.mcp.security.enabled=false",
+        "entropy.mcp.gateway.enabled=false",
+        "entropy.mcp.tools.plane=data"
+    })
+    class DataPlaneOnTheRealCatalog {
+
+        private static final Set<String> MUTATING_TAGS =
+                Set.of("write", "ddl", "destructive", "admin");
+
+        @Autowired
+        private ObjectProvider<List<SyncToolSpecification>> specBeans;
+
+        @Autowired
+        private ToolCatalog catalog;
+
+        private List<String> registeredNames() {
+            return specBeans.orderedStream()
+                    .flatMap(List::stream)
+                    .map(spec -> spec.tool().name())
+                    .toList();
+        }
+
+        @Test
+        void everyRegisteredToolProvesItselfReadOnly() {
+            assertThat(registeredNames()).allSatisfy(name -> {
+                List<String> tags = catalog.describe(name).tags();
+                assertThat(tags).as("%s 缺少 read 标签却进了数据面", name).contains("read");
+                assertThat(tags).as("%s 带有改动状态的标签却进了数据面", name)
+                        .doesNotContainAnyElementsOf(MUTATING_TAGS);
+            });
+        }
+
+        @Test
+        void dropsTheWriteSideTools() {
+            assertThat(registeredNames())
+                    .contains("executeQuery", "listTables", "describeTable", "checkHealth")
+                    .doesNotContain("executeDdl", "insertData", "upsertData", "createDbLink",
+                            "submitEtlJob", "backupTable", "killSession");
+        }
+
+        /** 切分必须真的切掉了一部分，否则这个开关等于没生效。 */
+        @Test
+        void narrowsTheExposedSurface() {
+            assertThat(registeredNames().size())
+                    .isGreaterThan(catalog.size() / 2)
+                    .isLessThan(catalog.size());
         }
     }
 }

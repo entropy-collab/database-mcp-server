@@ -83,47 +83,54 @@ public class ToolExposureFilter implements BeanPostProcessor {
         }
 
         ToolCatalog toolCatalog = catalog.getObject();
+        ToolPlane plane = ToolPlane.parse(config.plane());
         validate(config, specs, toolCatalog);
 
         List<SyncToolSpecification> kept = specs.stream()
-                .filter(spec -> exposed(spec.tool().name(), config, toolCatalog))
+                .filter(spec -> exposed(spec.tool().name(), config, plane, toolCatalog))
                 .toList();
 
         if (kept.isEmpty()) {
             throw new IllegalStateException(
                     "entropy.mcp.tools filtered out every tool — the MCP server would expose nothing. "
-                            + "Check groups/include/exclude. Available groups: " + toolCatalog.groups());
+                            + "Check plane/groups/include/exclude. Available groups: " + toolCatalog.groups());
         }
 
-        log.info("MCP tool exposure: {} of {} tools registered, {} filtered out. Kept per group: {}",
-                kept.size(), specs.size(), specs.size() - kept.size(), countByGroup(kept, toolCatalog));
+        log.info("MCP tool exposure: plane={}, {} of {} tools registered, {} filtered out. Kept per group: {}",
+                plane.configName(), kept.size(), specs.size(), specs.size() - kept.size(),
+                countByGroup(kept, toolCatalog));
         if (log.isDebugEnabled()) {
             log.debug("MCP tool exposure: filtered out {}", specs.stream()
                     .map(spec -> spec.tool().name())
-                    .filter(name -> !exposed(name, config, toolCatalog))
+                    .filter(name -> !exposed(name, config, plane, toolCatalog))
                     .sorted()
                     .toList());
         }
         return kept;
     }
 
-    private static boolean exposed(String toolName, ToolExposureProperties config, ToolCatalog catalog) {
+    private static boolean exposed(String toolName, ToolExposureProperties config,
+                                   ToolPlane plane, ToolCatalog catalog) {
         if (config.exclude().contains(toolName)) {
             return false;
         }
+        // include 是"例外"，刻意能穿透 plane 与 groups：否则"数据面额外放一个受控写工具"无路可走。
         if (config.include().contains(toolName)) {
             return true;
         }
-        if (config.groups().isEmpty()) {
-            return true;
-        }
-        String group = catalog.groupOf(toolName);
-        if (group == null) {
+        ToolCatalog.ToolDescriptor descriptor = catalog.describe(toolName);
+        if (descriptor == null) {
             // 目录只覆盖 McpToolBase 子类；其他来源的工具宁可多暴露也不静默丢掉
             log.warn("MCP tool exposure: tool '{}' has no known group, keeping it", toolName);
             return true;
         }
-        return config.groups().contains(group);
+        if (!plane.includes(descriptor)) {
+            return false;
+        }
+        if (config.groups().isEmpty()) {
+            return true;
+        }
+        return config.groups().contains(descriptor.group());
     }
 
     /**
