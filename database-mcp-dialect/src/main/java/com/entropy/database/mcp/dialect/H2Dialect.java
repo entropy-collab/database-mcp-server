@@ -15,9 +15,6 @@
  */
 package com.entropy.database.mcp.dialect;
 
-import com.entropy.database.mcp.properties.DatabaseProperties;
-import com.zaxxer.hikari.HikariConfig;
-
 /**
  * H2 database dialect.
  * H2 stores INFORMATION_SCHEMA objects in uppercase when DATABASE_TO_UPPER=false.
@@ -224,11 +221,6 @@ public class H2Dialect extends AbstractDatabaseDialect {
     @Override
     public boolean supportsLimit() {
         return true;
-    }
-
-    @Override
-    public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
-        // H2 specific configuration if needed
     }
 
     @Override

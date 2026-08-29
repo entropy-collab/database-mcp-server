@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.entropy.agent</groupId>
+        <artifactId>database-mcp-parent</artifactId>
+        <version>0.3.0</version>
+    </parent>
+
+    <artifactId>database-mcp-dialect</artifactId>
+    <name>Entropy Database MCP Dialect</name>
+    <description>方言层：DatabaseDialect 契约、ServiceLoader SPI 与 8 个内置方言，只依赖 core</description>
+
+    <!--
+        这个模块存在的唯一理由：给第三方方言作者一个小而稳定的编译期契约。
+
+        拆分之前，实现一个方言必须依赖 database-mcp-infra —— 那个模块拖着 HikariCP、
+        spring-jdbc、spring-tx、spring-security、micrometer、caffeine 和整套 BYOK 连接池
+        机制，而方言本身一行都用不到。现在只需要依赖本模块 + core。
+
+        参照的是 spring-data-relational：PostgresDialect / OracleDialect / MySqlDialect /
+        H2Dialect / Db2Dialect / SqlServerDialect 全都放在同一个模块里，而不是每个数据库
+        一个模块。这里同样把 8 个内置方言和契约放在一起 —— 它们是纯 SQL 字符串构造器，
+        没有任何驱动依赖，分开只会多出 8 个空壳 pom。
+
+        依赖面刻意只有两项：
+          - database-mcp-core：DatabaseProperties（configureDataSource 的入参）与
+            ErrorCode / McpValidationException（DialectUtils 的标识符校验）；
+          - slf4j-api：DialectResolver 在方言名冲突时打 WARN。
+        没有 HikariCP。SPI 里那个 configureDataSource(HikariConfig, ..) 已经换成返回
+        Map<String, String> 的 dataSourceProperties(..)，由 infra 的 ByokDataSourceFactory
+        负责往 HikariConfig 上贴 —— 契约不该知道调用方用哪个连接池。
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>com.entropy.agent</groupId>
+            <artifactId>database-mcp-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <!--
+            仅测试用。DialectMetadataContractTest 拿真 H2 跑一遍每个方言的元数据 SQL，
+            所以要 JdbcTemplate 和 H2；test 作用域不会外泄给依赖本模块的下游。
+        -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

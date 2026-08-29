@@ -15,10 +15,10 @@
  */
 package com.entropy.database.mcp.dialect;
 
-import com.zaxxer.hikari.HikariConfig;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Oracle-specific dialect with EXPLAIN PLAN support.
@@ -510,9 +510,10 @@ public class OracleDialect extends AbstractDatabaseDialect {
     }
 
     @Override
-    public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
-        config.addDataSourceProperty("oracle.jdbc.ReadTimeout", "30000");
-        config.addDataSourceProperty("oracle.net.CONNECT_TIMEOUT", "10000");
+    public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
+        return Map.of(
+                "oracle.jdbc.ReadTimeout", "30000",
+                "oracle.net.CONNECT_TIMEOUT", "10000");
     }
 
     public String buildUpsertSql(String tableName, List<String> allColumns, List<String> keyColumns) {

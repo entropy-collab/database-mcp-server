@@ -15,10 +15,10 @@
  */
 package com.entropy.database.mcp.dialect;
 
-import com.zaxxer.hikari.HikariConfig;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 
 import java.util.List;
+import java.util.Map;
 
 public class PostgresDialect extends AbstractDatabaseDialect {
 
@@ -185,8 +185,8 @@ public class PostgresDialect extends AbstractDatabaseDialect {
     }
 
     @Override
-    public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
-        config.addDataSourceProperty("prepareThreshold", "3");
+    public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
+        return Map.of("prepareThreshold", "3");
     }
 
     @Override

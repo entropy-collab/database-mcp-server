@@ -65,11 +65,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * padding, so the reason for every allowance stays readable in code.
  *
  * <h2>What Maven already enforces, and what it does not</h2>
- * Since the repository was split into five Maven modules the <em>layer</em> direction is a
+ * Since the repository was split into Maven modules the <em>layer</em> direction is a
  * compile-time constraint, so a rule that only restates it is dead weight — R3 ("lower layers must
  * not depend back on tools") was removed for exactly that reason: {@code gateway} lives in
- * {@code features}, {@code repository}/{@code byok}/{@code dialect} in {@code infra}, and neither
- * module can see {@code tools} at all.
+ * {@code features}, {@code repository}/{@code byok} in {@code infra}, {@code dialect} in its own
+ * module, and none of them can see {@code tools} at all.
  *
  * <p>R1 and R2 are <strong>not</strong> covered by the module split and stay here. Both forbid
  * dependencies that are perfectly visible to {@code tools} at compile time: {@code JdbcTemplate}

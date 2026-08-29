@@ -93,7 +93,7 @@
 mvn clean package -DskipTests
 
 # 启动
-java -jar database-mcp-app/target/database-mcp-server-0.2.0.jar
+java -jar database-mcp-app/target/database-mcp-server-0.3.0.jar
 
 # 验证
 curl http://localhost:8686/actuator/health
@@ -224,7 +224,7 @@ docker run -d \
   "mcpServers": {
     "database": {
       "command": "java",
-      "args": ["-jar", "/path/to/database-mcp-server-0.2.0.jar"],
+      "args": ["-jar", "/path/to/database-mcp-server-0.3.0.jar"],
       "env": {
         "DB_PRIMARY_USER": "${DB_PRIMARY_USER}",
         "DB_PRIMARY_PASSWORD": "${DB_PRIMARY_PASSWORD}",
@@ -245,7 +245,7 @@ import asyncio
 async def main():
     server_params = StdioServerParameters(
         command="java",
-        args=["-jar", "database-mcp-server-0.2.0.jar"],
+        args=["-jar", "database-mcp-server-0.3.0.jar"],
         env={
             "DB_PRIMARY_USER": "your_user",
             "DB_PRIMARY_PASSWORD": "your_password",

@@ -146,7 +146,9 @@ public class ByokDataSourceFactory {
         config.setIdleTimeout(dbProps.connectionPool().idleTimeoutMs());
         config.setMaxLifetime(byokProps.maxLifetime().toMillis());
         config.setConnectionTestQuery(dialect.connectionTestQuery());
-        dialect.configureDataSource(config, dbProps);
+        // 方言只描述"这个数据库想要哪些驱动级参数"，往 HikariConfig 上贴是这里的事——
+        // dialect 模块刻意不依赖 HikariCP。
+        dialect.dataSourceProperties(dbProps).forEach(config::addDataSourceProperty);
         // Milliseconds, and derived from the longest statement ceiling. The previous value was the
         // literal 60 against this millisecond setter, which is below HikariCP's 2s floor — so leak
         // detection was silently off, not the 60s the comment claimed. Deriving it also keeps a

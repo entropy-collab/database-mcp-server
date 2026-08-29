@@ -15,9 +15,6 @@
  */
 package com.entropy.database.mcp.dialect;
 
-import com.entropy.database.mcp.properties.DatabaseProperties;
-import com.zaxxer.hikari.HikariConfig;
-
 public abstract class AbstractDatabaseDialect implements DatabaseDialect {
 
     @Override
@@ -195,10 +192,5 @@ public abstract class AbstractDatabaseDialect implements DatabaseDialect {
     @Override
     public String listGrantsSql(String userName) {
         return null;
-    }
-
-    @Override
-    public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
-        // No-op by default
     }
 }

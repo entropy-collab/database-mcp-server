@@ -16,7 +16,9 @@
 package com.entropy.database.mcp.dialect;
 
 import com.entropy.database.mcp.properties.DatabaseProperties;
-import com.zaxxer.hikari.HikariConfig;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 public class SqlServerDialect extends AbstractDatabaseDialect {
 
@@ -138,12 +140,14 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
     }
 
     @Override
-    public void configureDataSource(HikariConfig config, DatabaseProperties properties) {
-        config.addDataSourceProperty("cachePrepStmts", "true");
+    public Map<String, String> dataSourceProperties(DatabaseProperties properties) {
+        Map<String, String> props = new LinkedHashMap<>();
+        props.put("cachePrepStmts", "true");
         if (properties != null && properties.preparedStatement() != null) {
-            config.addDataSourceProperty("prepStmtCacheSize", String.valueOf(properties.preparedStatement().cacheSize()));
-            config.addDataSourceProperty("prepStmtCacheSqlLimit", String.valueOf(properties.preparedStatement().sqlLimit()));
+            props.put("prepStmtCacheSize", String.valueOf(properties.preparedStatement().cacheSize()));
+            props.put("prepStmtCacheSqlLimit", String.valueOf(properties.preparedStatement().sqlLimit()));
         }
+        return Map.copyOf(props);
     }
 
     @Override

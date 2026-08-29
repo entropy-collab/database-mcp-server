@@ -16,7 +16,8 @@
 package com.entropy.database.mcp.dialect;
 
 import com.entropy.database.mcp.properties.DatabaseProperties;
-import com.zaxxer.hikari.HikariConfig;
+
+import java.util.Map;
 
 /**
  * Per-dialect SQL vocabulary.
@@ -564,11 +565,21 @@ public interface DatabaseDialect {
     }
 
     /**
-     * Configure dialect-specific HikariCP datasource properties.
-     * Called after common pool settings are applied.
+     * Driver-level datasource properties this dialect wants set on the pool, e.g.
+     * {@code oracle.jdbc.ReadTimeout} or {@code cachePrepStmts}. Returns an empty map by default.
+     *
+     * <p>The caller decides how to apply them — {@code ByokDataSourceFactory} feeds each entry to
+     * {@code HikariConfig.addDataSourceProperty}. <strong>Returning values instead of taking a
+     * {@code HikariConfig} is deliberate:</strong> this interface is the third-party extension point,
+     * and it used to be {@code configureDataSource(HikariConfig, DatabaseProperties)}, which forced
+     * every dialect — and this whole module — to compile against HikariCP for the sake of four
+     * implementations that only ever called {@code addDataSourceProperty}. A dialect describes a
+     * database, not the pool in front of it.
+     *
+     * @param properties may be null; implementations must tolerate that
      */
-    default void configureDataSource(HikariConfig config, DatabaseProperties properties) {
-        // No-op by default
+    default Map<String, String> dataSourceProperties(DatabaseProperties properties) {
+        return Map.of();
     }
 
     // ─── CDC (Change Data Capture) ───────────────────────────────────────
