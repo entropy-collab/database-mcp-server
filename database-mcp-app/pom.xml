@@ -55,60 +55,168 @@
             H2 是 runtime 而不是 test：application-test.yml 是随包发布的运行 profile，
             配 dialect=h2 + test-data.enabled=true 由 TestDataInitializer 建样例库，
             所以 H2 必须在可执行 jar 的运行期 classpath 上。
+
+            它也是唯一不受 -Ddrivers 影响的驱动，见下方 profiles。
         -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>runtime</scope>
         </dependency>
+    </dependencies>
+
+    <!--
+        JDBC 驱动按 -Ddrivers 选装。驱动只在运行期 classpath 上，Hikari 通过
+        java.sql.Driver 的 SPI 找它，所以增删驱动对编译零影响——这也是为什么这件事用
+        profile 就够了，不需要拆模块（方言类只有几 KB，拆出去省不下镜像）。
+
+        实测各驱动在 fat jar 里的体积（0.1.4）：
+          sqlite-jdbc 11.4MB（含全平台原生库）· ojdbc11 7.4 + orai18n 1.6 · jcc 6.3
+          mysql 2.5 · mssql 1.5 · postgresql 1.2 · h2 2.6      合计 34.5MB
+
+        用法：
+          mvn clean package                      全部驱动（默认，与历史行为一致）  86.2MB
+          mvn clean package -Ddrivers=oss        去掉 Oracle/SQL Server/DB2        69.4MB
+          mvn clean package -Ddrivers=minimal    只留 PostgreSQL/MySQL             57.9MB
+          mvn clean package -Ddrivers=none       只留 H2，驱动由部署方外挂         54.1MB
+
+        必须带 clean。不带的话 maven-jar-plugin 看类没变就不重写 jar，spring-boot-maven-plugin
+        也跳过已经 repackage 过的产物，于是上一次那个"全驱动"的 fat jar 原地留下来，
+        -Ddrivers 看起来完全没生效——四个 profile 量出来会是同一个大小。
+
+        drivers=none 的外挂方式（PropertiesLauncher 而不是默认的 JarLauncher）：
+          java -cp app.jar -Dloader.path=/opt/jdbc \
+               org.springframework.boot.loader.launch.PropertiesLauncher
+
+        这里刻意不用 activeByDefault：只要命令行上激活了任何一个 profile，
+        activeByDefault 的那个就会被静默关掉，于是「-Ddrivers 没写却少了驱动」。
+        用 !drivers 做条件是确定的，也能和其他 profile 共存。
+    -->
+    <profiles>
+        <profile>
+            <id>drivers-all</id>
+            <activation>
+                <property>
+                    <name>!drivers</name>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.oracle.database.jdbc</groupId>
+                    <artifactId>ojdbc11</artifactId>
+                    <version>${oracle.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <!-- Oracle 的 NLS/字符集支持，缺了它非 ASCII 数据会乱码 -->
+                <dependency>
+                    <groupId>com.oracle.database.nls</groupId>
+                    <artifactId>orai18n</artifactId>
+                    <version>${oracle.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.mysql</groupId>
+                    <artifactId>mysql-connector-j</artifactId>
+                    <version>${mysql.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.postgresql</groupId>
+                    <artifactId>postgresql</artifactId>
+                    <version>${postgresql.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.microsoft.sqlserver</groupId>
+                    <artifactId>mssql-jdbc</artifactId>
+                    <version>${sqlserver.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.xerial</groupId>
+                    <artifactId>sqlite-jdbc</artifactId>
+                    <version>${sqlite.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.ibm.db2</groupId>
+                    <artifactId>jcc</artifactId>
+                    <version>${db2.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+
+        <!-- 只保留可自由分发的驱动：Oracle / SQL Server / DB2 的 jar 有再分发限制 -->
+        <profile>
+            <id>drivers-oss</id>
+            <activation>
+                <property>
+                    <name>drivers</name>
+                    <value>oss</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.mysql</groupId>
+                    <artifactId>mysql-connector-j</artifactId>
+                    <version>${mysql.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.postgresql</groupId>
+                    <artifactId>postgresql</artifactId>
+                    <version>${postgresql.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>org.xerial</groupId>
+                    <artifactId>sqlite-jdbc</artifactId>
+                    <version>${sqlite.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+
+        <!-- 容器化部署的常见形态：只连一两个网络库，sqlite 的全平台原生库纯属负担 -->
+        <profile>
+            <id>drivers-minimal</id>
+            <activation>
+                <property>
+                    <name>drivers</name>
+                    <value>minimal</value>
+                </property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>org.postgresql</groupId>
+                    <artifactId>postgresql</artifactId>
+                    <version>${postgresql.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.mysql</groupId>
+                    <artifactId>mysql-connector-j</artifactId>
+                    <version>${mysql.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
 
         <!--
-            JDBC 驱动只在这里：没有任何代码直接引用驱动类，它们纯粹要求出现在运行期
-            classpath 上。放在 app 意味着 core/infra/features 可以在不拖驱动的前提下被复用。
+            不打任何外部驱动。只留 H2，因为 application-test.yml 是随包发布的 profile，
+            少了它 -Dspring.profiles.active=test 会直接起不来。
         -->
-        <dependency>
-            <groupId>com.oracle.database.jdbc</groupId>
-            <artifactId>ojdbc11</artifactId>
-            <version>${oracle.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.oracle.database.nls</groupId>
-            <artifactId>orai18n</artifactId>
-            <version>${oracle.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.mysql</groupId>
-            <artifactId>mysql-connector-j</artifactId>
-            <version>${mysql.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-            <version>${postgresql.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.microsoft.sqlserver</groupId>
-            <artifactId>mssql-jdbc</artifactId>
-            <version>${sqlserver.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.xerial</groupId>
-            <artifactId>sqlite-jdbc</artifactId>
-            <version>${sqlite.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.ibm.db2</groupId>
-            <artifactId>jcc</artifactId>
-            <version>${db2.jdbc.version}</version>
-            <scope>runtime</scope>
-        </dependency>
-    </dependencies>
+        <profile>
+            <id>drivers-none</id>
+            <activation>
+                <property>
+                    <name>drivers</name>
+                    <value>none</value>
+                </property>
+            </activation>
+        </profile>
+    </profiles>
 
     <build>
         <plugins>
