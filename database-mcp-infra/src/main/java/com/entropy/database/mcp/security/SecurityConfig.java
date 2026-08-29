@@ -40,8 +40,11 @@ import org.springframework.security.web.SecurityFilterChain;
 /**
  * Security configuration. Always active to override Spring Boot defaults.
  * Authentication is controlled by entropy.mcp.security.enabled (default: false).
+ *
+ * <p>{@code proxyBeanMethods = false}：两个 {@code @Bean} 方法之间没有互相调用，不需要
+ * CGLIB 代理。
  */
-@Configuration
+@Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
 public class SecurityConfig {
 

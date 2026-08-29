@@ -51,8 +51,11 @@ import java.util.function.Supplier;
  * <p>这里没有 {@code @EnableConfigurationProperties}：{@code properties} 包由
  * {@link com.entropy.database.mcp.DatabaseMcpApplication} 上的
  * {@code @ConfigurationPropertiesScan} 统一注册。
+ *
+ * <p>{@code proxyBeanMethods = false} 可以安全关闭 CGLIB 代理：9 个 {@code @Bean} 方法之间
+ * 没有互相调用，依赖全部走方法参数注入。对照 {@code AsyncConfig}——那个类必须保留代理。
  */
-@Configuration
+@Configuration(proxyBeanMethods = false)
 public class DatabaseConfig {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseConfig.class);

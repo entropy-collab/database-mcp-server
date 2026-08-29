@@ -66,7 +66,7 @@ class P0ToP3EndToEndTest {
     @LocalServerPort
     private int port;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = McpTestHttp.restTemplate();
     private final ObjectMapper mapper = new ObjectMapper();
 
     // ─── Setup ────────────────────────────────────────────────────────────

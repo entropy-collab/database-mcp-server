@@ -52,7 +52,7 @@ class McpServerIntegrationTest {
     @Value("${spring.ai.mcp.server.version}")
     private String configuredServerVersion;
 
-    private RestTemplate restTemplate = new RestTemplate();
+    private RestTemplate restTemplate = McpTestHttp.restTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private HttpHeaders buildHeaders() {

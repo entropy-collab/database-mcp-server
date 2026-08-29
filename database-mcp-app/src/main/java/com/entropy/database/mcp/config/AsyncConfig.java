@@ -38,6 +38,14 @@ import java.util.concurrent.ThreadPoolExecutor;
  *
  * <p>All three pools run blocking JDBC, so their widths come from configuration rather than from
  * {@code availableProcessors()} — see {@link ThreadPoolProperties}.
+ *
+ * <p><strong>这个类必须保留 {@code proxyBeanMethods = true}（默认值），不要照着
+ * {@code DatabaseConfig} 一起改。</strong>{@link #getAsyncExecutor()} 同时是
+ * {@link AsyncConfigurer} 的接口方法和一个 {@code @Bean} 方法。关掉 CGLIB 代理之后，
+ * {@code AsyncAnnotationBeanPostProcessor} 通过接口调用它时会绕过容器，当场 new 出第二个
+ * {@code ThreadPoolTaskExecutor}——而且这个实例的 {@code initialize()} 永远不会被调用。
+ * 于是 {@code @Async} 用的是一个野生线程池，{@code taskExecutor} bean 那个反而空转，
+ * 两者的配置和监控指标都对不上，且不报任何错。
  */
 @Configuration
 @EnableAsync
