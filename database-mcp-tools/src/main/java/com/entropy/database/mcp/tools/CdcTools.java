@@ -19,9 +19,9 @@ import com.entropy.database.mcp.cdc.*;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.properties.CdcProperties;
+import com.entropy.database.mcp.properties.DatabaseProperties;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
-import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -41,14 +41,19 @@ public class CdcTools extends McpToolBase {
 
     private final CdcService cdcService;
     private final CdcProperties props;
-    /** Same gate as {@code DdlExecutionTools}: createMirrorTable is CREATE TABLE AS SELECT. */
+    /**
+     * 与 {@code DdlExecutionTools} 同一道闸：createMirrorTable 走的是 CREATE TABLE AS SELECT。
+     *
+     * <p>读的是绑定后的 {@code DatabaseProperties.ddl().allowed()}，不再用
+     * {@code environment.getProperty("entropy.mcp.database.ddl.allowed")} 读字符串——键名写错时
+     * 字符串读法只会静默退回兜底值，闸门失效不会有任何征兆。
+     */
     private final boolean ddlAllowed;
 
-    public CdcTools(CdcService cdcService, CdcProperties props, Environment environment) {
+    public CdcTools(CdcService cdcService, CdcProperties props, DatabaseProperties databaseProperties) {
         this.cdcService = cdcService;
         this.props = props;
-        this.ddlAllowed = Boolean.parseBoolean(
-                environment.getProperty("entropy.mcp.database.ddl.allowed", "false"));
+        this.ddlAllowed = databaseProperties.ddl().allowed();
     }
 
     /**
@@ -102,7 +107,8 @@ public class CdcTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> readChanges(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
-            @McpToolParam(description = "Schema 名。Oracle 用于限定源表所属用户；MySQL/PostgreSQL 用于限定审计表所在库或 Schema。传 null 表示使用连接的当前 Schema") String schema,
+            @McpToolParam(description = "Schema 名。Oracle 用于限定源表所属用户；MySQL/PostgreSQL 用于限定审计表所在库或 Schema。传 null 表示使用连接的当前 Schema",
+                    required = false) String schema,
             @McpToolParam(description = "表名，必填。传原始业务表名即可，MySQL/PostgreSQL 会自动拼成「表名_audit」去读") String table,
             @McpToolParam(description = "起始位点，单位随方言而定，必须来自同一连接的 getCurrentLsn：Oracle 是 SCN、PostgreSQL 是 WAL LSN 解码后的整数、MySQL 是 Unix 秒级时间戳（对应审计表的 event_time）。传 null 或非正数时会自动取当前最新位点作为起点（因此通常读不到历史变更），做增量拉取时应传上一次的位点") Long fromLsn) {
         return safeExecute(() -> {
@@ -160,7 +166,8 @@ public class CdcTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> createMirrorTable(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
-            @McpToolParam(description = "源 Schema 名，可传 null 表示使用连接的当前 Schema") String sourceSchema,
+            @McpToolParam(description = "源 Schema 名，可传 null 表示使用连接的当前 Schema",
+                    required = false) String sourceSchema,
             @McpToolParam(description = "源表名，必填") String sourceTable,
             @McpToolParam(description = "目标 Schema 名，必填") String targetSchema,
             @McpToolParam(description = "目标表名，必填；该表不能已存在") String targetTable) {
@@ -169,7 +176,8 @@ public class CdcTools extends McpToolBase {
             // pass the same gate as DdlExecutionTools.executeDdl.
             requireCdcEnabled("createMirrorTable");
             if (!ddlAllowed) {
-                throw new McpToolException(ErrorCode.SQL_OPERATION_NOT_ALLOWED, ToolParams.DDL_DISABLED_MSG);
+                throw new McpToolException(ErrorCode.SECURITY_VIOLATION,
+                        DdlExecutionTools.DDL_GATE_REFUSAL.formatted("createMirrorTable"));
             }
             validateRequired(connection, "connection");
             validateRequired(sourceTable, "sourceTable");
@@ -200,7 +208,8 @@ public class CdcTools extends McpToolBase {
     public Map<String, Object> registerSubscription(
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "订阅名称，必填且全局唯一；重名会覆盖已有订阅") String name,
-            @McpToolParam(description = "Schema 名，可传 null 表示不限定 Schema") String schema,
+            @McpToolParam(description = "Schema 名，可传 null 表示不限定 Schema",
+                    required = false) String schema,
             @McpToolParam(description = "表名匹配模式，支持通配符（如 orders_*）") String tablePattern,
             @McpToolParam(description = "关注的变更类型，逗号分隔。合法取值：INSERT 或 I、UPDATE 或 U、DELETE 或 D、DDL、TRUNCATE 或 T、TRIGGER_AUDIT、FLASHBACK；无法识别的值会被静默丢弃。省略时默认 INSERT,UPDATE,DELETE", required = false) String changeTypes,
             @McpToolParam(description = "轮询间隔毫秒数，需为正数；省略或非正数时取服务端配置 entropy.mcp.database.cdc.default-poll-interval-ms（默认 1000）", required = false) Long pollIntervalMs) {
@@ -232,7 +241,7 @@ public class CdcTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listSubscriptions(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
             List<CdcSubscription> subs = cdcService.listSubscriptions(connection);
             Map<String, Object> result = context("connection", connection);

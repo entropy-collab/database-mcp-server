@@ -59,7 +59,7 @@ public class QualityTools extends McpToolBase {
 
     @McpTool(description = """
             【执行表数据质量检查】对指定表执行数据质量检查并生成报告，同时给出结构化结果与可直接展示的格式化文本。
-            前置条件：先调用 createNamedConnection 注册连接；表名必须是合法标识符，否则报参数校验失败。表为空（行数 0）时直接返回空报告，评分 100 且不执行任何规则。
+            前置条件：先调用 createNamedConnection 注册连接；表名与 schema 都必须是合法标识符，否则报参数校验失败。表为空（行数 0）时直接返回空报告，评分 100 且不执行任何规则；表探查不到（schema/表名写错或无权限）时报错，不再返回空报告。
             检查内容：内置检查始终执行——逐列统计空值率，并对全部列组合统计重复行；customRules 是在内置检查之外追加的规则，不会替换内置检查。
             使用场景：新表接入前评估数据可用性、上线前核对空值与重复、按业务规则校验枚举值与数值区间。
             返回字段：report（含 tableName、schema、connectionKey、checkedAt、totalRows、rulesChecked、issuesFound、overallScore、issues、rules；issues 每项含 ruleId、ruleName、ruleType、column、severity、actualValue、threshold、totalRows、issueCount、detail）、formattedReport（按 format 渲染的文本）、format（实际使用的格式）。
@@ -68,9 +68,9 @@ public class QualityTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> checkTableQuality(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "要检查的表名，必填；须为合法标识符（不含引号、空格等特殊字符）") String tableName,
-            @McpToolParam(description = "Schema 名，可省略；仅作为报告字段回显，不参与表名限定", required = false) String schema,
+            @McpToolParam(description = "Schema 名，可省略；省略时按连接的登录 Schema 解析表名。表不属于登录 Schema 时必须传（例如只读账号访问业务 Schema 的表），否则所有探查都取不到表、本次调用直接报错（不会再返回 totalRows=0、评分 100 的空报告）", required = false) String schema,
             @McpToolParam(description = """
                     追加的自定义规则列表，可省略。每项为键值对：\
                     type 取值 ENUM_VALUES（校验列值在允许集合内，需 params 中的 allowedValues）、\
@@ -84,15 +84,22 @@ public class QualityTools extends McpToolBase {
                     required = false) List<Map<String, Object>> customRules,
             @McpToolParam(description = "formattedReport 的渲染格式，取值 json、csv、text（大小写不敏感）；省略或传无法识别的值时按 json 渲染", required = false) String format) {
         return safeExecute(() -> {
-            DatabaseDialect dialect = adminOperations.getDialect(connectionName);
+            DatabaseDialect dialect = adminOperations.getDialect(connection);
 
             if (!dialect.isValidIdentifier(tableName)) {
                 throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED, "Invalid table name: " + tableName + " (tableName=" + tableName + ")");
             }
+            // schema 与表名同等待遇：它会被 quoteQualified 拼进每条探查 SQL，非法 schema 在那里抛的
+            // IllegalArgumentException 以前落在 queryRowCount 的 catch(Exception) 里降级成 WARN，
+            // 调用方拿到的是 totalRows=0、评分 100 的空报告——schema 写错一个字符，报告依旧「漂亮且错误」。
+            if (schema != null && !schema.isBlank() && !dialect.isValidIdentifier(schema)) {
+                throw new McpToolException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                        "Invalid schema name: " + schema + " (schema=" + schema + ")");
+            }
             String normalizedTable = dialect.normalizeTableName(tableName);
             List<QualityRule> rules = buildRules(customRules, dialect);
 
-            QualityReport report = qualityCheckService.check(connectionName, normalizedTable, schema, rules, dialect, readOperations);
+            QualityReport report = qualityCheckService.check(connection, normalizedTable, schema, rules, dialect, readOperations);
 
             String reportStr = switch (format != null ? format.toLowerCase() : "json") {
                 case "csv" -> qualityReportService.exportCsv(report);

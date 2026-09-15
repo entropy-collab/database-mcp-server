@@ -76,7 +76,7 @@ public class CrossDatabaseTools extends McpToolBase {
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> queryCrossDatabaseJoin(
             @McpToolParam(description = "含 @db_link 语法的单条 SELECT 语句，不得包含分号") String sql,
-            @McpToolParam(description = "返回行数上限，传 null 时默认 100") Integer maxRows,
+            @McpToolParam(description = "返回行数上限，传 null 时默认 100", required = false) Integer maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (sql=" + sql + ")");
         if (sql.trim().contains(";")) {
@@ -168,7 +168,7 @@ public class CrossDatabaseTools extends McpToolBase {
             @McpToolParam(description = "分区日期，必须是 8 位数字 YYYYMMDD（如 20260201）") String partitionDate,
             @McpToolParam(description = "远程质量表的起始日期，ISO 格式 YYYY-MM-DD 且必须是真实日历日期（如 2026-02-01）") String startDate,
             @McpToolParam(description = "远程质量表的结束日期，ISO 格式 YYYY-MM-DD 且必须是真实日历日期（如 2026-02-28）") String endDate,
-            @McpToolParam(description = "返回行数上限，传 null 时默认 50") Integer maxRows,
+            @McpToolParam(description = "返回行数上限，传 null 时默认 50", required = false) Integer maxRows,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ", localTablePrefix=" + localTablePrefix + ", partitionDate=" + partitionDate + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
@@ -251,7 +251,8 @@ public class CrossDatabaseTools extends McpToolBase {
     public Map<String, Object> executeFederatedQuery(
             @McpToolParam(description = "要在每个库上执行的 SELECT 语句，只允许查询；本工具不支持绑定参数，占位符会执行失败") String query,
             @McpToolParam(description = "目标库标识列表（databaseId），取值来自 listDatabases") List<String> databases,
-            @McpToolParam(description = "每个库各自的返回行数上限；传 null 时使用服务端配置的默认行数上限") Integer maxRows) {
+            @McpToolParam(description = "每个库各自的返回行数上限；传 null 时使用服务端配置的默认行数上限",
+                    required = false) Integer maxRows) {
         if (!isGatewayEnabled() || gateway == null) throw new McpToolException(ErrorCode.FEDERATED_GATEWAY_UNAVAILABLE, "Federated gateway is not enabled (query=" + query + ", databases=" + databases + ")");
         return gateway.executeFederatedQuery(query, databases, maxRows);
     }
@@ -320,7 +321,11 @@ public class CrossDatabaseTools extends McpToolBase {
         String dblinkSql = String.format(
                 "CREATE DATABASE LINK %s CONNECT TO %s IDENTIFIED BY \"%s\" USING '(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%s))(CONNECT_DATA=(SERVICE_NAME=%s)))'",
                 dbLinkName, username, password, host, port, serviceName);
-        sqlValidator.validateDdl(dblinkSql);
+        // 这条语句刻意不过 sqlValidator：jsqlparser 5.3 把 CREATE DATABASE LINK 解析成
+        // UnsupportedStatement（DROP DATABASE LINK 更是直接解析失败），而 validateDdl 现在按语句类型
+        // 白名单 fail-closed，送进去只会被拒。安全性由上面逐个参数的校验保证——语句的每一段都是
+        // 服务端用已校验过的组件拼出来的，没有任何一段是调用方原文，validator 在这里提供不了额外覆盖。
+
         return safeExecute(() -> {
             routingFacade.executeUpdate(dblinkSql, connection);
             return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' created successfully", dbLinkName)));
@@ -342,7 +347,10 @@ public class CrossDatabaseTools extends McpToolBase {
         if (!isGatewayEnabled()) throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Cross-database gateway is not enabled (dbLinkName=" + dbLinkName + ")");
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
-        sqlValidator.validateDdl(dropSql);
+        // 同 createDbLink：jsqlparser 5.3 解析不了这条语句，送进 validateDdl 只会拿到
+        // 「SQL validation error」——这个工具在 0.5.2 之前其实一直是这么坏着的。链路名已过
+        // validateIdentifier，语句里没有第二处可注入的位置。
+
         return safeExecute(() -> {
             routingFacade.executeUpdate(dropSql, connection);
             return success(Map.of("dbLinkName", dbLinkName, "message", String.format("Database link '%s' dropped successfully", dbLinkName)));

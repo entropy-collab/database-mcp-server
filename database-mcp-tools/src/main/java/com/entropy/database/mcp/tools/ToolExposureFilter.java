@@ -106,6 +106,9 @@ public class ToolExposureFilter implements BeanPostProcessor {
                     .sorted()
                     .toList());
         }
+
+        // 让 suggestTools 只推荐真正调得到的工具：目录是从 bean 反射来的，不经过这里的裁剪。
+        toolCatalog.restrictTo(kept.stream().map(spec -> spec.tool().name()).toList());
         return kept;
     }
 

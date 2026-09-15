@@ -51,10 +51,10 @@ public class LineageTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getUpstream(
             @McpToolParam(description = "要分析的表名，大小写不敏感（内部按方言归一化）") String tableName,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "输出格式，取值：json（默认，结构化边数组）、text（箭头文本清单）、mermaid（Mermaid flowchart 文本）、dot（Graphviz DOT 文本）；省略即 json", required = false) String format) {
-        return safeExecute(() -> formatEdgeResult(analyzer.getUpstream(tableName, connectionName),
-                tableName, connectionName, format, "UPSTREAM"));
+        return safeExecute(() -> formatEdgeResult(analyzer.getUpstream(tableName, connection),
+                tableName, connection, format, "UPSTREAM"));
     }
 
     @McpTool(description = """
@@ -68,10 +68,10 @@ public class LineageTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getDownstream(
             @McpToolParam(description = "要分析的表名，大小写不敏感（内部按方言归一化）") String tableName,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "输出格式，取值：json（默认，结构化边数组）、text（箭头文本清单）、mermaid（Mermaid flowchart 文本）、dot（Graphviz DOT 文本）；省略即 json", required = false) String format) {
-        return safeExecute(() -> formatEdgeResult(analyzer.getDownstream(tableName, connectionName),
-                tableName, connectionName, format, "DOWNSTREAM"));
+        return safeExecute(() -> formatEdgeResult(analyzer.getDownstream(tableName, connection),
+                tableName, connection, format, "DOWNSTREAM"));
     }
 
     // ─── Full Analysis ────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ public class LineageTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> analyzeLineage(
             @McpToolParam(description = "要分析的表名，大小写不敏感（内部按方言归一化）") String tableName,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "广度遍历最大深度，取值 1-10，超出范围会被截断到区间内；省略时默认 5。实际深度还会被配置 entropy.mcp.database.lineage.max-traversal-depth 上限约束", required = false) Integer maxDepth,
             @McpToolParam(description = "输出格式，取值：mermaid（Mermaid flowchart 文本）、dot（Graphviz DOT 文本）；其余取值或省略均返回结构化 JSON（不支持 text）", required = false) String format) {
         return safeExecute(() -> {
@@ -95,15 +95,15 @@ public class LineageTools extends McpToolBase {
 
             if ("mermaid".equalsIgnoreCase(format)) {
                 return success(Map.of("format", "mermaid", "graph",
-                        analyzer.exportMermaid(tableName, connectionName, depth)));
+                        analyzer.exportMermaid(tableName, connection, depth)));
             }
             if ("dot".equalsIgnoreCase(format)) {
                 return success(Map.of("format", "dot", "graph",
-                        analyzer.exportDot(tableName, connectionName, depth)));
+                        analyzer.exportDot(tableName, connection, depth)));
             }
 
-            LineageAnalysis analysis = analyzer.analyze(tableName, connectionName, depth);
-            Map<String, Object> result = context("table", tableName, "connection", connectionName, "maxDepth", depth);
+            LineageAnalysis analysis = analyzer.analyze(tableName, connection, depth);
+            Map<String, Object> result = context("table", tableName, "connection", connection, "maxDepth", depth);
             result.put("directUpstream", edgesToMaps(analysis.directUpstream()));
             result.put("directDownstream", edgesToMaps(analysis.directDownstream()));
             result.put("allUpstream", analysis.allUpstream());
@@ -134,12 +134,12 @@ public class LineageTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getImpactAnalysis(
             @McpToolParam(description = "变更的源表名，大小写不敏感") String tableName,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "向下游递归的最大深度，取值 1-10，超出范围会被截断到区间内；省略时默认 5", required = false) Integer maxDepth) {
         return safeExecute(() -> {
             int depth = maxDepth != null ? Math.max(1, Math.min(maxDepth, 10)) : 5;
-            List<String> impacted = analyzer.getImpactTables(tableName, connectionName, depth);
-            LineageAnalysis analysis = analyzer.analyze(tableName, connectionName, depth);
+            List<String> impacted = analyzer.getImpactTables(tableName, connection, depth);
+            LineageAnalysis analysis = analyzer.analyze(tableName, connection, depth);
 
             Map<Integer, List<String>> byDepth = new TreeMap<>();
             for (String table : impacted) {
@@ -147,7 +147,7 @@ public class LineageTools extends McpToolBase {
                 byDepth.computeIfAbsent(d, k -> new ArrayList<>()).add(table);
             }
 
-            Map<String, Object> result = context("sourceTable", tableName, "connection", connectionName,
+            Map<String, Object> result = context("sourceTable", tableName, "connection", connection,
                     "maxDepth", depth, "totalImpacted", impacted.size(), "impactedTables", impacted, "byDepth", byDepth);
             if (analysis.hasAnomalies()) {
                 result.put("anomalies", analysis.anomalies());
@@ -169,11 +169,11 @@ public class LineageTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> exportMermaid(
             @McpToolParam(description = "要导出的表名，大小写不敏感") String tableName,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "遍历深度，取值 1-10，超出范围会被截断到区间内；省略时默认 5（仅影响底层分析范围，图中只画直接上下游）", required = false) Integer maxDepth) {
         int depth = maxDepth != null ? Math.max(1, Math.min(maxDepth, 10)) : 5;
-        return success(context("table", tableName, "connection", connectionName,
-                "format", "mermaid", "graph", analyzer.exportMermaid(tableName, connectionName, depth)));
+        return success(context("table", tableName, "connection", connection,
+                "format", "mermaid", "graph", analyzer.exportMermaid(tableName, connection, depth)));
     }
 
     @McpTool(description = """
@@ -187,11 +187,11 @@ public class LineageTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> exportDot(
             @McpToolParam(description = "要导出的表名，大小写不敏感") String tableName,
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "遍历深度，取值 1-10，超出范围会被截断到区间内；省略时默认 5（仅影响底层分析范围，图中只画直接上下游）", required = false) Integer maxDepth) {
         int depth = maxDepth != null ? Math.max(1, Math.min(maxDepth, 10)) : 5;
-        return success(context("table", tableName, "connection", connectionName,
-                "format", "dot", "graph", analyzer.exportDot(tableName, connectionName, depth)));
+        return success(context("table", tableName, "connection", connection,
+                "format", "dot", "graph", analyzer.exportDot(tableName, connection, depth)));
     }
 
     // ─── Global ────────────────────────────────────────────────────────────────
@@ -207,15 +207,15 @@ public class LineageTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listAllEdges(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName) {
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {
-            List<LineageEdge> edges = analyzer.listAllEdges(connectionName);
+            List<LineageEdge> edges = analyzer.listAllEdges(connection);
             List<Map<String, Object>> items = edges.stream().map(e -> context(
                     "sourceTable", e.sourceTable(), "targetTable", e.targetTable(),
                     "sourceColumn", e.sourceColumn(), "targetColumn", e.targetColumn(),
                     "type", e.type().name()
             )).toList();
-            return success(context("connection", connectionName, "totalEdges", items.size(), "edges", items));
+            return success(context("connection", connection, "totalEdges", items.size(), "edges", items));
         });
     }
 

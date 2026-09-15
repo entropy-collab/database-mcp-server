@@ -18,6 +18,7 @@ package com.entropy.database.mcp.tools;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.DatabaseOperations;
+import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
@@ -43,15 +44,47 @@ public class DdlExecutionTools extends McpToolBase {
 
     public DdlExecutionTools(DatabaseOperations routingFacade,
                              SqlValidator sqlValidator,
+                             DatabaseProperties databaseProperties,
                              org.springframework.core.env.Environment environment) {
         this.routingFacade = routingFacade;
         this.sqlValidator = sqlValidator;
-        this.ddlAllowed = Boolean.parseBoolean(environment.getProperty("entropy.mcp.database.ddl.allowed", "false"));
+        // 走已绑定的 DatabaseProperties，而不是再 environment.getProperty("...ddl.allowed") 读一遍
+        // 字符串：DdlProperties 的 fail-closed 默认值（缺配置 → allowed=false）只在绑定路径上生效，
+        // 而字符串读法把键名写错也照样返回兜底 "false"，出错的方式是"永远拒绝"或"永远放行"，都不报错。
+        // 这也是 ddl().allowed() 一直没有调用方的原因——闸门读的是另一条路。
+        this.ddlAllowed = databaseProperties.ddl().allowed();
         this.gatewayEnabled = Boolean.parseBoolean(environment.getProperty("entropy.mcp.gateway.enabled", "false"));
     }
 
     private boolean isGatewayEnabled() {
         return gatewayEnabled;
+    }
+
+    /**
+     * 拒绝话术与闸门放在一起，免得二者各改一处后对不上。{@code ToolParams.DDL_DISABLED_MSG}
+     * 留给 {@code OracleSessionTools.killSession} 自己那道闸。
+     */
+    static final String DDL_GATE_REFUSAL =
+            "服务端已禁用 DDL：%s 被拒绝执行。配置项 entropy.mcp.database.ddl.allowed 当前为 false，"
+                    + "请联系管理员确认并开启后重试——该开关只能在服务端改，重试或改写语句都不会生效。";
+
+    /**
+     * DDL 总闸门。三个执行型工具与 {@code CdcTools.createMirrorTable} 都必须过这里：漏掉任何一条
+     * 都等于开关只挡半边，而"挡了一半"比"完全没挡"更危险——运维照文档配了 allowed=false，
+     * 却仍然能用 executeDdlBatch 整批改结构，且没有任何迹象说明闸门没生效。
+     *
+     * <p>错误码用 {@link ErrorCode#SECURITY_VIOLATION} 而非 SQL_OPERATION_NOT_ALLOWED：后者被
+     * {@code McpToolException.isAgentError()} 判为可由模型自行纠正，会诱导调用方改写语句反复重试；
+     * 服务端配置关闭 DDL 是只能人工解除的边界，重试永远不会成功，应当直接告诉调用方去找管理员。
+     *
+     * <p>{@code validateDdl} 刻意不过这道闸：它只做静态语法校验、不连库不执行，是 Oracle/MySQL
+     * 这类 DDL 隐式提交、无法回滚的库上唯一的预检手段。把预检也拦掉不会少改一张表，只会逼调用方
+     * 在没有任何反馈的情况下盲改，反而放大风险。
+     */
+    private void requireDdlAllowed(String tool) {
+        if (!ddlAllowed) {
+            throw new McpToolException(ErrorCode.SECURITY_VIOLATION, DDL_GATE_REFUSAL.formatted(tool));
+        }
     }
 
     // ─── DDL ────────────────────────────────────────────────────────────────
@@ -69,9 +102,7 @@ public class DdlExecutionTools extends McpToolBase {
     public Map<String, Object> executeDdl(
             @McpToolParam(description = "要执行的单条 DDL 语句（如 CREATE TABLE / ALTER TABLE / DROP INDEX）") String sql,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
-        if (!ddlAllowed) {
-            throw new McpToolException(ErrorCode.SQL_OPERATION_NOT_ALLOWED, ToolParams.DDL_DISABLED_MSG);
-        }
+        requireDdlAllowed("executeDdl");
         return routingFacade.executeDdl(sql, connection);
     }
 
@@ -79,10 +110,10 @@ public class DdlExecutionTools extends McpToolBase {
             【DDL 前数据备份】把表数据导出成一组 INSERT 语句，并登记一条 FULL 类型的备份记录。
             前置条件：连接需先用 createNamedConnection 注册；表必须存在，否则返回 error 字段而不是抛错。
             使用场景：执行 executeDdl / executeDdlBatch 改结构之前先留一份数据快照，便于出问题时手工回灌。
-            注意：maxRows 传 0 或负数会按配置项 entropy.mcp.database.backup.max-backup-rows 的上限截断（负数会被参数校验拒绝，0 表示用上限）；返回的 truncated=true 说明数据被行数上限截断，不是完整备份。
+            注意：maxRows 传 0 或负数会按配置项 entropy.mcp.database.backup.max-backup-rows 的上限截断（负数会被参数校验拒绝，0 表示用上限）；返回的 truncated=true 说明数据被行数上限截断，不是完整备份。登记的备份记录只存在服务端内存中，进程重启即丢失、也会因条数或天数上限被静默淘汰（上限见 getBackupConfig），所以真正的回滚依据是本次返回的 statements，请自行保存。
             返回字段：backupId、tableName、connection、type（固定 FULL）、maxRows（实际生效的上限）、totalRows、rowCount、truncated、statements（INSERT 语句数组）；表不存在时只返回 error。
             不要用于：需要增量备份、指定输出格式（sql/json/text）或后续用 restoreBackup 恢复的完整备份流程（用 backupTable）；只想比较结构差异（用 diffSchema）。
-            标签：[read, backup, ddl, safety]
+            标签：[read, backup, pre-ddl, safety]
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> backupData(
@@ -115,28 +146,29 @@ public class DdlExecutionTools extends McpToolBase {
 
     @McpTool(description = """
             【在指定连接上执行单条 DDL】面向网关场景的远程 DDL 执行，必须显式指定连接名。
-            前置条件：必须配置 entropy.mcp.gateway.enabled=true；connectionName 必填不可为空；连接需先用 createNamedConnection 注册；语句会先过 DDL 校验器。
+            前置条件：必须配置 entropy.mcp.gateway.enabled=true 与 entropy.mcp.database.ddl.allowed=true；connection 必填不可为空；连接需先用 createNamedConnection 注册；语句会先过 DDL 校验器。
             使用场景：管理某个具体 BYOK 连接上的表结构，且需要在结果里拿到执行耗时。
-            注意：本工具只受网关开关控制，不检查 entropy.mcp.database.ddl.allowed；Oracle 与 MySQL 的 DDL 隐式提交，失败无法回滚。
+            注意：Oracle 与 MySQL 的 DDL 隐式提交，失败无法回滚。
             返回字段：connectionName、ddl（回显执行的语句）、affectedRows、durationMs、message。
-            不要用于：一次执行多条 DDL（用 executeDdlBatch）；只想做语法校验（用 validateDdl）；本地默认连接上的简单 DDL（用 executeDdl，它受 ddl.allowed 控制）。
+            不要用于：一次执行多条 DDL（用 executeDdlBatch）；只想做语法校验（用 validateDdl，它不受 ddl.allowed 限制）；本地默认连接上的简单 DDL（用 executeDdl）。
             标签：[write, ddl, remote, schema, destructive]
             """,
              annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> executeDdlRemote(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "要执行的单条 DDL 语句（如 CREATE TABLE、ALTER TABLE、DROP INDEX）") String ddl) throws Exception {
         if (!isGatewayEnabled()) {
             throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, "Gateway is not enabled");
         }
-        validateRequired(connectionName, "connectionName");
+        requireDdlAllowed("executeDdlRemote");
+        validateRequired(connection, "connection");
         return safeExecute(() -> {
             sqlValidator.validateDdl(ddl);
             long startTime = System.currentTimeMillis();
-            int affected = routingFacade.executeUpdate(ddl, connectionName);
+            int affected = routingFacade.executeUpdate(ddl, connection);
             long duration = System.currentTimeMillis() - startTime;
             return success(Map.of(
-                    "connectionName", connectionName,
+                    "connectionName", connection,
                     "ddl", ddl,
                     "affectedRows", affected,
                     "durationMs", duration,
@@ -147,7 +179,7 @@ public class DdlExecutionTools extends McpToolBase {
 
     @McpTool(description = """
             【批量执行 DDL】在一个事务里按顺序执行多条 DDL，逐条汇报结果，遇到第一条失败即停止。
-            前置条件：必须配置 entropy.mcp.gateway.enabled=true；statements 不能为空；连接需先用 createNamedConnection 注册。每条语句都会先过 DDL 校验器。
+            前置条件：必须配置 entropy.mcp.gateway.enabled=true 与 entropy.mcp.database.ddl.allowed=true；statements 不能为空；连接需先用 createNamedConnection 注册。每条语句都会先过 DDL 校验器。
             原子性差异（务必据此决策）：PostgreSQL 与 SQL Server 把 DDL 纳入事务，中途失败可干净回滚，结构保持不变；Oracle 与 MySQL 对每条 DDL 隐式提交，回滚无效，失败前已执行的语句是永久生效的，必须人工反向修复。返回值里的 transactional 表明本次走的是哪种模式，rolledBack 表明是否真的回滚，非事务型失败时还会给出 appliedBeforeFailure 列出已生效的语句。
             使用场景：一组必须成套上线的结构变更；在 Oracle/MySQL 上执行前应先用 backupData 备份并做好人工回退预案。
             返回字段：connectionName、totalStatements、succeeded、failed、results（数组，每项含 ddl、success，成功含 durationMs，失败含 error）、durationMs、transactional、rolledBack、appliedBeforeFailure（仅非事务型且失败时出现）、message。
@@ -156,15 +188,16 @@ public class DdlExecutionTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> executeDdlBatch(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connectionName,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "按执行顺序排列的 DDL 语句列表，不能为空；遇到第一条失败即中止后续语句") List<String> statements) throws Exception {
         if (!isGatewayEnabled()) {
             throw new McpToolException(ErrorCode.CONNECTION_GATEWAY_DISABLED, ToolParams.GATEWAY_NOT_ENABLED_MSG);
         }
+        requireDdlAllowed("executeDdlBatch");
         requireNotEmpty(statements, "statements");
         return safeExecute(() -> {
             try {
-                return routingFacade.inTransaction(connectionName, tx -> {
+                return routingFacade.inTransaction(connection, tx -> {
                     // Whether wrapping DDL in a transaction means anything on this target. Oracle and
                     // MySQL commit DDL implicitly, so a rollback after a mid-batch failure is a
                     // no-op and earlier statements are already permanent. Reporting "rolled back" in
@@ -187,7 +220,7 @@ public class DdlExecutionTools extends McpToolBase {
                         } catch (RuntimeException e) {
                             allSuccess = false;
                             log.warn("DDL statement failed in batch on connection {}: {}",
-                                    connectionName, ddl, e);
+                                    connection, ddl, e);
                             results.add(Map.of("ddl", ddl, "success", false,
                                     "error", "DDL execution failed: " + e.getMessage()));
                             // Stop on first failure — no point applying the rest of a broken batch
@@ -199,11 +232,11 @@ public class DdlExecutionTools extends McpToolBase {
                         // The rollback belongs to the facade and only happens if this work throws,
                         // so the report rides out on the exception instead of being returned.
                         applied.clear();
-                        throw new DdlBatchRolledBack(buildBatchPayload(connectionName, statements.size(),
+                        throw new DdlBatchRolledBack(buildBatchPayload(connection, statements.size(),
                                 applied, results, false, true, true,
                                 System.currentTimeMillis() - startTime));
                     }
-                    return success(buildBatchPayload(connectionName, statements.size(), applied, results,
+                    return success(buildBatchPayload(connection, statements.size(), applied, results,
                             allSuccess, transactional, false, System.currentTimeMillis() - startTime));
                 });
             } catch (DdlBatchRolledBack e) {
@@ -232,12 +265,12 @@ public class DdlExecutionTools extends McpToolBase {
         }
     }
 
-    private static Map<String, Object> buildBatchPayload(String connectionName, int totalStatements,
+    private static Map<String, Object> buildBatchPayload(String connection, int totalStatements,
                                                          List<String> applied, List<Map<String, Object>> results,
                                                          boolean allSuccess, boolean transactional,
                                                          boolean rolledBack, long totalDuration) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("connectionName", connectionName);
+        payload.put("connectionName", connection);
         payload.put("totalStatements", totalStatements);
         payload.put("succeeded", applied.size());
         payload.put("failed", allSuccess ? 0 : 1);
@@ -265,12 +298,12 @@ public class DdlExecutionTools extends McpToolBase {
 
     @McpTool(description = """
             【DDL 语法校验】只做静态校验、完全不连库执行，逐条给出是否合法。
-            前置条件：必须配置 entropy.mcp.gateway.enabled=true；statements 不能为空。
+            前置条件：必须配置 entropy.mcp.gateway.enabled=true；statements 不能为空。不受 entropy.mcp.database.ddl.allowed 限制——它只做静态校验、不连库不执行，DDL 被禁用时仍可用于预检。
             使用场景：executeDdlBatch 之前先试跑一遍，尤其是在 Oracle/MySQL 这类无法回滚的库上。
             注意：即使某条不合法也不会报错，而是在对应结果项里标 valid=false；error 固定为 Validation failed，具体原因只写服务端日志，不回传。
             返回字段：totalStatements、validCount、invalidCount、results（数组，每项含 ddl、valid，valid=false 时含 error）、message。
             不要用于：真正执行 DDL（用 executeDdl / executeDdlRemote / executeDdlBatch）；校验 SELECT 语句或评估查询风险（用 assessQueryRisk 或 explainPlan）。
-            标签：[read, ddl, validation, dry-run]
+            标签：[read, pre-ddl, validation, dry-run]
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> validateDdl(

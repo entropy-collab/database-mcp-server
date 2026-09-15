@@ -41,13 +41,32 @@ public final class ToolParams {
     }
 
     /**
-     * Description used for every BYOK connection name parameter.
-     * Marked {@code required = false} because callers should supply it
-     * when they know the connection; omit it when the AI can infer it.
+     * Description for BYOK connection-name parameters that the tool can resolve on its own.
+     *
+     * <p>用这条描述的参数<b>必须</b>同时写上 {@code required = false}：描述里承诺"可省略"，
+     * schema 里却把它列进 required，模型照描述省略后拿到的是
+     * {@code 未找到所需属性"connection"} —— 一次无从自纠的失败。
+     * {@code ToolDescriptionContractTest} 会盯住这个一致性。
+     *
+     * <p>工具内部真的调用 {@code validateRequired(connection, ...)} 时，请改用
+     * {@link #CONNECTION_REQUIRED_DESCRIPTION}。
      */
     public static final String CONNECTION_DESCRIPTION = """
             BYOK 连接名，用于指定目标数据库。\
-            已注册多个连接时必填；只有一个连接时可省略（自动使用该连接）。\
+            建议始终显式传入（取值来自 listConnections）；可以省略，但服务端不会替你挑一个——\
+            确定不了时会报错并列出当前可用的连接名，照着补上再调一次即可。\
+            注意：连接注册是异步的——调用 createNamedConnection 后请先用 describeConnection \
+            确认连接已就绪，再执行查询。""";
+
+    /**
+     * Description for BYOK connection-name parameters the tool refuses to guess.
+     *
+     * <p>与 {@link #CONNECTION_DESCRIPTION} 的区别只在"能不能省"，而这一点由工具实现决定：
+     * 方法体里有 {@code validateRequired(connection, ...)} 就必须用这一条，否则描述在教模型
+     * 做一件一定会被拒的事。
+     */
+    public static final String CONNECTION_REQUIRED_DESCRIPTION = """
+            BYOK 连接名，用于指定目标数据库，必填且不可省略（为空直接报错，服务端不会替你猜）。\
             注意：连接注册是异步的——调用 createNamedConnection 后请先用 describeConnection \
             确认连接已就绪，再执行查询。""";
 

@@ -17,6 +17,7 @@ package com.entropy.database.mcp.cdc;
 
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.properties.CdcProperties;
+import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.tools.CdcTools;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -24,7 +25,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
-import org.springframework.core.env.Environment;
 
 import java.util.List;
 import java.util.Map;
@@ -54,19 +54,21 @@ class CdcToolsEnabledGateTest {
 
     @Mock
     private CdcService cdcService;
-    @Mock
-    private Environment environment;
+
+    /** ddl.allowed=true，这样任何一次拒绝都不可能被记到 DDL 闸门头上。 */
+    private static DatabaseProperties ddlAllowed() {
+        return new DatabaseProperties(true, "h2", null, null, null,
+                new DatabaseProperties.DdlProperties(true),
+                null, null, null, null, null, null, null, null, null, null, null);
+    }
 
     private CdcTools disabledTools() {
-        // ddl.allowed=true so a refusal cannot be credited to the DDL gate instead.
-        when(environment.getProperty("entropy.mcp.database.ddl.allowed", "false")).thenReturn("true");
         CdcProperties props = new CdcProperties(false, false, 1000, 1000L, true, 10, true);
-        return new CdcTools(cdcService, props, environment);
+        return new CdcTools(cdcService, props, ddlAllowed());
     }
 
     private CdcTools enabledTools() {
-        when(environment.getProperty("entropy.mcp.database.ddl.allowed", "false")).thenReturn("true");
-        return new CdcTools(cdcService, new CdcProperties(), environment);
+        return new CdcTools(cdcService, new CdcProperties(), ddlAllowed());
     }
 
     @Test

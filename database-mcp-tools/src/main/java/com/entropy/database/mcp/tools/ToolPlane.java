@@ -42,7 +42,8 @@ import java.util.Set;
  *
  * <p>这只是<em>暴露面</em>的切分：两个面的 bean 仍然都会被容器创建，数据面实例照样构造
  * ETL/备份/CDC 的 service。真正的安全闸在 {@code entropy.mcp.database.ddl.allowed} 与
- * {@code entropy.mcp.security.*}，不在这里。
+ * {@code entropy.mcp.security.*}，它们拦的是执行、不是暴露：{@code plane=control} 也不会让
+ * {@code executeDdl} 在 ddl.allowed=false 时放行，{@code plane=data} 也不等于关掉了 DDL 能力。
  */
 enum ToolPlane {
 
@@ -70,7 +71,18 @@ enum ToolPlane {
         }
     };
 
-    /** 出现任意一个就说明工具会改动状态或系统配置，因此不属于数据面。 */
+    /**
+     * 出现任意一个就说明工具会改动状态或系统配置，因此不属于数据面。
+     *
+     * <p>{@code admin} 目前只出现在 {@code clearCache} 与 {@code killSession} 上，两者都同时带
+     * {@code write}，所以它在切分上已经是冗余的。保留它是为了 fail-closed：将来有人加一个
+     * {@code [read, admin]} 的敏感管理工具时，默认落进控制面而不是悄悄进数据面。
+     *
+     * <p>反过来说，<strong>只读工具不要打 {@code admin}</strong>。
+     * {@code listConnections}/{@code describeConnection}/{@code getConnectionCount} 原先带
+     * {@code admin}，导致整个 connection-admin 组都被判成控制面——纯数据面副本连"看一眼有哪些
+     * 连接"都做不到。标签已在 0.4.0 移除；{@code admin} 描述的是领域（管理面），不是变更动作。
+     */
     private static final Set<String> MUTATING_TAGS = Set.of("write", "ddl", "destructive", "admin");
 
     private static final String READ_TAG = "read";

@@ -54,9 +54,9 @@ public class OptimizationTools extends McpToolBase {
             不要用于：非 SELECT 语句；只要未经解读的原始计划（用 explainPlan）；已有计划文本要解读（用 interpretPlan）；只针对一张表而非某条 SQL 的索引盘点（用 recommendIndexes）。
             标签：[read, optimizer, performance, explain, index]
             """,
-             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> analyzeQuery(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
             @McpToolParam(description = "要分析的 SQL 语句，必填；建议为 SELECT 语句") String sql) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
@@ -93,7 +93,7 @@ public class OptimizationTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> recommendIndexes(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
             @McpToolParam(description = "表名，必填；大小写不敏感（内部按方言归一化）") String tableName) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
@@ -118,7 +118,7 @@ public class OptimizationTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> suggestRewrites(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "要分析的 SQL 语句，必填") String sql) {
         return safeExecute(() -> {
             validateRequired(sql, "sql");
@@ -141,7 +141,7 @@ public class OptimizationTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> analyzeTable(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
             @McpToolParam(description = "表名，必填；大小写不敏感（内部按方言归一化）") String tableName) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
@@ -174,9 +174,10 @@ public class OptimizationTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> interpretPlan(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "执行计划文本，必填；即 EXPLAIN 输出的原始多行文本") String planText,
-            @McpToolParam(description = "方言名称，如 oracle、mysql、postgres；留空或省略时按 connection 的取值兜底（不会自动解析连接对应方言），建议显式传入") String dialect) {
+            @McpToolParam(description = "方言名称，如 oracle、mysql、postgres；留空或省略时按 connection 的取值兜底（不会自动解析连接对应方言），建议显式传入",
+                    required = false) String dialect) {
         return safeExecute(() -> {
             validateRequired(planText, "planText");
 

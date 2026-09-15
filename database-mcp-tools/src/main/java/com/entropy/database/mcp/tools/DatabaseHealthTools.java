@@ -224,7 +224,8 @@ public class DatabaseHealthTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> showIndexStatus(
-            @McpToolParam(description = "表名过滤。本参数未声明为可选，需显式传入；传 null 时返回该 Schema 下的全部索引") String tableName,
+            @McpToolParam(description = "表名过滤；省略或传 null 时返回该 Schema 下的全部索引",
+                    required = false) String tableName,
             @McpToolParam(description = "Schema 名，可省略；省略时 Oracle 取当前用户、MySQL 取当前 database、PostgreSQL 取 current_schema()", required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return executeWithDialect(connection, dialect -> {
@@ -236,7 +237,7 @@ public class DatabaseHealthTools extends McpToolBase {
 
     @McpTool(description = """
             【生成闪回查询语句】返回一条按时间点查询历史数据的 SQL 模板文本；本工具只产出模板，不返回历史数据本身。
-            前置条件：必须传 connection；timestamp 虽标为可选，实际为空会被直接拒绝。仅 Oracle 生成可执行的 AS OF TIMESTAMP 模板，且要求该表的 undo 保留期覆盖目标时间点；PostgreSQL 生成的模板带 AS OF TIMESTAMP 语法但 PostgreSQL 并不支持，拿去执行会报错；MySQL 与其他方言返回一条注明「不支持闪回」的占位模板。
+            前置条件：必须传 connection 与 timestamp。仅 Oracle 生成可执行的 AS OF TIMESTAMP 模板，且要求该表的 undo 保留期覆盖目标时间点；PostgreSQL 生成的模板带 AS OF TIMESTAMP 语法但 PostgreSQL 并不支持，拿去执行会报错；MySQL 与其他方言返回一条注明「不支持闪回」的占位模板。
             使用场景：Oracle 上误删或误更新数据后，先取到闪回语句，再自行执行以比对历史快照。
             返回字段：dialect、tableName、timestamp、rows（其中 sql_template 为生成的 SQL 文本，时间点以 ? 占位）。
             不要用于：真正恢复数据（用 restoreBackup 或 quickRestore）；查询当前数据（用 executeQuery）。
@@ -245,7 +246,7 @@ public class DatabaseHealthTools extends McpToolBase {
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> flashbackQuery(
             @McpToolParam(description = "表名，必填") String tableName,
-            @McpToolParam(description = "目标时间点。Oracle 模板按 YYYY-MM-DD HH24:MI:SS 解析（如 2026-08-26 10:30:00）；虽标为可选，实际必填") String timestamp,
+            @McpToolParam(description = "目标时间点，必填；Oracle 模板按 YYYY-MM-DD HH24:MI:SS 解析（如 2026-08-26 10:30:00）") String timestamp,
             @McpToolParam(description = "Schema 名，可省略；当前实现不会把它拼进生成的模板", required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return safeExecute(() -> {

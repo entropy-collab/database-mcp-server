@@ -91,12 +91,12 @@ public class PoolMonitorTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> getPoolStatsForConnection(
-            @McpToolParam(description = "要查询的连接名，必填且不可省略。取值为 BYOK 连接名或内置连接名（如 primary）；须与 getPoolStats 返回的 connectionName 一致") String connectionName) {
+            @McpToolParam(description = "要查询的连接名，必填且不可省略。取值为 BYOK 连接名或内置连接名（如 primary）；须与 getPoolStats 返回的 connectionName 一致") String connection) {
         return safeExecute(() -> {
             Map<String, HikariPoolStats> allStats = dataSourceManager.getPoolStats();
-            HikariPoolStats stats = allStats.get(connectionName);
+            HikariPoolStats stats = allStats.get(connection);
             if (stats == null) {
-                throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found or not yet acquired: " + connectionName, connectionName);
+                throw new McpToolException(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found or not yet acquired: " + connection, connection);
             }
             return success(stats.toMap());
         });

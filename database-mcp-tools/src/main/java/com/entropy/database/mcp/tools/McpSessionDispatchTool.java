@@ -192,7 +192,7 @@ public class McpSessionDispatchTool extends McpToolBase {
             返回字段：直接透传目标工具的返回结果，字段结构未知；工具名不存在时返回 success=false、error、cause=NoSuchToolException、availableTools（可用工具名列表）；工具执行抛异常时返回 success=false、error、cause。
             风险提示：自定义工具可能执行写操作或访问外部系统，本服务不对其副作用做限制，调用前请确认其语义。
             不要用于：查看有哪些自定义工具（用 listCustomTools）；注册或发现新工具（用 scanCustomTools）。
-            标签：[dispatch, custom, extension, invoke]
+            标签：[dispatch, custom, extension, invoke, destructive]
             """,
              annotations = @McpTool.McpAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = true))
     public Map<String, Object> invokeCustomTool(

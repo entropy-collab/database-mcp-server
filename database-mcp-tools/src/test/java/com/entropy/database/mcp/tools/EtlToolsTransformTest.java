@@ -53,7 +53,7 @@ class EtlToolsTransformTest {
     void setUp() {
         routingFacade = mock(DatabaseOperations.class);
         when(routingFacade.getDialect(any())).thenReturn(DIALECT);
-        etlTools = new EtlTools(null, routingFacade, null, null, null);
+        etlTools = new EtlTools(routingFacade, null, null, null);
     }
 
     @ParameterizedTest

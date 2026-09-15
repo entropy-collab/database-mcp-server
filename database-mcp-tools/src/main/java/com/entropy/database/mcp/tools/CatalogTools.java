@@ -50,7 +50,7 @@ public class CatalogTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> generateCatalog(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
             @McpToolParam(description = "表名，必填；大小写不敏感（内部按方言归一化）") String tableName) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
@@ -87,8 +87,9 @@ public class CatalogTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> scanSchema(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
-            @McpToolParam(description = "Schema 名称；留空或省略时使用连接的默认 Schema") String schema) {
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
+            @McpToolParam(description = "Schema 名称；留空或省略时使用连接的默认 Schema",
+                    required = false) String schema) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
 
@@ -125,9 +126,13 @@ public class CatalogTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> searchAssets(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            // 这一个刻意跟着 CatalogTools 的其他工具一起必填：catalogService 的检索路径拿到 null
+            // 连接名会在内部 map 查找处抛 NPE，而 NPE 不在 McpToolExceptionAspect 认的
+            // 「漏传 connection」类型里，客户端只会收到一条 SYS998「未知错误」。
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
             @McpToolParam(description = "搜索关键词，必填；对表名与表注释做包含匹配（自动两侧加通配符）") String keyword,
-            @McpToolParam(description = "最多返回条数；省略、传 null 或传 ≤0 时使用配置 entropy.mcp.database.catalog.max-search-results（默认 100）") Integer limit) {
+            @McpToolParam(description = "最多返回条数；省略、传 null 或传 ≤0 时使用配置 entropy.mcp.database.catalog.max-search-results（默认 100）",
+                    required = false) Integer limit) {
         return safeExecute(() -> {
             validateRequired(keyword, "keyword");
 
@@ -163,9 +168,10 @@ public class CatalogTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> classifyColumn(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection,
             @McpToolParam(description = "字段名，如 customer_id；判定时会剔除非字母数字下划线字符并转小写") String columnName,
-            @McpToolParam(description = "字段注释，可省略；提供后会与字段名合并参与匹配，判定更准") String columnComment) {
+            @McpToolParam(description = "字段注释，可省略；提供后会与字段名合并参与匹配，判定更准",
+                    required = false) String columnComment) {
         return safeExecute(() -> {
             ClassifiedColumn result = catalogService.classifyColumn(columnName, columnComment);
 
@@ -189,8 +195,9 @@ public class CatalogTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> listSensitiveColumns(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
-            @McpToolParam(description = "Schema 名称；留空或省略时使用连接的默认 Schema") String schema) {
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
+            @McpToolParam(description = "Schema 名称；留空或省略时使用连接的默认 Schema",
+                    required = false) String schema) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
 

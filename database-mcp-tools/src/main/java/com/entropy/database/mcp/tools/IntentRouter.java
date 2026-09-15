@@ -70,7 +70,7 @@ public class IntentRouter extends McpToolBase {
             【推荐工具】根据一句自然语言诉求，从本服务真实注册的工具里挑出最相关的若干个，返回工具名与用途摘要。
             前置条件：无，不访问数据库，不需要 connection。
             使用场景：不确定该调哪个工具时先问一次；工具数量多、名称相近（如 getStatistics 与 getPoolStats、backupTable 与 exportQueryToTable）时用它缩小范围。
-            返回字段：intent（回显输入）、confidence（high/medium/low/none，反映匹配强度而非结果正确性）、totalTools（当前实际注册的工具总数）、suggestions（数组，每项含 name、group、summary、tags、score）。
+            返回字段：intent（回显输入）、confidence（high/medium/low/none，反映匹配强度而非结果正确性）、totalTools（当前暴露给你的工具总数，已扣除 plane/groups 裁掉的部分）、suggestions（数组，每项含 name、group、summary、tags、score）。
             注意：这是建议而非授权，返回列表之外的工具同样可以直接调用；confidence=none 表示没有任何关键词命中，此时 suggestions 为空数组，应改用更具体的措辞重试。
             不要用于：获取表结构或字段（用 describeTable）；执行查询（用 executeQuery）；查看连接清单（用 listConnections）。
             标签：[read, meta, discovery, routing]
@@ -91,7 +91,9 @@ public class IntentRouter extends McpToolBase {
         int topScore = 0;
 
         List<Scored> scored = new ArrayList<>();
-        for (ToolDescriptor descriptor : catalog.descriptors()) {
+        // 只在真正暴露给客户端的工具里挑：目录是从 bean 反射来的全集，plane/groups 裁掉的工具
+        // 仍在里面，推荐了也调不到。
+        for (ToolDescriptor descriptor : catalog.exposedDescriptors()) {
             // 跳过自身，避免"推荐工具"把自己排进结果里
             if (descriptor.name().equals("suggestTools")) {
                 continue;
@@ -117,7 +119,7 @@ public class IntentRouter extends McpToolBase {
         return success(Map.of(
                 "intent", intent,
                 "confidence", confidenceOf(topScore),
-                "totalTools", catalog.size(),
+                "totalTools", catalog.exposedSize(),
                 "suggestions", suggestions));
     }
 

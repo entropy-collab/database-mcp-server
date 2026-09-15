@@ -106,8 +106,7 @@ public final class ConnectionArgExtractor {
         if (!param.isNamePresent()) {
             return false;
         }
-        String name = param.getName();
-        return "connection".equalsIgnoreCase(name) || "connectionName".equalsIgnoreCase(name);
+        return "connection".equalsIgnoreCase(param.getName());
     }
 
     private static boolean isLikelyConnectionName(String s) {

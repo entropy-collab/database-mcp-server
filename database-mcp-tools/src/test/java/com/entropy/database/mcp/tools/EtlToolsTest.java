@@ -74,7 +74,7 @@ class EtlToolsTest {
     @BeforeEach
     void setUp() {
         routingFacade = mock(DatabaseOperations.class);
-        etlTools = new EtlTools(null, routingFacade, null, null, null);
+        etlTools = new EtlTools(routingFacade, null, null, null);
     }
 
     /**

@@ -46,15 +46,22 @@ public class PromptTools {
         String type = (databaseType != null && !databaseType.isBlank()) ? databaseType.toLowerCase() : "your database";
 
         String guide = """
-                本 MCP 服务不预置任何数据库，必须先自行注册连接。
+                第 0 步：先看有没有现成的连接（重要）
+                调用 listConnections。如果目标库已经在列表里，直接用它的名字进入第 3 步，不要再问密码。
+                运维可以在服务端用 entropy.mcp.database.connections 预先声明连接，密码走环境变量，
+                这种连接开机即在、不会过期。这是首选方式。
 
-                第 1 步：注册命名连接
+                第 1 步：确实没有现成连接时，才注册新的
                 调用 createNamedConnection，参数如下：
                   - name：自定义连接名，后续所有工具用它引用这个库（如 "my-db"）
                   - jdbcUrl：JDBC 连接串（如 "jdbc:postgresql://localhost:5432/mydb"）
                   - username：数据库用户名
                   - password：数据库密码
                   - dialect：%s（取值 h2、oracle、mysql、postgres、sqlserver、sqlite、db2、generic；留空则按 jdbcUrl 自动推断）
+
+                注意：这一步的密码会作为工具入参进入本次对话，也就会留在对话历史里。请向用户说明这一点，
+                并建议改用第 0 步的服务端预配置。不要把密码拼进 jdbcUrl（如 ?password=），
+                也不要在后续回复里重复它。
 
                 第 2 步：确认连接已就绪
                 连接注册是异步的。调用 describeConnection 确认状态后再继续，否则查询可能报连接不存在。
@@ -100,8 +107,14 @@ public class PromptTools {
         String guide = """
                 连接 %s 数据库的步骤：
 
+                0. 先确认是否真的需要这一步：
+                   调用 listConnections。目标库已在列表里就直接用它的名字，不要再问密码。
+                   运维可用服务端配置 entropy.mcp.database.connections 预先声明连接（密码走环境变量），
+                   这类连接开机即在、不过期，是首选方式。
+
                 1. 准备 JDBC 连接串：
                    %s
+                   不要把密码拼进连接串（如 ?password=、;PWD=），密码走独立的 password 参数。
 
                 2. 调用 createNamedConnection，参数：
                    - name：自定义连接名（如 "%s-prod"）
@@ -109,6 +122,9 @@ public class PromptTools {
                    - username：数据库用户名
                    - password：数据库密码
                    - dialect：%s
+
+                   密码作为工具入参会进入本次对话、留在对话历史里。请向用户说明这一点，
+                   并在后续回复中不要重复它。长期使用请改走第 0 步的服务端预配置。
 
                 3. 校验连接：
                    用第 2 步的连接名调用 describeConnection。注册是异步的，状态就绪后再执行查询。

@@ -70,6 +70,12 @@ public class ToolCatalog {
 
     private volatile Map<String, ToolDescriptor> index;
 
+    /**
+     * 实际暴露给客户端的工具名；{@code null} 表示未经裁剪，索引即全部暴露。
+     * 由 {@link #restrictTo} 写入，见那里的说明。
+     */
+    private volatile Set<String> exposed;
+
     public ToolCatalog(ObjectProvider<McpToolBase> toolBeans) {
         this.toolBeans = toolBeans;
     }
@@ -90,14 +96,63 @@ public class ToolCatalog {
         }
     }
 
-    /** 全部已注册工具，按工具名字典序。 */
+    /** 索引里的全部工具，按工具名字典序；<b>不</b>受暴露面裁剪影响。 */
     public Collection<ToolDescriptor> descriptors() {
         return index().values();
     }
 
-    /** 已注册工具总数。 */
+    /** 索引里的工具总数；<b>不</b>受暴露面裁剪影响。 */
     public int size() {
         return index().size();
+    }
+
+    /**
+     * 实际交给客户端的工具，按工具名字典序；{@link #restrictTo} 未被调用时等于 {@link #descriptors()}。
+     *
+     * <p>面向模型的工具（目前是 {@code suggestTools}）必须用这个而不是 {@link #descriptors()}：
+     * 推荐一个已被摘掉、根本调不到的工具，比不推荐更糟。
+     */
+    public Collection<ToolDescriptor> exposedDescriptors() {
+        Set<String> visible = this.exposed;
+        if (visible == null) {
+            return descriptors();
+        }
+        return index().values().stream()
+                .filter(descriptor -> visible.contains(descriptor.name()))
+                .toList();
+    }
+
+    /** 实际交给客户端的工具总数。 */
+    public int exposedSize() {
+        return exposedDescriptors().size();
+    }
+
+    /**
+     * 记录 {@link ToolExposureFilter} 裁剪后真正交给客户端的工具名。
+     *
+     * <p>为什么需要这一步：本索引是从容器里的 {@link McpToolBase} bean 反射出来的，而
+     * {@code plane}/{@code groups}/{@code include}/{@code exclude} 裁剪的是下游的
+     * {@code SyncToolSpecification} 列表。两者不同源，不做这一步的话，配了预设（如
+     * {@code tools-explore}）之后 {@code suggestTools} 会把绝大多数已被摘掉、根本调不到的工具
+     * 推荐给模型，{@code totalTools} 也照报全量。这里刻意不举具体数字：工具增删后快照数字就变成
+     * 谎报，真正钉住这条不变量的是 {@code ToolExposureFilterTest} 的断言。
+     *
+     * <p>类级 {@code @ConditionalOnProperty}（如 {@code EtlTools}）不需要这一步：bean 本身
+     * 不存在，索引里自然没有。
+     *
+     * <p>并集合并而非覆盖：容器里存在多个 {@code List<SyncToolSpecification>} bean，
+     * {@link ToolExposureFilter} 作为 BeanPostProcessor 会被逐个调用。
+     *
+     * <p>刻意只影响 {@link #exposedDescriptors()} 与 {@link #exposedSize()}，不改
+     * {@link #descriptors()}/{@link #size()}/{@link #describe}/{@link #groups} 的语义：
+     * 裁剪器自己要靠后者做判定与校验，不能依赖自己的输出；"X of Y" 里的 Y 也得是完整总数。
+     */
+    synchronized void restrictTo(Collection<String> exposedToolNames) {
+        Set<String> merged = new TreeSet<>(exposedToolNames);
+        if (this.exposed != null) {
+            merged.addAll(this.exposed);
+        }
+        this.exposed = Set.copyOf(merged);
     }
 
     /** 全部分组名，字典序。 */

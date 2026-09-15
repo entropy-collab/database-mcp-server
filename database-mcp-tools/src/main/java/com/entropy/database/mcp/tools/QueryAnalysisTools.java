@@ -63,9 +63,9 @@ public class QueryAnalysisTools extends McpToolBase {
             不要用于：非 SELECT 语句；方言不支持 EXPLAIN 时会返回 EXPLAIN_NOT_SUPPORTED 错误；需要中文逐行解读（把 plan 文本交给 interpretPlan）；需要一次拿到索引与重写建议（用 analyzeQuery）。
             标签：[read, query, explain, plan, performance]
             """,
-             annotations = @McpTool.McpAnnotations(destructiveHint = false, idempotentHint = false, openWorldHint = false))
+             annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> explainPlan(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
             @McpToolParam(description = "要分析的 SQL 语句，必填；必须是 SELECT 或以 WITH 开头的查询") String sql) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
@@ -84,7 +84,7 @@ public class QueryAnalysisTools extends McpToolBase {
                 throw new McpToolException(ErrorCode.EXPLAIN_NOT_SUPPORTED, "EXPLAIN PLAN not supported for this dialect (connection=" + connection + ")");
             }
 
-            List<Map<String, String>> planRows = executeExplainPlan(connection, dialect, explainSql);
+            List<Map<String, String>> planRows = executeExplainPlan(connection, dialect, trimmedSql);
             List<String> warnings = analyzePlan(planRows, dialect);
             return success(context(
                     "connection", connection, "dialect", dialect.getDialectName(),
@@ -105,7 +105,7 @@ public class QueryAnalysisTools extends McpToolBase {
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> assessQueryRisk(
-            @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION) String connection,
+            @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
             @McpToolParam(description = "要评估的 SQL 语句，必填；支持带 WITH 子句的查询（会从主查询的 FROM / JOIN 中提取表名）") String sql) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
@@ -148,14 +148,17 @@ public class QueryAnalysisTools extends McpToolBase {
         return adminOperations.getDialect(connection);
     }
 
-    private List<Map<String, String>> executeExplainPlan(String connection, DatabaseDialect dialect, String explainSql) {
-        if (!dialect.explainPlanReturnsRows()) {
+    private List<Map<String, String>> executeExplainPlan(String connection, DatabaseDialect dialect, String sql) {
+        // 这里传原始 SELECT，不传拼好的 EXPLAIN 语句：Oracle 的 EXPLAIN PLAN 是两步（先往会话级临时表写行，
+        // 再在同一条物理连接上查回来），而且它不是 SELECT，走 queryRows 会被 SQL 校验器拦成 VAL001。
+        // 方言差异统一收在 ExecutionPlanRepository#explainPlanRows，工具只负责展示。
+        List<Map<String, Object>> rows = readOperations.explainPlanRows(sql, connection);
+        if (rows.isEmpty() && !dialect.explainPlanReturnsRows()) {
             // 计划以会话输出的形式产生（SQL Server 的 SET SHOWPLAN_TEXT），批处理本身返回的东西没用。
-            readOperations.queryRows(explainSql, connection);
             return List.of(Map.of("note", "Execution plan captured in session output, not as a result set"));
         }
         List<Map<String, String>> planRows = new ArrayList<>();
-        for (Map<String, Object> row : readOperations.queryRows(explainSql, connection)) {
+        for (Map<String, Object> row : rows) {
             Map<String, String> planRow = new java.util.LinkedHashMap<>();
             row.forEach((column, value) -> planRow.put(column, value == null ? null : value.toString()));
             planRows.add(planRow);
