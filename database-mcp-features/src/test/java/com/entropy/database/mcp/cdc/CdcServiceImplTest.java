@@ -217,4 +217,51 @@ class CdcServiceImplTest {
         assertThat(status.cdcSupported()).isTrue();
         assertThat(status.currentLsn()).isEqualTo(CdcServiceImpl.LSN_UNAVAILABLE);
     }
+
+    // ─── 进程内状态的边界 ──────────────────────────────────────────────────
+
+    /**
+     * 计数按连接名索引，而连接会被租约驱逐——没人回来清它。此前三个 map 都是无界无 TTL 的
+     * {@code ConcurrentHashMap}，长跑进程里只增不减。
+     */
+    @Test
+    void eventCountersStopGrowingOnceTheConnectionBudgetIsReached() {
+        when(dataSourceManager.acquire(anyString())).thenReturn(ctx);
+        when(jdbc.queryForList(anyString(), any(Object[].class)))
+                .thenReturn(List.of(Map.<String, Object>of("change_type", "I", "primary_keys", "1")));
+
+        int connections = CdcServiceImpl.MAX_TRACKED_CONNECTIONS * 2;
+        for (int i = 0; i < connections; i++) {
+            service.readChanges("evicted-" + i, "HR", "EMPLOYEES", 1L);
+        }
+
+        assertThat(service.trackedConnectionCount())
+                .isLessThanOrEqualTo(CdcServiceImpl.MAX_TRACKED_CONNECTIONS)
+                .isLessThan(connections);
+    }
+
+    /**
+     * 订阅是业务注册表而不是缓存：超限要明确报错，而不是静默 LRU 驱逐——静默驱逐的表现是「CDC 悄悄停了」，
+     * 调用方拿不到任何信号。
+     */
+    @Test
+    void subscriptionRegistrationIsRejectedInsteadOfSilentlyEvictingOldOnes() {
+        for (int i = 0; i < CdcServiceImpl.MAX_SUBSCRIPTIONS; i++) {
+            service.registerSubscription(subscription("sub-" + i));
+        }
+
+        assertThatThrownBy(() -> service.registerSubscription(subscription("one-too-many")))
+                .isInstanceOf(McpValidationException.class)
+                .hasMessageContaining("limit");
+
+        // 已有订阅一条都没丢；同名覆盖不受上限影响，否则满载时改一条已有订阅会无故失败。
+        assertThat(service.listSubscriptions(CONNECTION)).hasSize(CdcServiceImpl.MAX_SUBSCRIPTIONS);
+        service.registerSubscription(subscription("sub-0"));
+        assertThat(service.listSubscriptions(CONNECTION)).hasSize(CdcServiceImpl.MAX_SUBSCRIPTIONS);
+    }
+
+    private static CdcSubscription subscription(String name) {
+        return new CdcSubscription(name, CONNECTION, "HR", "EMPLOYEES%",
+                List.of(CdcChangeType.INSERT), 1000L, true);
+    }
 }

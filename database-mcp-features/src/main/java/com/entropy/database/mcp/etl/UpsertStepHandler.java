@@ -22,6 +22,12 @@ import java.util.List;
 
 /**
  * Handles UPSERT steps using dialect-specific buildUpsertSql.
+ *
+ * <p><b>方言实现内部是裸拼，校验责任在调用方——这是当前契约。</b>
+ * {@code DatabaseDialect.buildUpsertSql(table, columns, keyColumns)} 的各实现把表名与列名直接
+ * 字符串相加进 SQL，不做标识符校验。所以在调它<em>之前</em>必须先确认表名、列名、键列都是纯标识符。
+ * 之所以不在 dialect 模块里补校验：那是零依赖叶子模块（见 0.4.0 的方言契约下沉），且它没有
+ * 抛业务异常的能力；把闸放在调用方也让「谁负责校验」这件事在一个地方说清楚。
  */
 public class UpsertStepHandler implements StepHandler {
 
@@ -36,7 +42,10 @@ public class UpsertStepHandler implements StepHandler {
         var dialect = target.getDialect();
         JdbcTemplate jdbc = target.getEtlJdbcTemplate();
         List<String> keyColumns = engine.getListParam(step, "keyColumns", List.of());
-        String tableName = dialect.normalizeTableName(step.targetTable());
+        // 原先只有 normalizeTableName（大小写归一，不是校验）；同步版 EtlTools.upsertData 走
+        // ByokDatabaseFacade.validateIdentifiers，异步版这条路径完全绕开了它。
+        String tableName = EtlStepGuard.requireTargetTable(step, dialect);
+        EtlStepGuard.requireIdentifiers(keyColumns, dialect, "keyColumns");
 
         engine.validateSourceSql(step.sourceSql());
 
@@ -48,6 +57,8 @@ public class UpsertStepHandler implements StepHandler {
         return EtlRowStream.copyInBatches(source.getEtlJdbcTemplate(), jdbc, step.sourceSql(), batchSize,
                 engine.maxSourceRows(step),
                 (batchJdbc, columns, batch) -> {
+                    // 列名来自结果集标签，仍然会被 buildUpsertSql 裸拼进 SQL，所以同样过闸。
+                    EtlStepGuard.requireIdentifiers(columns, dialect, "source column");
                     String upsertSql = dialect.buildUpsertSql(tableName, columns, keyColumns);
                     if (upsertSql == null) {
                         throw new UnsupportedOperationException(

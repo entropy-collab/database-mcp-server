@@ -16,6 +16,8 @@
 package com.entropy.database.mcp.quality;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -34,7 +36,20 @@ public class QualityReportService {
 
     private static final Logger log = LoggerFactory.getLogger(QualityReportService.class);
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * 这是手搓的 mapper，不是 Spring 注入的那个，所以 JavaTimeModule 必须自己注册：
+     * {@link QualityReport#checkedAt()} 是 {@code Instant}，不注册的话每次导出都抛
+     * {@code InvalidDefinitionException}，{@code checkTableQuality} 的 formattedReport 恒为
+     * {@code {"error":"Quality report generation failed"}}（0.5.0 线上实测撞到过）。
+     *
+     * <p>WRITE_DATES_AS_TIMESTAMPS 必须关掉：只注册模块的话 checkedAt 会渲染成
+     * {@code 1788186121.969010604} 这种秒+纳秒的浮点数，跟同一个响应里 report.checkedAt
+     * 的 ISO-8601 文本自相矛盾（0.5.1 线上实测）。
+     */
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     /**
      * Export report as JSON string.

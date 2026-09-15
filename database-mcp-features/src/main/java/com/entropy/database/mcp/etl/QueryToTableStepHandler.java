@@ -41,7 +41,9 @@ public class QueryToTableStepHandler implements StepHandler {
 
         engine.validateSourceSql(step.sourceSql());
 
-        String targetTable = dialect.normalizeTableName(step.targetTable());
+        // requireTargetTable = 校验 + 归一。原先只有 normalizeTableName（大小写归一），
+        // 带空格/分号/引号/-- 的表名会原样进 INSERT INTO。
+        String targetTable = EtlStepGuard.requireTargetTable(step, dialect);
         int batchSize = engine.batchSize(step);
 
         return EtlRowStream.copyInBatches(sourceJdbc, targetJdbc, step.sourceSql(), batchSize,

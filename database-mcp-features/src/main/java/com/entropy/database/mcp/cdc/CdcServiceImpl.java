@@ -21,17 +21,21 @@ import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpQueryException;
 import com.entropy.database.mcp.exception.McpValidationException;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * CDC service implementation using database-specific change capture mechanisms.
@@ -46,6 +50,20 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>Failure semantics: every read either returns the changes it found or throws. Returning an
  * empty list (or {@code 0} for a watermark) on error is not allowed, because the caller cannot tell
  * that apart from "the table did not change".
+ *
+ * <p><b>两类进程内状态，两种边界策略</b>（键都来自调用方，此前三个 map 都是无界无 TTL 的
+ * {@code ConcurrentHashMap}，只有显式 unregister 才移除——连接被租约驱逐时，按连接名索引的计数就永远留着）：
+ * <ul>
+ *   <li>{@link #connectionCounters} 是<b>诊断计数</b>，只喂 {@link #getStatus}。换成有上限 +
+ *       {@code expireAfterAccess} 的 Caffeine（写法同 {@code BackupMetadataRepository} /
+ *       {@code JobExecutionEngine}）：静默驱逐的代价只是 {@code totalEvents} 归零，而它本来就是
+ *       进程内的、重启即丢的量。顺带把原来的 {@code eventCounters} + {@code lastEventTimes} 两个 map
+ *       并成一条记录，省掉「计数已加、时间还没写」的中间态。</li>
+ *   <li>{@link #subscriptions} 是<b>业务注册表</b>，刻意<b>不加 TTL</b>：订阅表示「这张表的变更要被
+ *       持续捕获」，不是缓存。一段时间没人 {@code listSubscriptions} 并不意味着它该消失，静默过期会表现为
+ *       「CDC 悄悄停了」，而调用方拿不到任何信号。所以这里只加容量上限，超限时<b>明确报错拒绝新注册</b>，
+ *       让调用方知道要先 unregister。</li>
+ * </ul>
  */
 @Service
 public class CdcServiceImpl implements CdcService {
@@ -55,10 +73,28 @@ public class CdcServiceImpl implements CdcService {
     /** Sentinel reported by {@link #getStatus} when the watermark could not be read. */
     static final long LSN_UNAVAILABLE = -1L;
 
+    /**
+     * 诊断计数的上限与空闲保留期：键是连接名，连接被租约驱逐后不会有人来清，所以靠
+     * {@code expireAfterAccess} 兜。24 小时没被读也没被写的连接，其计数对运维已无意义。
+     */
+    static final int MAX_TRACKED_CONNECTIONS = 500;
+    private static final Duration COUNTER_RETENTION = Duration.ofHours(24);
+
+    /**
+     * 订阅数上限。这是防失控的护栏而不是精确并发语义：并发注册可能短暂超出一两条，代价可以忽略，
+     * 而为它加锁会把注册路径变成串行。
+     */
+    static final int MAX_SUBSCRIPTIONS = 200;
+
     private final DynamicDataSourceManager dataSourceManager;
-    private final ConcurrentHashMap<String, CdcSubscription> subscriptions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> eventCounters = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> lastEventTimes = new ConcurrentHashMap<>();
+    /** 见类注释：注册表语义，只加上限、不加 TTL，超限明确报错。 */
+    private final ConcurrentMap<String, CdcSubscription> subscriptions = new ConcurrentHashMap<>();
+    /** 见类注释：诊断计数，有界 + expireAfterAccess，静默驱逐可接受。 */
+    private final Cache<String, ConnectionCounters> counterCache = Caffeine.newBuilder()
+            .maximumSize(MAX_TRACKED_CONNECTIONS)
+            .expireAfterAccess(COUNTER_RETENTION)
+            .build();
+    private final ConcurrentMap<String, ConnectionCounters> connectionCounters = counterCache.asMap();
 
     public CdcServiceImpl(DynamicDataSourceManager dataSourceManager) {
         this.dataSourceManager = dataSourceManager;
@@ -149,10 +185,12 @@ public class CdcServiceImpl implements CdcService {
             events.add(new CdcChangeEvent(connection, schema, table, changeType,
                     changeTime, primaryKeys, beforeJson, afterJson, txId, CdcEventStatus.PROCESSED));
         }
-        eventCounters.merge(connection, (long) events.size(), Long::sum);
-        if (!events.isEmpty()) {
-            lastEventTimes.put(connection, System.currentTimeMillis());
-        }
+        // 计数与「最后一次有变更的时刻」写在同一条记录里：两个 map 时会出现「计数已加、时间还没写」的
+        // 中间态，getStatus 恰好在此刻读就会报出自相矛盾的一对值。
+        connectionCounters.compute(connection, (key, current) -> {
+            ConnectionCounters base = current != null ? current : ConnectionCounters.empty();
+            return base.plus(events.size());
+        });
         return events;
     }
 
@@ -230,10 +268,23 @@ public class CdcServiceImpl implements CdcService {
 
     // ─── Subscription Management ──────────────────────────────────────────
 
+    /**
+     * 注册（或按同名覆盖）一条订阅。
+     *
+     * <p>超过 {@link #MAX_SUBSCRIPTIONS} 时<b>拒绝并报错</b>，不做 LRU 静默驱逐：订阅消失意味着变更捕获
+     * 停止，静默发生时调用方看到的是「CDC 没数据」而不是「注册失败」，排查成本天差地别。同名覆盖不受
+     * 上限约束，否则改一条已有订阅会在满载时无故失败。
+     */
     @Override
     public void registerSubscription(CdcSubscription subscription) {
-        subscriptions.put(subscription.name(), subscription);
-        log.info("Registered CDC subscription '{}' for {}.{}", subscription.name(),
+        String name = subscription.name();
+        if (!subscriptions.containsKey(name) && subscriptions.size() >= MAX_SUBSCRIPTIONS) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "CDC subscription limit reached (%d): unregister an existing subscription before adding '%s'"
+                            .formatted(MAX_SUBSCRIPTIONS, name));
+        }
+        subscriptions.put(name, subscription);
+        log.info("Registered CDC subscription '{}' for {}.{}", name,
                 subscription.schema(), subscription.tablePattern());
     }
 
@@ -255,12 +306,22 @@ public class CdcServiceImpl implements CdcService {
     public CdcStatus getStatus(String connection) {
         boolean supported = isCdcSupported(connection);
         long lsn = supported ? readLsnForStatus(connection) : 0L;
-        long totalEvents = eventCounters.getOrDefault(connection, 0L);
-        long lastEvent = lastEventTimes.getOrDefault(connection, 0L);
+        ConnectionCounters counters = connectionCounters.getOrDefault(connection, ConnectionCounters.empty());
         int activeSubs = (int) subscriptions.values().stream()
                 .filter(s -> s.connection().equals(connection) && s.active())
                 .count();
-        return new CdcStatus(connection, supported, lsn, activeSubs, totalEvents, lastEvent);
+        return new CdcStatus(connection, supported, lsn, activeSubs,
+                counters.totalEvents(), counters.lastEventEpochMs());
+    }
+
+    /**
+     * 当前被跟踪的连接数，供测试确认计数不会无上限增长。
+     *
+     * <p>先跑一次 Caffeine 维护：驱逐是异步的，不 {@code cleanUp} 时刚写完的 size 可能短暂超过上限。
+     */
+    int trackedConnectionCount() {
+        counterCache.cleanUp();
+        return connectionCounters.size();
     }
 
     /**
@@ -293,5 +354,24 @@ public class CdcServiceImpl implements CdcService {
 
     private static Long toLongOrNull(Object obj) {
         return obj instanceof Number n ? n.longValue() : null;
+    }
+
+    /**
+     * 单个连接的诊断计数。
+     *
+     * @param totalEvents      本进程内读到的变更条数累计
+     * @param lastEventEpochMs 最后一次<b>真的读到变更</b>的时刻；空读不刷新，否则「上次有变更是什么时候」
+     *                         会被每次轮询抹平
+     */
+    private record ConnectionCounters(long totalEvents, long lastEventEpochMs) {
+
+        static ConnectionCounters empty() {
+            return new ConnectionCounters(0L, 0L);
+        }
+
+        ConnectionCounters plus(int events) {
+            return new ConnectionCounters(totalEvents + events,
+                    events > 0 ? System.currentTimeMillis() : lastEventEpochMs);
+        }
     }
 }

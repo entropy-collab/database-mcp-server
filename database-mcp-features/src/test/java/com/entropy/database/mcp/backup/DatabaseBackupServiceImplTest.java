@@ -70,7 +70,7 @@ class DatabaseBackupServiceImplTest {
 
     @BeforeEach
     void resetSchema() {
-        repository = new BackupMetadataRepository();
+        repository = new BackupMetadataRepository(new BackupProperties());
         jdbcTemplate.execute("DROP TABLE IF EXISTS PEOPLE");
         jdbcTemplate.execute("DROP TABLE IF EXISTS NO_WATERMARK");
         jdbcTemplate.execute("""
@@ -101,8 +101,7 @@ class DatabaseBackupServiceImplTest {
                 new ByokInfrastructure(null, null, null, null, null, null));
         DynamicDataSourceManager manager = mock(DynamicDataSourceManager.class);
         when(manager.acquire(anyString())).thenReturn(ctx);
-        BackupProperties properties = new BackupProperties(true, true, maxBackupRows,
-                30, true, "backup_schema", true);
+        BackupProperties properties = new BackupProperties(true, true, maxBackupRows, 200, 7);
         return new DatabaseBackupServiceImpl(manager, repository, properties);
     }
 
@@ -431,6 +430,79 @@ class DatabaseBackupServiceImplTest {
         assertThat(second.get("rowsBackedUp")).isEqualTo(3);
     }
 
+    // ─── 字面量转义：MySQL 默认未开 NO_BACKSLASH_ESCAPES ────────────────────
+
+    /**
+     * 方言没声明反斜杠语义时，以反斜杠结尾的列值必须被拒收，而不是生成一条「引号被吃掉」的语句。
+     *
+     * <p>MySQL/MariaDB 默认未开 {@code NO_BACKSLASH_ESCAPES}：{@code '...\'} 里的收尾引号被当成转义的
+     * 引号，字面量不闭合，后面的文本被并进字符串——脚本存进 {@code BackupMetadata.sqlScript()} 后由
+     * quickRestore 用裸 {@code Statement} 逐条重放，足以改写语句边界。所以在「不知道这个库怎么读反斜杠」
+     * 的情况下宁可拒收。真实方言都已表态（MySQL 是 ESCAPE，其余是 LITERAL），只有
+     * {@code GenericDialect} 这类未知品种会落到这条路上。
+     */
+    @Test
+    @DisplayName("方言未声明反斜杠语义时，反斜杠结尾的列值被拒")
+    void backslashTerminatedValueIsRefusedWhenTheDialectDidNotDeclare() {
+        jdbcTemplate.update("INSERT INTO PEOPLE VALUES (4, ?, TIMESTAMP '2020-01-01 00:00:00')",
+                "trailing\\");
+
+        McpToolException failure = assertThrows(McpToolException.class,
+                () -> service(1000, new UndeclaredBackslashH2Dialect())
+                        .backupData("PEOPLE", 0, CONNECTION));
+
+        assertThat(failure.getMessage()).contains("NO_BACKSLASH_ESCAPES");
+        assertThat(repository.size()).isZero();
+    }
+
+    /**
+     * H2 声明了 {@code LITERAL}（反斜杠是普通字符），所以同一个值照常备份——fail-closed 只针对
+     * 未表态的方言，不能连合法数据一起挡掉。
+     */
+    @Test
+    @DisplayName("方言声明反斜杠是普通字符时，反斜杠结尾的列值照常备份")
+    void backslashTerminatedValueIsBackedUpOnALiteralDialect() {
+        jdbcTemplate.update("INSERT INTO PEOPLE VALUES (4, ?, TIMESTAMP '2020-01-01 00:00:00')",
+                "trailing\\");
+
+        Map<String, Object> backup = service(1000).backupData("PEOPLE", 0, CONNECTION);
+
+        assertThat(backup).doesNotContainKey("error");
+        String script = repository.get((String) backup.get("backupId")).sqlScript();
+        assertThat(script).contains("'trailing\\'");
+        assertThat(DatabaseBackupServiceImpl.splitStatements(script)).hasSize(4);
+    }
+
+    /** 反斜杠不贴着引号时两种语义读法一致，值照常备份，不能把好数据一起拒掉。 */
+    @Test
+    @DisplayName("值中间的反斜杠照常备份")
+    void interiorBackslashIsBackedUpNormally() {
+        jdbcTemplate.update("INSERT INTO PEOPLE VALUES (4, ?, TIMESTAMP '2020-01-01 00:00:00')",
+                "C:\\path\\to");
+
+        Map<String, Object> backup = service(1000).backupData("PEOPLE", 0, CONNECTION);
+
+        assertThat(backup).doesNotContainKey("error");
+        assertThat(backup.get("rowCount")).isEqualTo(4);
+        String script = repository.get((String) backup.get("backupId")).sqlScript();
+        assertThat(script).contains("'C:\\path\\to'");
+        assertThat(DatabaseBackupServiceImpl.splitStatements(script)).hasSize(4);
+    }
+
+    /** 历史脚本（旧版本、别的方言或 insertData 写入的行）在重放前也要复校，而不是直接喂给 Statement。 */
+    @Test
+    @DisplayName("重放前复校：字面量边界不稳的脚本被拒，表数据不动")
+    void aScriptWithAnUnstableLiteralIsRefusedBeforeReplay() {
+        String backupId = repository.save(BackupMetadata.create(CONNECTION, "PEOPLE", null,
+                BackupType.FULL, BackupStatus.COMPLETED,
+                "INSERT INTO PEOPLE VALUES (4, 'x\\', TIMESTAMP '2020-01-01 00:00:00');", 1, 1));
+
+        assertThrows(McpToolException.class, () -> service(1000, new UndeclaredBackslashH2Dialect())
+                .quickRestore(backupId, CONNECTION));
+
+        assertThat(rowCount()).isEqualTo(3);
+    }
+
     // ─── Test dialects ────────────────────────────────────────────────────
 
     /**
@@ -484,6 +556,18 @@ class DatabaseBackupServiceImplTest {
                       AND TABLE_NAME = ?
                     ORDER BY ORDINAL_POSITION
                     """;
+        }
+    }
+
+    /**
+     * 未表态反斜杠语义的方言。真实方言都已声明（MySQL 是 ESCAPE，其余是 LITERAL），只有
+     * {@code GenericDialect} 这类未知品种会落到 {@code UNKNOWN}；这里用它来钉住 fail-closed 那一侧，
+     * 而不是把 H2 的正常行为当成拒收依据。
+     */
+    private static final class UndeclaredBackslashH2Dialect extends H2Dialect {
+        @Override
+        public BackslashInLiteral backslashInLiteral() {
+            return BackslashInLiteral.UNKNOWN;
         }
     }
 }

@@ -26,14 +26,20 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import javax.sql.DataSource;
+import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Guards parameter binding in {@link FederatedQueryGateway} against a real H2 database.
@@ -175,5 +181,82 @@ class FederatedQueryGatewayTest {
 
         assertThat(gateway.getClientCount()).isZero();
         assertThat(gateway.getDatabaseInfo("h2")).containsEntry("status", "not_found");
+    }
+
+    /**
+     * 之前 fan-out 用 {@code join()} 无限等：一个卡住的库会把 MCP 请求线程一起挂住，而 statement 级
+     * {@code queryTimeout} 管不到建连阶段。现在等待带超时，超时的库按单库失败记录，已经跑完的库的结果
+     * 照常返回。
+     */
+    @Test
+    void federatedQueryReturnsPartialResultsWhenOneDatabaseHangs() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        FederatedQueryGateway hangingGateway = gatewayWithFanOutTimeout(1, 2);
+        try {
+            hangingGateway.registerClient("h2", dataSource);
+            hangingGateway.registerClient("stuck", blockingDataSource(release));
+
+            Map<String, Object> result = hangingGateway.executeFederatedQuery(
+                    "SELECT ID FROM PEOPLE ORDER BY ID", List.of("h2", "stuck"), 3);
+
+            assertThat(result.get("successCount")).isEqualTo(1L);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> perDatabase = (Map<String, Object>) result.get("results");
+            assertThat(perDatabase).containsOnlyKeys("h2", "stuck");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> stuckResult = (Map<String, Object>) perDatabase.get("stuck");
+            assertThat(stuckResult).containsEntry("status", "error");
+            assertThat(String.valueOf(stuckResult.get("error"))).contains("timed out");
+        } finally {
+            release.countDown();
+            hangingGateway.shutdown();
+        }
+    }
+
+    /**
+     * 池的队列现在是显式有界 + AbortPolicy：过载时提交处立刻抛错，而不是攒一队迟早都会超时的任务。
+     * 池宽 1、队列深 {@code 1 × 4}，所以第 6 个目标库必被拒。
+     */
+    @Test
+    void saturatedPoolFailsFastInsteadOfQueueingUnbounded() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        FederatedQueryGateway narrowGateway = gatewayWithFanOutTimeout(30, 1);
+        try {
+            List<String> targets = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                String id = "stuck" + i;
+                narrowGateway.registerClient(id, blockingDataSource(release));
+                targets.add(id);
+            }
+
+            assertThatThrownBy(() -> narrowGateway.executeFederatedQuery("SELECT 1", targets, 1))
+                    .isInstanceOf(McpFederatedException.class)
+                    .hasMessageContaining("saturated");
+        } finally {
+            release.countDown();
+            narrowGateway.shutdown();
+        }
+    }
+
+    private FederatedQueryGateway gatewayWithFanOutTimeout(int fanOutTimeoutSeconds, int poolSize) {
+        return new FederatedQueryGateway(
+                new DialectResolver(),
+                mock(SqlValidator.class),
+                new QueryConfig(100, 10_000, 100, 500, 30),
+                new ThreadPoolProperties(0, 0, 0, 0, poolSize, 0, 0),
+                fanOutTimeoutSeconds);
+    }
+
+    /**
+     * 一个永远拿不到连接的 DataSource：方言探测就会卡在 {@code getConnection()} 上，正是超时与过载要
+     * 覆盖的形状。每个库用独立 mock，避免多线程共用一个 mock 时 Mockito 自身的同步把并发压平。
+     */
+    private static DataSource blockingDataSource(CountDownLatch release) throws Exception {
+        DataSource blocking = mock(DataSource.class);
+        when(blocking.getConnection()).thenAnswer(invocation -> {
+            release.await(30, TimeUnit.SECONDS);
+            throw new SQLException("released without connecting");
+        });
+        return blocking;
     }
 }

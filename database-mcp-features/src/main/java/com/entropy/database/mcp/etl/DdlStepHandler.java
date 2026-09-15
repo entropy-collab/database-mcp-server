@@ -22,6 +22,11 @@ import java.util.List;
 
 /**
  * Handles DDL steps: executes DDL statement list.
+ *
+ * <p>每条语句都先过 {@code JobExecutionEngine.validateDdl} → {@code SqlValidator.validateDdl}。
+ * 这个 handler 原先直接 {@code jdbcTemplate.update(ddl)}，一道闸都不过——而 tools 层做同一件事的
+ * {@code DdlExecutionTools.executeDdlBatch} 一直是逐条校验的。语句白名单（例如拒掉能定义 Java
+ * 函数的 {@code CREATE ALIAS}）属于 {@code SqlValidator} 的实现细节，这里只负责把语句送进去。
  */
 public class DdlStepHandler implements StepHandler {
 
@@ -35,6 +40,12 @@ public class DdlStepHandler implements StepHandler {
                         Step step, JobExecutionEngine engine) {
         JdbcTemplate jdbcTemplate = source.getDdlJdbcTemplate();
         List<String> statements = engine.getListParam(step, "statements", List.of());
+
+        // 先全部校验再执行：DDL 多半不在一个事务里，逐条边校验边执行会在第 N 条被拒时
+        // 留下前 N-1 条已生效的结构变更，而调用方看到的只是一条校验失败。
+        for (String ddl : statements) {
+            engine.validateDdl(ddl);
+        }
 
         int totalAffected = 0;
         for (String ddl : statements) {

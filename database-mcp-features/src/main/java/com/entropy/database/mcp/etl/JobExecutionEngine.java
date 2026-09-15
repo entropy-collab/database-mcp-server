@@ -17,7 +17,10 @@ package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
+import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.security.SqlValidator;
@@ -300,6 +303,12 @@ public class JobExecutionEngine implements DisposableBean {
             );
 
             StepHandler stepHandler = findHandler(step.type());
+
+            // 集中过闸：标识符 / WHERE 片段的校验只在这一处做。这里是所有 handler 的唯一派发点，
+            // 且连接已解析、方言已就位（提交阶段拿不到方言，所以不能放在 MigrationJob.validate()）。
+            // 同步版 EtlTools.transformAndInsert 一直有这些校验，异步版曾整段遗漏——详见 EtlStepGuard。
+            EtlStepGuard.validateStep(step, dialectOf(sourceContext), dialectOf(targetContext), this);
+
             long rowsAffected = stepHandler.execute(sourceContext, targetContext, step, this);
 
             updateStepState(execution, step.id(), StepExecutionState.completed(step.id(), rowsAffected));
@@ -398,6 +407,27 @@ public class JobExecutionEngine implements DisposableBean {
     }
 
     /**
+     * Validate a DDL statement when a validator is configured.
+     *
+     * <p>{@link DdlStepHandler} 原先直接把 {@code statements} 里的每条语句丢给 {@code jdbcTemplate
+     * .update}，完全不过闸——而同一份工作在 tools 层的 {@code DdlExecutionTools.executeDdlBatch}
+     * 里是逐条调 {@code sqlValidator.validateDdl} 的。语句白名单（例如拒掉 {@code CREATE ALIAS}）
+     * 是 {@code SqlValidator} 实现的事，这里只负责把每条语句送进去。
+     *
+     * <p>validator 为 null 时不校验，与 {@link #validateSourceSql} 保持一致：构造器已经就这种
+     * 配置打过 warning，生产接线（{@code DatabaseConfig.jobExecutionEngine}）总是传真的 validator。
+     */
+    public void validateDdl(String sql) {
+        if (sql == null || sql.isBlank()) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "DDL statement cannot be blank");
+        }
+        if (sqlValidator != null) {
+            sqlValidator.validateDdl(sql);
+        }
+    }
+
+    /**
      * Rows a step may read from its source, {@code maxSourceRows} param overriding the engine-wide
      * ceiling.
      */
@@ -420,6 +450,16 @@ public class JobExecutionEngine implements DisposableBean {
             throw new IllegalArgumentException("Connection name is required");
         }
         return dataSourceManager.acquire(connectionName);
+    }
+
+    /**
+     * 方言，允许为 null。
+     *
+     * <p>EXPORT 这类 step 不需要连接，测试里 {@code acquire} 也会返回 null；
+     * {@link EtlStepGuard} 在方言缺失时退回 core 的通用标识符规则（更严），所以这里不抛错。
+     */
+    private static DatabaseDialect dialectOf(ByokDataSourceContext context) {
+        return context == null ? null : context.getDialect();
     }
 
     private List<Step> topologicalSort(List<Step> steps) {

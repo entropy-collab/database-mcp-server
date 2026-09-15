@@ -98,7 +98,7 @@ public class OptimizerServiceImpl implements OptimizerService {
             String upperSql = trimmedSql.toUpperCase();
 
             // Run EXPLAIN
-            List<String> planRows = getExplainPlan(jdbc, dialect, trimmedSql);
+            List<String> planRows = getExplainPlan(ctx, trimmedSql);
 
             // Extract table references
             List<String> tables = extractTableNames(trimmedSql);
@@ -343,15 +343,24 @@ public class OptimizerServiceImpl implements OptimizerService {
 
     // ─── Private Helpers ───────────────────────────────────────────────────────
 
-    private List<String> getExplainPlan(JdbcTemplate jdbc, DatabaseDialect dialect, String sql) {
+    /**
+     * 取执行计划的文本行。
+     *
+     * <p>不再自己 {@code jdbc.queryForList(dialect.getExplainPlanSql(sql))}：那样在 Oracle 上永远是空的——
+     * {@code EXPLAIN PLAN FOR} 不返回结果集，只往会话级临时表 {@code SYS.PLAN_TABLE$} 写行，
+     * 得在同一条物理连接上查回来。两步逻辑只在 {@code ExecutionPlanRepository#explainPlanRows} 里有一份。
+     */
+    private List<String> getExplainPlan(ByokDataSourceContext ctx, String sql) {
         try {
-            String explainSql = dialect.getExplainPlanSql(sql);
-            if (explainSql == null) return List.of("EXPLAIN 不支持当前方言");
-            List<Map<String, Object>> rows = jdbc.queryForList(explainSql);
+            List<Map<String, Object>> rows = ctx.getExecutionPlanRepository().explainPlanRows(sql);
+            if (rows.isEmpty()) return List.of("执行计划为空：当前方言不支持 EXPLAIN，或计划只在会话输出中");
             return rows.stream()
-                    .map(row -> String.join(" | ", row.values().stream().map(Object::toString).toList()))
+                    .map(row -> row.values().stream()
+                            .map(value -> value == null ? "" : value.toString())
+                            .collect(java.util.stream.Collectors.joining(" | ")))
                     .toList();
         } catch (Exception e) {
+            log.debug("Explain plan unavailable: {}", e.getMessage());
             return List.of("获取执行计划失败");
         }
     }

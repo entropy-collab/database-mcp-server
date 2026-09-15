@@ -55,6 +55,9 @@ class QualityCheckServiceTest {
     /** Two columns, no nulls, no duplicates. */
     private static final String CLEAN_TABLE = "Q_CLEAN";
 
+    /** 存在但一行都没有：与「探不到表」必须是两种可区分的结果。 */
+    private static final String EMPTY_TABLE = "Q_EMPTY";
+
     private static JdbcTemplate jdbcTemplate;
 
     private RecordingReadOperations db;
@@ -81,6 +84,17 @@ class QualityCheckServiceTest {
         jdbcTemplate.execute("CREATE TABLE Q_CLEAN (ID INT, LABEL VARCHAR(20))");
         jdbcTemplate.update("INSERT INTO Q_CLEAN VALUES (1, 'one')");
         jdbcTemplate.update("INSERT INTO Q_CLEAN VALUES (2, 'two')");
+
+        jdbcTemplate.execute("DROP TABLE IF EXISTS Q_EMPTY");
+        jdbcTemplate.execute("CREATE TABLE Q_EMPTY (ID INT, LABEL VARCHAR(20))");
+
+        // A table outside the login schema, which is the shape of every pinned read-only connection:
+        // the account logs in as one user and reads another's tables.
+        jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS FCS");
+        jdbcTemplate.execute("DROP TABLE IF EXISTS FCS.Q_OWNED");
+        jdbcTemplate.execute("CREATE TABLE FCS.Q_OWNED (ID INT, LABEL VARCHAR(20))");
+        jdbcTemplate.update("INSERT INTO FCS.Q_OWNED VALUES (1, 'one')");
+        jdbcTemplate.update("INSERT INTO FCS.Q_OWNED VALUES (2, 'two')");
     }
 
     @BeforeEach
@@ -247,6 +261,54 @@ class QualityCheckServiceTest {
             assertThat(report.issuesFound()).isZero();
             assertThat(report.overallScore()).isEqualTo(100.0);
         }
+
+        /**
+         * 0.5.1 线上实测：checkTableQuality 对 FCS.EMP_CARD_INFO（38275 行）报 totalRows=0、
+         * rulesChecked=0、评分 100——schema 只被回显进报告，探查 SQL 还是裸表名，落在登录 Schema
+         * 上取不到表，异常又被吞掉，于是一份空报告看起来像"这张表很干净"。
+         */
+        @Test
+        @DisplayName("传了 schema 时探查落在该 Schema 上，不再退化成空报告")
+        void schemaQualifiesTheProbes() {
+            QualityReport report = h2Service().check("primary", "Q_OWNED", "FCS", List.of(),
+                    new H2Dialect(), h2Db());
+
+            assertThat(report.totalRows()).isEqualTo(2);
+            assertThat(report.rulesChecked()).isEqualTo(2);
+        }
+
+        @Test
+        @DisplayName("不传 schema 时表落在登录 Schema 上解析，取不到表就报错而不是返回满分空报告")
+        void withoutSchemaTheTableIsNotFound() {
+            // 旧行为：探查抛「表不存在」被吞掉 → totalRows=0 → 空报告 → 评分 100，一次配置错误看起来
+            // 像「这张表很干净」。现在「探不到表」与「表是空的」分开，前者以校验错误抛出。
+            assertThatThrownBy(() -> h2Service().check("primary", "Q_OWNED", null, List.of(),
+                    new H2Dialect(), h2Db()))
+                    .isInstanceOf(McpValidationException.class)
+                    .hasMessageContaining("could not count rows");
+        }
+
+        @Test
+        @DisplayName("真的空表仍然是空报告：0 行本身就是探查成功的结果")
+        void anEmptyTableStillYieldsAnEmptyReport() {
+            QualityReport report = h2Service().check("primary", EMPTY_TABLE, null, List.of(),
+                    new H2Dialect(), h2Db());
+
+            assertThat(report.totalRows()).isZero();
+            assertThat(report.rulesChecked()).isZero();
+            assertThat(report.overallScore()).isEqualTo(100.0);
+        }
+
+        @Test
+        @DisplayName("非法 schema 在探查前就被拒，不会退化成满分空报告")
+        void anInvalidSchemaIsRefused() {
+            // quoteQualified 对非法 schema 抛 IllegalArgumentException，以前落在 queryRowCount 的
+            // catch(Exception) 里降级成 WARN，报告照样是 totalRows=0 + 评分 100。
+            assertThatThrownBy(() -> h2Service().check("primary", "Q_OWNED", "FCS; DROP TABLE Q_CLEAN",
+                    List.of(), new H2Dialect(), h2Db()))
+                    .isInstanceOf(McpValidationException.class)
+                    .hasMessageContaining("Invalid schema name");
+        }
     }
 
     /**
@@ -283,6 +345,11 @@ class QualityCheckServiceTest {
         public PlanAnalysis explainPlan(String sql, String connection) {
             throw new UnsupportedOperationException();
         }
+
+        @Override
+        public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
+            throw new UnsupportedOperationException();
+        }
     }
 
     /**
@@ -309,6 +376,11 @@ class QualityCheckServiceTest {
 
         @Override
         public PlanAnalysis explainPlan(String sql, String connection) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
             throw new UnsupportedOperationException();
         }
     }

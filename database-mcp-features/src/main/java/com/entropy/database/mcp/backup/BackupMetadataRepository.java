@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.backup;
 
+import com.entropy.database.mcp.properties.BackupProperties;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,20 +35,42 @@ import java.util.concurrent.ConcurrentMap;
  * OutOfMemoryError in a long-running process. It is therefore bounded by both count and age;
  * eviction is silent, and {@link #get} returning {@code null} is the expected signal that a
  * backup is no longer available for restore.
+ *
+ * <p><b>破坏性变更（0.4.0 引入，沿用至今）</b>：两个上限从编译期常量（200 条 / 7 天）改为读
+ * {@link BackupProperties}。此前 {@code entropy.mcp.database.backup.retention-days}（默认 30）
+ * 只作用于手工调用的 {@code cleanupBackups}，管不到这里的 {@code expireAfterWrite}，于是
+ * {@code getBackupConfig} 回的 30 天是谎报——记录到第 7 天必被清掉。
  */
 @Repository
 public class BackupMetadataRepository {
 
     private static final Logger log = LoggerFactory.getLogger(BackupMetadataRepository.class);
 
-    private static final int MAX_RECORDS = 200;
-    private static final Duration MAX_RETENTION = Duration.ofDays(7);
+    private final int maxRecords;
+    private final int retentionDays;
+    private final ConcurrentMap<String, BackupMetadata> store;
 
-    private final ConcurrentMap<String, BackupMetadata> store = Caffeine.newBuilder()
-            .maximumSize(MAX_RECORDS)
-            .expireAfterWrite(MAX_RETENTION)
-            .<String, BackupMetadata>build()
-            .asMap();
+    public BackupMetadataRepository(BackupProperties properties) {
+        this.maxRecords = properties.maxRecords();
+        this.retentionDays = properties.retentionDays();
+        this.store = Caffeine.newBuilder()
+                .maximumSize(this.maxRecords)
+                .expireAfterWrite(Duration.ofDays(this.retentionDays))
+                .<String, BackupMetadata>build()
+                .asMap();
+        log.info("Backup metadata store: in-memory only, maxRecords={}, retentionDays={}; "
+                + "records are lost on restart", this.maxRecords, this.retentionDays);
+    }
+
+    /** 内存中最多保留的记录条数，超出后静默淘汰。 */
+    public int maxRecords() {
+        return maxRecords;
+    }
+
+    /** 记录的硬过期天数，到期后静默淘汰、无法再用于恢复。 */
+    public int retentionDays() {
+        return retentionDays;
+    }
 
     public String save(BackupMetadata metadata) {
         String id = metadata.backupId() != null ? metadata.backupId() : UUID.randomUUID().toString();

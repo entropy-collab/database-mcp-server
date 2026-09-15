@@ -327,6 +327,11 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         Instant startedAt = Instant.now();
         List<String> statements = splitStatements(meta.sqlScript());
+        // 重放前再复校一遍：脚本可能是旧版本、别的方言或别的写入路径留下的，而 splitStatements 按标准 SQL
+        // 读引号，MySQL 未开 NO_BACKSLASH_ESCAPES 时读法不同，切出来的"一条语句"未必是服务端看到的那条。
+        for (String statement : statements) {
+            assertLiteralBoundariesAgree(statement, ctx.getDialect(), "restore of backup " + backupId);
+        }
 
         long restoredRows;
         try {
@@ -417,6 +422,11 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                     "hint", "quickRestore clears " + tableName + " before replaying, so running it with "
                             + "an empty backup would empty the table and commit. Check the backup with "
                             + "getBackup, or take a fresh data backup with backupTable.");
+        }
+
+        // 重放前复校：quickRestore 用裸 Statement 逐条执行，一条字面量不闭合的语句会把后面的文本并进来。
+        for (String statement : inserts) {
+            assertLiteralBoundariesAgree(statement, dialect, "quick restore of backup " + backupId);
         }
 
         long restoredRows;
@@ -761,19 +771,108 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
             List<String> values = new ArrayList<>();
             Map<String, Object> lookup = caseInsensitive(row);
             for (String col : columnNames) {
-                values.add(formatValue(lookup.get(col)));
+                values.add(formatValue(lookup.get(col), dialect));
             }
             sb.append(String.join(", ", values)).append(");");
-            statements.add(sb.toString());
+            String statement = sb.toString();
+            // 生成时就拒掉边界不稳的语句：脚本一旦存进 BackupMetadata，就会被 quickRestore 用裸
+            // Statement 逐条重放，那时已经没有列值、只剩文本，判不出来哪段本该是数据。
+            assertLiteralBoundariesAgree(statement, dialect, "backup of " + tableName);
+            statements.add(statement);
         }
         return statements;
     }
 
-    private String formatValue(Object value) {
+    /**
+     * 把一个列值渲染成脚本里的 SQL 字面量。
+     *
+     * <p>转义规则交给方言（{@link DatabaseDialect#stringLiteral(String)}）：这里原来只做引号翻倍，而
+     * MySQL/MariaDB 默认<b>没开</b> {@code NO_BACKSLASH_ESCAPES}，反斜杠在字面量里是转义符——一个以
+     * 反斜杠结尾的列值会让 {@code '...\'} 的收尾引号被吃掉、字面量不闭合，后面的文本被并进字符串，
+     * 足以改写语句边界。脚本存进 {@link BackupMetadata#sqlScript()} 后由 quickRestore 用裸
+     * {@link Statement} 逐条重放，而行数据本身可以由 insertData 写入，属于二段式利用。
+     *
+     * <p>选的是方案 (b)：保留 SQL 文本，转义下沉到方言，并在生成时与重放前各复校一次
+     * （{@link #assertLiteralBoundariesAgree}）。否决方案 (a)「改存参数化的 (列, 值) 结构」的理由是
+     * {@link BackupMetadata} 只有一个 {@code sqlScript} 字段，backupSchema 存的是 DDL 文本、
+     * restoreBackup/quickRestore/getBackup 以及已经落盘的历史记录全按文本走，换形状要连带改 metadata
+     * 与整条还原链路，超出本次修复范围。
+     */
+    private String formatValue(Object value, DatabaseDialect dialect) {
         if (value == null) return "NULL";
-        if (value instanceof String) return "'" + ((String) value).replace("'", "''") + "'";
         if (value instanceof Number || value instanceof Boolean) return String.valueOf(value);
-        return "'" + String.valueOf(value).replace("'", "''") + "'";
+        return dialect.stringLiteral(String.valueOf(value));
+    }
+
+    /**
+     * 复校一条待重放语句：它的字符串字面量在「反斜杠是普通字符」和「反斜杠是转义符」两种语义下必须落在
+     * 同一批位置上。
+     *
+     * <p>前提是 MySQL/MariaDB 默认未开 {@code NO_BACKSLASH_ESCAPES}：同一段文本，标准 SQL 侧
+     * （Oracle、PostgreSQL 的 {@code standard_conforming_strings=on}、H2、SQL Server）在某个 {@code '}
+     * 处收尾，MySQL 侧却因为前面那个反斜杠把它吃掉而继续往后吞。两侧不一致的语句就是"语句边界会漂移"
+     * 的语句，重放时后续文本会被当成 SQL 的一部分执行，所以在生成与重放两处都拒掉，而不是去赌服务端的
+     * {@code sql_mode}。
+     *
+     * <p>方言明确声明反斜杠是普通字符（{@link DatabaseDialect.BackslashInLiteral#LITERAL}，Oracle 已
+     * 声明）时跳过：那里一个以反斜杠结尾的值是合法数据，拒了就是把好数据判成坏的。声明为
+     * {@code ESCAPE} 的方言由 {@code stringLiteral} 连反斜杠一起翻倍，两侧自然一致，这里也就放行。
+     * MySqlDialect 目前还没表态（本次改动不许动那个文件），所以在 MySQL 上这类值会被拒——宁可拒收，
+     * 也不要生成一条不闭合的语句；后续给 MySqlDialect 补上 {@code ESCAPE} 声明即可放行。
+     */
+    static void assertLiteralBoundariesAgree(String statement, DatabaseDialect dialect, String context) {
+        if (dialect.backslashInLiteral() == DatabaseDialect.BackslashInLiteral.LITERAL) {
+            return;
+        }
+        if (literalSpans(statement, false).equals(literalSpans(statement, true))) {
+            return;
+        }
+        throw new McpToolException(ErrorCode.DATA_VALIDATION_FAILED,
+                "Refusing " + context + ": a value's backslash makes the SQL literal end at different "
+                        + "places depending on the server's NO_BACKSLASH_ESCAPES setting, so replaying "
+                        + "this statement could shift the statement boundary. Dialect "
+                        + dialect.getDialectName() + " has not declared its backslash semantics.");
+    }
+
+    /**
+     * 一条语句里所有单引号字面量的 [起, 止] 位置。
+     *
+     * <p>{@code backslashEscapes=true} 时把 {@code \x} 当成一个整体跳过，这正是 MySQL 未开
+     * {@code NO_BACKSLASH_ESCAPES} 时的读法；{@code false} 时只认 {@code ''}，即标准 SQL 与
+     * {@link #splitStatements(String)} 的读法。两者一致才说明这条语句怎么读都是同一批字面量。
+     *
+     * <p>不处理双引号标识符：备份生成的标识符都经过 {@code dialect.quote}，里面出现单引号的情形
+     * （被引号包住的列名带 {@code '}）在两种语义下同样会被算成字面量起点，因此不影响"两侧是否一致"这个
+     * 判据本身。
+     */
+    private static List<String> literalSpans(String sql, boolean backslashEscapes) {
+        List<String> spans = new ArrayList<>();
+        int i = 0;
+        while (i < sql.length()) {
+            if (sql.charAt(i) != '\'') {
+                i++;
+                continue;
+            }
+            int start = i++;
+            while (i < sql.length()) {
+                char c = sql.charAt(i);
+                if (backslashEscapes && c == '\\' && i + 1 < sql.length()) {
+                    i += 2;
+                    continue;
+                }
+                if (c == '\'') {
+                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                i++;
+            }
+            spans.add(start + ":" + Math.min(i, sql.length()));
+            i++;
+        }
+        return spans;
     }
 
     private Map<String, Map<String, Object>> getTableColumns(String tableName,

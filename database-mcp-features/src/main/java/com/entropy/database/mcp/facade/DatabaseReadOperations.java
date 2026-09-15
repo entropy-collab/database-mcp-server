@@ -44,4 +44,16 @@ public interface DatabaseReadOperations {
     List<Map<String, Object>> queryRows(String sql, String connection, Object... args);
 
     PlanAnalysis explainPlan(String sql, String connection);
+
+    /**
+     * 拿执行计划的原始行，一行一个计划步骤，列名随方言。
+     *
+     * <p>调用方只给 SELECT，不要自己拼 EXPLAIN 语句：Oracle 的 {@code EXPLAIN PLAN FOR} 不返回结果集，
+     * 而是往会话级临时表写行，必须在同一条物理连接上查回来。这套差异只在
+     * {@code ExecutionPlanRepository#explainPlanRows} 里有一份实现。
+     *
+     * <p>与 {@link #explainPlan} 的区别：这里给的是逐行明细（工具要展示的东西），
+     * 那里给的是压扁到根节点的 {@link PlanAnalysis}（要判定全表扫描之类的结论）。
+     */
+    List<Map<String, Object>> explainPlanRows(String sql, String connection);
 }

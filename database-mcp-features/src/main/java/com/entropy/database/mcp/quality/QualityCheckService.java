@@ -74,14 +74,34 @@ public class QualityCheckService {
      *
      * @param connectionKey the connection every probe below is issued against; it is also the
      *                      connection name reported in the {@link QualityReport}
+     * @param schema        the table's owner; every probe qualifies the table with it, because an
+     *                      unqualified name resolves against the login schema and a pinned
+     *                      connection rarely logs in as the schema that owns the data
      * @param db            read access to that connection, so the checks stay subject to the
      *                      facade's advice instead of borrowing a raw {@code JdbcTemplate}
      */
     public QualityReport check(String connectionKey, String tableName, String schema,
                                List<QualityRule> rules, DatabaseDialect dialect,
                                DatabaseReadOperations db) {
-        long totalRows = queryRowCount(db, connectionKey, tableName, dialect);
+        // schema 会被 quoteQualified 拼进每条探查 SQL，非法 schema 在那里抛 IllegalArgumentException。
+        // 先在这里挡掉：否则它落进 queryRowCount 的 catch(Exception) 被降级成 WARN，调用方看到的是
+        // totalRows=0 + 评分 100，一份「漂亮且错误」的报告。
+        requireValidSchema(schema, dialect);
+
+        RowCountProbe rowCount = queryRowCount(db, connectionKey, tableName, schema, dialect);
+        if (!rowCount.tableProbed()) {
+            // 「探不到表」与「表是空的」必须分开：前者是 schema/表名写错或没权限，复用 emptyReport 就等于
+            // 把失败包装成满分。本次改动的目的正是修这条路径，所以这里报错而不是返回报告。
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "Quality check aborted: could not count rows of "
+                            + (schema == null || schema.isBlank() ? tableName : schema + "." + tableName)
+                            + " on connection '" + connectionKey + "'. The table may not exist in that "
+                            + "schema, or the connection may lack privileges on it. Cause: "
+                            + rowCount.failure());
+        }
+        long totalRows = rowCount.rows();
         if (totalRows == 0) {
+            // 真的空表：0 行本身就是探查成功的结果，空报告在这里是诚实的。
             return emptyReport(tableName, schema, connectionKey);
         }
 
@@ -93,11 +113,11 @@ public class QualityCheckService {
         List<QualityRule> executedRules = new ArrayList<>();
 
         // Discover columns
-        List<String> columns = discoveredColumns(db, connectionKey, tableName, dialect);
+        List<String> columns = discoveredColumns(db, connectionKey, tableName, schema, dialect);
 
         // NULL rate per column
         for (String col : columns) {
-            long nullCount = queryNullCount(db, connectionKey, tableName, col, dialect);
+            long nullCount = queryNullCount(db, connectionKey, tableName, schema, col, dialect);
             double nullRatePct = totalRows > 0 ? (nullCount * 100.0 / totalRows) : 0;
             double thresholdPct = properties.defaultNullRateThreshold() * 100;
             QualityRule.Severity severity = nullRatePct > thresholdPct * 2
@@ -117,7 +137,7 @@ public class QualityCheckService {
         if (!columns.isEmpty()) {
             String columnList = columns.stream().map(col -> quoteColumn(col, dialect))
                     .reduce((a, b) -> a + ", " + b).orElse("");
-            Long dupCount = queryDuplicateGroups(db, connectionKey, tableName, columnList, dialect);
+            Long dupCount = queryDuplicateGroups(db, connectionKey, tableName, schema, columnList, dialect);
             if (dupCount != null && dupCount > 0) {
                 double dupRatePct = totalRows > 0 ? (dupCount * 100.0 / totalRows) : 0;
                 double thresholdPct = properties.defaultDuplicateRateThreshold() * 100;
@@ -135,7 +155,7 @@ public class QualityCheckService {
             if (!rule.enabled()) continue;
             executedRules.add(rule);
             try {
-                QualityIssue issue = evaluateRule(db, connectionKey, tableName, rule, dialect, totalRows);
+                QualityIssue issue = evaluateRule(db, connectionKey, tableName, schema, rule, dialect, totalRows);
                 if (issue != null) {
                     issues.add(issue);
                 }
@@ -163,11 +183,12 @@ public class QualityCheckService {
     // ─── Private Evaluation ──────────────────────────────────────────────
 
     private QualityIssue evaluateRule(DatabaseReadOperations db, String connection, String tableName,
-                                      QualityRule rule, DatabaseDialect dialect, long totalRows) {
+                                      String schema, QualityRule rule, DatabaseDialect dialect,
+                                      long totalRows) {
         return switch (rule.type()) {
             case FORMAT -> evaluateFormat(rule);
-            case ENUM_VALUES -> evaluateEnum(db, connection, tableName, rule, dialect, totalRows);
-            case RANGE -> evaluateRange(db, connection, tableName, rule, dialect, totalRows);
+            case ENUM_VALUES -> evaluateEnum(db, connection, tableName, schema, rule, dialect, totalRows);
+            case RANGE -> evaluateRange(db, connection, tableName, schema, rule, dialect, totalRows);
             case CUSTOM_SQL -> evaluateCustomSql(db, connection, rule, totalRows);
             default -> null;
         };
@@ -181,7 +202,8 @@ public class QualityCheckService {
     }
 
     private QualityIssue evaluateEnum(DatabaseReadOperations db, String connection, String tableName,
-                                      QualityRule rule, DatabaseDialect dialect, long totalRows) {
+                                      String schema, QualityRule rule, DatabaseDialect dialect,
+                                      long totalRows) {
         String col = rule.column();
         if (col == null) return null;
         @SuppressWarnings("unchecked")
@@ -189,7 +211,7 @@ public class QualityCheckService {
         if (allowed == null || allowed.isEmpty()) return null;
         try {
             String placeholders = allowed.stream().map(x -> "?").reduce((a, b) -> a + ", " + b).orElse("");
-            String sql = "SELECT COUNT(*) FROM " + dialect.quote(tableName)
+            String sql = "SELECT COUNT(*) FROM " + dialect.quoteQualified(schema, tableName)
                     + " WHERE " + quoteColumn(col, dialect) + " NOT IN (" + placeholders + ")";
             long violationCount = queryCount(db, connection, sql, allowed.toArray());
             double violationRate = totalRows > 0 ? (violationCount * 100.0 / totalRows) : 0;
@@ -204,7 +226,8 @@ public class QualityCheckService {
     }
 
     private QualityIssue evaluateRange(DatabaseReadOperations db, String connection, String tableName,
-                                       QualityRule rule, DatabaseDialect dialect, long totalRows) {
+                                       String schema, QualityRule rule, DatabaseDialect dialect,
+                                       long totalRows) {
         String col = rule.column();
         if (col == null) return null;
         Number min = (Number) rule.params().get("min");
@@ -213,7 +236,7 @@ public class QualityCheckService {
         try {
             String quotedColumn = quoteColumn(col, dialect);
             StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM ")
-                    .append(dialect.quote(tableName))
+                    .append(dialect.quoteQualified(schema, tableName))
                     .append(" WHERE ")
                     .append(quotedColumn)
                     .append(" IS NOT NULL");
@@ -326,13 +349,51 @@ public class QualityCheckService {
         return dialect.quote(column);
     }
 
-    private long queryRowCount(DatabaseReadOperations db, String connection, String tableName,
-                               DatabaseDialect dialect) {
+    /**
+     * 行数探查的结果，把「表是空的」与「根本没探到表」分开。
+     *
+     * <p>两者以前都表现为 {@code 0}：{@code quoteQualified} 对非法 schema 抛的
+     * {@link IllegalArgumentException}、表不存在、没权限，全都落进同一个 {@code catch (Exception)} 被
+     * 降级成 WARN 返回 0，调用方再按 0 走空报告，于是探查全失败反而得到评分 100。
+     *
+     * @param failure 探查失败的原因，{@code tableProbed} 为 true 时是 {@code null}
+     */
+    private record RowCountProbe(long rows, boolean tableProbed, String failure) {
+
+        static RowCountProbe counted(long rows) {
+            return new RowCountProbe(rows, true, null);
+        }
+
+        static RowCountProbe failed(String failure) {
+            return new RowCountProbe(0, false, failure);
+        }
+    }
+
+    /**
+     * 拒绝一个不能作为纯标识符的 schema 名。
+     *
+     * <p>与 {@link #quoteColumn} 同理：schema 是插值进 SQL 的，转义与否是方言的事，所以先要求它是纯
+     * 标识符。放在探查之前，失败才会到达调用方而不是被 {@link #queryRowCount} 吞掉。
+     */
+    private void requireValidSchema(String schema, DatabaseDialect dialect) {
+        if (schema == null || schema.isBlank()) {
+            return;
+        }
+        if (!dialect.isValidIdentifier(schema)) {
+            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
+                    "Invalid schema name: " + schema);
+        }
+    }
+
+    private RowCountProbe queryRowCount(DatabaseReadOperations db, String connection, String tableName,
+                                        String schema, DatabaseDialect dialect) {
         try {
-            return queryCount(db, connection, "SELECT COUNT(*) FROM " + dialect.quote(tableName));
+            return RowCountProbe.counted(queryCount(db, connection,
+                    "SELECT COUNT(*) FROM " + dialect.quoteQualified(schema, tableName)));
         } catch (Exception e) {
+            // 仍然记 WARN 留痕，但不再把失败伪装成 0 行——判定交给调用方。
             log.warn("Failed to count rows in table '{}': {}", tableName, e.getMessage(), e);
-            return 0;
+            return RowCountProbe.failed(e.getMessage());
         }
     }
 
@@ -342,8 +403,8 @@ public class QualityCheckService {
      * failing the whole report.
      */
     private List<String> discoveredColumns(DatabaseReadOperations db, String connection, String tableName,
-                                           DatabaseDialect dialect) {
-        List<String> columns = queryColumns(db, connection, tableName, dialect);
+                                           String schema, DatabaseDialect dialect) {
+        List<String> columns = queryColumns(db, connection, tableName, schema, dialect);
         List<String> usable = new ArrayList<>(columns.size());
         for (String column : columns) {
             if (column != null && dialect.isValidIdentifier(column)) {
@@ -368,9 +429,9 @@ public class QualityCheckService {
      * and PostgreSQL report {@code column_name}.
      */
     private List<String> queryColumns(DatabaseReadOperations db, String connection, String tableName,
-                                      DatabaseDialect dialect) {
+                                      String schema, DatabaseDialect dialect) {
         try {
-            String colQuery = dialect.columnsQuery(tableName, null);
+            String colQuery = dialect.columnsQuery(tableName, schema);
             return db.queryRows(colQuery, connection, dialect.normalizeTableName(tableName)).stream()
                     .map(QualityCheckService::columnNameOf)
                     .filter(Objects::nonNull)
@@ -394,9 +455,9 @@ public class QualityCheckService {
     }
 
     private long queryNullCount(DatabaseReadOperations db, String connection, String tableName,
-                                String column, DatabaseDialect dialect) {
+                                String schema, String column, DatabaseDialect dialect) {
         try {
-            return queryCount(db, connection, "SELECT COUNT(*) FROM " + dialect.quote(tableName)
+            return queryCount(db, connection, "SELECT COUNT(*) FROM " + dialect.quoteQualified(schema, tableName)
                     + " WHERE " + quoteColumn(column, dialect) + " IS NULL");
         } catch (Exception e) {
             log.warn("Null check failed for column '{}': {}", column, e.getMessage(), e);
@@ -413,10 +474,10 @@ public class QualityCheckService {
      * run is visible instead of looking like a clean result.
      */
     private Long queryDuplicateGroups(DatabaseReadOperations db, String connection, String tableName,
-                                      String columnList, DatabaseDialect dialect) {
+                                      String schema, String columnList, DatabaseDialect dialect) {
         try {
             return queryCount(db, connection,
-                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + dialect.quote(tableName)
+                    "SELECT COUNT(*) FROM (SELECT COUNT(*) cnt FROM " + dialect.quoteQualified(schema, tableName)
                             + " GROUP BY " + columnList + " HAVING COUNT(*) > 1) t");
         } catch (Exception e) {
             log.warn("Duplicate check failed for table '{}': {}", tableName, e.getMessage(), e);

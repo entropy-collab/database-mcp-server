@@ -45,22 +45,22 @@ public class TransformStepHandler implements StepHandler {
 
         engine.validateSourceSql(step.sourceSql());
 
-        List<String> sourceColumns = new ArrayList<>();
-        List<String> targetColumns = new ArrayList<>();
-        List<String> transforms = new ArrayList<>();
-
-        for (String mapping : columnMapping) {
-            String[] parts = mapping.split(":");
-            if (parts.length < 2) continue;
-            sourceColumns.add(parts[0]);
-            targetColumns.add(parts[1]);
-            transforms.add(parts.length >= 3 ? parts[2] : "none");
-        }
+        // 三道校验都在 EtlStepGuard 里：列映射两侧必须是纯标识符、whereClause 必须过 WHERE 白名单、
+        // 目标表名必须是合法标识符。同步版 EtlTools.transformAndInsert 一直有这三道，异步版曾全部遗漏——
+        // 当时 "(SELECT PASSWORD FROM USERS):X" 是个合法映射，whereClause 也能直接闭合谓词追加 SQL。
+        // 引擎在派发前已经过一遍闸；这里再走一遍是因为 handler 也可以被直接调用（测试与将来的调用方），
+        // 而且解析结果本身就是下面建 SQL 要用的东西，不算重复逻辑。
+        EtlStepGuard.ColumnMapping mapping = EtlStepGuard.parseColumnMapping(columnMapping, dialect);
+        EtlStepGuard.requireSafeWhereClause(whereClause);
+        List<String> sourceColumns = mapping.sourceColumns();
+        List<String> targetColumns = mapping.targetColumns();
+        List<String> transforms = mapping.transforms();
 
         StringBuilder selectSql = new StringBuilder("SELECT ");
         List<String> selectExprs = new ArrayList<>();
         for (int i = 0; i < sourceColumns.size(); i++) {
-            String src = sourceColumns.get(i);
+            // quote 而非裸拼：校验已经保证是纯标识符，quote 再挡住关键字冲突与大小写敏感的目标库。
+            String src = dialect.quote(sourceColumns.get(i));
             String transform = transforms.get(i);
             String expr = switch (transform) {
                 case "upper" -> "UPPER(" + src + ")";
@@ -79,7 +79,7 @@ public class TransformStepHandler implements StepHandler {
             selectSql.append(" WHERE ").append(whereClause);
         }
 
-        String targetTable = dialect.normalizeTableName(step.targetTable());
+        String targetTable = EtlStepGuard.requireTargetTable(step, dialect);
         int batchSize = engine.batchSize(step);
 
         // Column labels come from the SELECT above, which aliases every expression to its target

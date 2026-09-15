@@ -35,12 +35,18 @@ final class EtlSql {
     }
 
     /**
-     * {@code INSERT INTO table (quoted columns) VALUES (?, ?, ...)}.
+     * {@code INSERT INTO "table" (quoted columns) VALUES (?, ?, ...)}.
+     *
+     * <p>表名以前是裸拼的：列名走了 {@code quote}，表名直接字符串相加，而调用点只做了
+     * {@code dialect.normalizeTableName()}——那只是大小写归一，不是校验。所以这里自己再断言一次
+     * 并同样 {@code quote}。校验在 {@link EtlStepGuard} 已经做过，这一层是纵深防御：
+     * 它是最后一个还知道「这段文本要变成表名」的地方。
      */
     static String insertInto(DatabaseDialect dialect, String table, List<String> columns) {
+        EtlStepGuard.requireIdentifier(table, dialect, "targetTable");
         String columnList = String.join(", ", columns.stream().map(dialect::quote).toList());
         String placeholders = String.join(", ", columns.stream().map(c -> "?").toList());
-        return "INSERT INTO " + table + " (" + columnList + ") VALUES (" + placeholders + ")";
+        return "INSERT INTO " + dialect.quote(table) + " (" + columnList + ") VALUES (" + placeholders + ")";
     }
 
     /**

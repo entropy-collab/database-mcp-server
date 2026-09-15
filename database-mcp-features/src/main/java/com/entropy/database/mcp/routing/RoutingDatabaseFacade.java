@@ -53,11 +53,27 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
      * <p>A facade is a thin, immutable wrapper around a context, but it used to be re-allocated on
      * every single delegated call. Entries are replaced as soon as {@code acquire} hands back a
      * different context object, so a rebuilt pool is never served by a facade pointing at the old
-     * one, and the map never grows beyond the number of registered connection names. Pool lifetime
-     * is unaffected: pools are closed by the manager's lease-eviction listener, not by
-     * reachability from here.
+     * one. Pool lifetime is unaffected: pools are closed by the manager's lease-eviction listener,
+     * not by reachability from here.
+     *
+     * <p>条目的<em>移除</em>只发生在管理器的驱逐回调里（见 {@link #releaseFacade}）。这条路径必须存在：BYOK 的
+     * 连接名是调用方通过 {@code createNamedConnection} 任意指定的，只增不删的话，历史上用过的每一个名字都会永久
+     * 留下一个 entry，而每个 entry 经 {@code ByokDataSourceContext → ByokInfrastructure} 强引用一整套
+     * {@code DatabaseCache}（queryCache + metadataCache + BloomFilter），还钉住一个已经 close 的
+     * {@code HikariDataSource}；连接被驱逐之后没人再访问这个名字，Caffeine 那套 {@code expireAfterAccess} 也不会
+     * 来清。所以这里的上界是「当前活着的连接数」，而不是「历史用过的连接名数」。
      */
-    private final ConcurrentHashMap<String, ByokDatabaseFacade> facades = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CachedFacade> facades = new ConcurrentHashMap<>();
+
+    /**
+     * 一个缓存好的 facade 连同它包着的上下文。
+     *
+     * <p>上下文单独存一份，是为了在驱逐时能按对象身份数出「还有没有别的名字指向同一个物理连接」——别名与规范名
+     * 共享同一个 {@link ByokDataSourceContext}，也就是共享同一份 {@code DatabaseCache}。只靠
+     * {@code ByokDatabaseFacade} 自己问不出这件事：它只提供 {@code wraps(context)}，需要先有 context 才能比。
+     */
+    private record CachedFacade(ByokDataSourceContext context, ByokDatabaseFacade facade) {
+    }
 
     /**
      * @param backupService injected lazily because it resolves connections through the same
@@ -68,6 +84,36 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
                                  @Lazy DatabaseBackupService backupService) {
         this.dynamicDataSourceManager = dynamicDataSourceManager;
         this.backupService = backupService;
+        // 在构造器里订阅而不是 @PostConstruct：这个类也会被直接 new 出来用（测试、以及任何不经过容器的装配），
+        // @PostConstruct 在那些路径上根本不会被调用，缓存就又退化成只增不删。
+        // 传出去的是只捕获 facades 这一个 map 的 lambda，而不是 this::releaseFacade——回调可能在构造器还没走完
+        // 时就被另一个线程触发，把 this 泄漏给外部代码会让它看到一个半成品对象。facades 是带初始化器的字段，
+        // 执行到这一行时已经赋值完成。
+        ConcurrentHashMap<String, CachedFacade> registry = this.facades;
+        dynamicDataSourceManager.addEvictionListener(key -> releaseFacade(registry, key));
+    }
+
+    /**
+     * 连接名被驱逐时丢掉它的 facade。
+     *
+     * <p>static：理由见构造器。会被 Caffeine 的通知线程调用，所以只做 map 操作，不抛异常。
+     *
+     * <p>顺手清掉这个连接的查询/元数据缓存，但只在没有别的名字还指向同一个上下文时才清：别名与规范名共享同一份
+     * {@code DatabaseCache}，别名过期时无条件 invalidateAll 会把规范名正在用的缓存一起冷掉。判据与管理器侧的
+     * {@code closeIfUnreferenced} 一致——按对象身份数引用，而不是另开一个计数器。
+     */
+    private static void releaseFacade(ConcurrentHashMap<String, CachedFacade> facades, String key) {
+        CachedFacade removed = facades.remove(key);
+        if (removed == null) {
+            return;
+        }
+        boolean stillShared = facades.values().stream()
+                .anyMatch(other -> other.context() == removed.context());
+        if (!stillShared) {
+            // 池已经没人引用了（管理器那边同时在关它），这份缓存连同 BloomFilter 一起清掉，不必等 GC
+            removed.facade().clearCache(key);
+        }
+        log.debug("Released cached facade for connection '{}' (cache cleared: {})", key, !stillShared);
     }
 
     // ─── Helper ────────────────────────────────────────────────────────────
@@ -143,7 +189,10 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     private ByokDatabaseFacade resolveFacade(String connection) {
         ByokDataSourceContext context = resolveContext(connection);
         return facades.compute(context.getKey(), (key, cached) ->
-                cached != null && cached.wraps(context) ? cached : new ByokDatabaseFacade(context));
+                        cached != null && cached.facade().wraps(context)
+                                ? cached
+                                : new CachedFacade(context, new ByokDatabaseFacade(context)))
+                .facade();
     }
 
     // ─── Read Operations ───────────────────────────────────────────────────
@@ -210,6 +259,11 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     @Override
     public com.entropy.database.mcp.domain.PlanAnalysis explainPlan(String sql, String connection) {
         return resolveFacade(connection).explainPlan(sql, connection);
+    }
+
+    @Override
+    public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
+        return resolveFacade(connection).explainPlanRows(sql, connection);
     }
 
     // ─── Write Operations ──────────────────────────────────────────────────

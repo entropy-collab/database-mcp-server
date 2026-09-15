@@ -146,6 +146,11 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
         return context.getExecutionPlanRepository().analyzeExecutionPlan(sql);
     }
 
+    @Override
+    public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
+        return context.getExecutionPlanRepository().explainPlanRows(sql);
+    }
+
     // ─── Write Operations ──────────────────────────────────────────────────
 
     @Override
