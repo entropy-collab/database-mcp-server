@@ -7,7 +7,7 @@
     <parent>
         <groupId>com.entropy.agent</groupId>
         <artifactId>database-mcp-parent</artifactId>
-        <version>0.4.0</version>
+        <version>0.5.2</version>
     </parent>
 
     <artifactId>database-mcp-features</artifactId>
@@ -29,6 +29,15 @@
         <dependency>
             <groupId>com.github.jsqlparser</groupId>
             <artifactId>jsqlparser</artifactId>
+        </dependency>
+        <!--
+            质量报告导出用的是自建 ObjectMapper（不是 Spring 注入的那个），而报告里有 Instant 字段，
+            所以这个模块得显式依赖 jsr310——不写就只有 databind 传递进来，导出时抛
+            InvalidDefinitionException。版本由 Spring Boot BOM 管。
+        -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
         <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>

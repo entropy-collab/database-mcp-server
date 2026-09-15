@@ -7,7 +7,7 @@
     <parent>
         <groupId>com.entropy.agent</groupId>
         <artifactId>database-mcp-parent</artifactId>
-        <version>0.4.0</version>
+        <version>0.5.2</version>
     </parent>
 
     <artifactId>database-mcp-infra</artifactId>
@@ -17,7 +17,8 @@
     <dependencies>
         <!--
             dialect 传递带入 core，这里仍显式写出 core：infra 直接用 core 的 exception /
-            domain / session，不是只借道 dialect。
+            domain / session，不是只借道 dialect。contract 同理：BatchInsertHelper 直接用
+            SqlIdentifiers、多处直接用 ErrorCode / McpValidationException。
         -->
         <dependency>
             <groupId>com.entropy.agent</groupId>
@@ -26,6 +27,10 @@
         <dependency>
             <groupId>com.entropy.agent</groupId>
             <artifactId>database-mcp-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.entropy.agent</groupId>
+            <artifactId>database-mcp-contract</artifactId>
         </dependency>
 
         <!-- JdbcTemplate + HikariCP（monitor 包直接读 HikariPoolMXBean） -->
