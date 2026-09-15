@@ -36,4 +36,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 ENV JAVA_OPTS="-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
 ENV SPRING_PROFILES_ACTIVE=production
 
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=production -jar app.jar"]
+# profile 只由 SPRING_PROFILES_ACTIVE 决定。这里刻意不再重复
+# -Dspring.profiles.active=production：命令行 -D 的优先级高于环境变量，写死会让
+# docker run -e SPRING_PROFILES_ACTIVE=... 与 compose 里的设置全部失效。
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]

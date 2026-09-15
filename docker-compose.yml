@@ -6,15 +6,19 @@ services:
     env_file:
       - .env
     environment:
-      # Oracle 数据库连接（统一使用 DB_* 环境变量，prod profile）
-      DB_HOST: ${DB_HOST}
-      DB_NAME: ${DB_NAME}
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
       # JVM 配置
       JAVA_OPTS: ${JAVA_OPTS}
-      # 启用生产环境 profile
-      SPRING_PROFILES_ACTIVE: prod
+      # 生产 profile 对应 application-production.yml；写 prod 会静默降级到默认配置
+      SPRING_PROFILES_ACTIVE: production
+      # 必填：/mcp 的 HTTP Basic 管理员密码。刻意不给 :- 默认值——留空会让容器带着空密码
+      # 起来（服务端会拒绝空白密码并启动失败），用 ${VAR} 的形式让 compose 在变量缺失时
+      # 就先给出警告，问题停在编排层而不是等容器反复重启。
+      MCP_SECURITY_ADMIN_PASSWORD: ${MCP_SECURITY_ADMIN_PASSWORD}
+      # 可选：审计日志落库时才需要，不配则审计只写文件
+      MCP_AUDIT_DB_PASSWORD: ${MCP_AUDIT_DB_PASSWORD:-}
+      # 可选：密文凭证的 RSA 私钥。空串等同于没配（机制关闭，服务照常起来），
+      # 所以这里可以安全地给 :- 默认值，与上面那个必填密码的处理刻意不同。
+      MCP_CREDENTIAL_PRIVATE_KEY: ${MCP_CREDENTIAL_PRIVATE_KEY:-}
     ports:
       - "${SERVER_PORT:-8686}:8686"
     deploy:
