@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.util;
 
+import com.entropy.database.mcp.contract.SqlIdentifiers;
 import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.exception.ErrorCode;
 
@@ -63,13 +64,19 @@ public final class ValidationUtils {
     private ValidationUtils() {
     }
 
+    /**
+     * 校验一个会被字面拼进 SQL 的标识符。
+     *
+     * <p>规则本身委派给 {@link SqlIdentifiers#requirePlain}：此前这里自带一套
+     * {@code [A-Za-z][A-Za-z0-9_$#]*}，与 {@code DialectUtils} / {@code BatchInsertHelper} 的三套
+     * 正则各差一点，同一个表名在不同入口的接受集不同。方法名与 {@link McpValidationException}
+     * 保持不变，调用方无需改动。
+     *
+     * <p>行为差异只有一处：下划线开头的标识符（{@code _tmp_stage}）此前被这里拒掉，现在放行——
+     * 另外三套实现一直是放行的，且下划线不能逃逸 SQL 字面量，收紧没有安全收益。
+     */
     public static void validateIdentifier(String value, String paramName) {
-        if (value == null || value.isBlank()) {
-            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED, paramName + " cannot be blank");
-        }
-        if (!value.matches("[A-Za-z][A-Za-z0-9_$#]*")) {
-            throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED, paramName + " contains invalid characters: " + value);
-        }
+        SqlIdentifiers.requirePlain(value, paramName);
     }
 
     public static void validateHost(String host) {

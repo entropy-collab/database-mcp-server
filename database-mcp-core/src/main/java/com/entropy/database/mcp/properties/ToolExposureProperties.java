@@ -41,7 +41,9 @@ import java.util.Set;
  * <p><strong>注意 {@code include} 能穿透 {@code plane}。</strong>它就是"例外"的意思，把它做成
  * 无法覆盖 plane 会让"数据面加一个受控写工具"这种正当需求无路可走。plane 是暴露面收敛手段，
  * 不是安全边界——真正的闸在 {@code entropy.mcp.database.ddl.allowed} 与
- * {@code entropy.mcp.security.*}。
+ * {@code entropy.mcp.security.*}，它们拦的是<em>执行</em>：即使 include 把 executeDdl 放进
+ * 数据面，ddl.allowed=false 时它仍会在入口被拒。反过来说，把工具从 tools/list 里摘掉不等于
+ * 禁用了它对应的能力。
  *
  * @param plane   部署面预设，取值 {@code all} / {@code data} / {@code control}；空值等同 {@code all}
  * @param groups  只暴露这些分组；空集表示不按分组过滤

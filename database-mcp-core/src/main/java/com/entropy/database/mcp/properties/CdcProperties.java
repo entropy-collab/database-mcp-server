@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 /**
  * CDC (Change Data Capture) module configuration.
@@ -34,7 +35,11 @@ public record CdcProperties(
     public static final long DEFAULT_POLL_INTERVAL_MS = 1000L;
     public static final int DEFAULT_MAX_MIRROR_TASKS = 10;
 
-    /** 归一化理由同 {@link CatalogProperties}：非正数按"未配置"处理，而不是启动失败。 */
+    /**
+     * 归一化理由同 {@link CatalogProperties}：非正数按"未配置"处理，而不是启动失败。
+     * {@code @ConstructorBinding} 的必要性见 {@link BackupProperties}。
+     */
+    @ConstructorBinding
     public CdcProperties {
         maxEventsPerPoll = maxEventsPerPoll > 0 ? maxEventsPerPoll : DEFAULT_MAX_EVENTS_PER_POLL;
         defaultPollIntervalMs = defaultPollIntervalMs > 0 ? defaultPollIntervalMs : DEFAULT_POLL_INTERVAL_MS;

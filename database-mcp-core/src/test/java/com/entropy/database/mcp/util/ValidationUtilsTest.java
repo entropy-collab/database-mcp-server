@@ -133,20 +133,54 @@ class ValidationUtilsTest {
         }
     }
 
+    /**
+     * 标识符规则自本版起由 {@code SqlIdentifiers} 单点持有（contract 模块），本组用例只验证
+     * {@code validateIdentifier} 这个委派入口的对外行为：方法名、异常类型与接受集。
+     */
     @Nested
     class Identifiers {
 
-        @Test
-        void acceptsAPlainIdentifier() {
-            assertThatCode(() -> ValidationUtils.validateIdentifier("TBL_STL_TXN", "tableName"))
+        @ParameterizedTest
+        @ValueSource(strings = {
+                "TBL_STL_TXN",
+                "_tmp_stage",          // 统一前被这里拒掉（旧正则要求首字符是字母），现在放行
+                "V$SESSION",           // Oracle 数据字典视图，$# 是合法字符
+                "SYS#"
+        })
+        void acceptsAPlainIdentifier(String name) {
+            assertThatCode(() -> ValidationUtils.validateIdentifier(name, "tableName"))
                     .doesNotThrowAnyException();
         }
 
-        @Test
-        void rejectsInjection() {
-            assertThatThrownBy(() -> ValidationUtils.validateIdentifier("t; DROP TABLE x", "tableName"))
+        @ParameterizedTest
+        @ValueSource(strings = {
+                "t; DROP TABLE x",
+                "t' OR '1'='1",
+                "\"quoted\"",
+                "my table",
+                "t--comment",
+                "t/*comment",
+                "订单表",
+                "1st_table"
+        })
+        void rejectsInjection(String name) {
+            assertThatThrownBy(() -> ValidationUtils.validateIdentifier(name, "tableName"))
                     .isInstanceOf(McpValidationException.class)
                     .hasMessageContaining("tableName");
+        }
+
+        @Test
+        void rejectsAnOverlongIdentifier() {
+            assertThatThrownBy(() -> ValidationUtils.validateIdentifier("a".repeat(129), "tableName"))
+                    .isInstanceOf(McpValidationException.class)
+                    .hasMessageContaining("tableName");
+        }
+
+        @Test
+        void rejectsBlank() {
+            assertThatThrownBy(() -> ValidationUtils.validateIdentifier(null, "tableName"))
+                    .isInstanceOf(McpValidationException.class)
+                    .hasMessageContaining("cannot be blank");
         }
     }
 }

@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -56,6 +57,13 @@ public record ConfiguredConnectionProperties(
         Map<String, Definition> connections
 ) {
 
+    /**
+     * {@code @ConstructorBinding} 不能省，而且这一处的后果最重：少了它，
+     * {@code entropy.mcp.database.connections.*} 整段会被静默忽略——预声明连接这个功能会
+     * 完全不生效，启动日志里连一行 WARN 都没有，只是 {@code listConnections} 永远空着。
+     * 机理见 {@link BackupProperties}。
+     */
+    @ConstructorBinding
     public ConfiguredConnectionProperties {
         connections = connections == null ? Map.of() : Map.copyOf(new LinkedHashMap<>(connections));
     }

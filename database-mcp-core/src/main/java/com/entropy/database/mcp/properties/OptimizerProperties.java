@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties(prefix = "entropy.mcp.database.optimizer")
 public record OptimizerProperties(
@@ -27,7 +28,11 @@ public record OptimizerProperties(
     public static final int DEFAULT_MAX_SUGGESTIONS_PER_QUERY = 10;
     public static final int DEFAULT_MAX_INDEX_RECOMMENDATIONS = 5;
 
-    /** 归一化理由同 {@link CatalogProperties}：非正数按"未配置"处理，而不是启动失败。 */
+    /**
+     * 归一化理由同 {@link CatalogProperties}：非正数按"未配置"处理，而不是启动失败。
+     * {@code @ConstructorBinding} 的必要性见 {@link BackupProperties}。
+     */
+    @ConstructorBinding
     public OptimizerProperties {
         maxSuggestionsPerQuery = maxSuggestionsPerQuery > 0
                 ? maxSuggestionsPerQuery : DEFAULT_MAX_SUGGESTIONS_PER_QUERY;

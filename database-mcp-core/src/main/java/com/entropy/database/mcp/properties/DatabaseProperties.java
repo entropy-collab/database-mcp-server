@@ -195,6 +195,14 @@ public record DatabaseProperties(
         }
     }
 
+    /**
+     * DDL 执行闸门。读它的是 {@code DdlExecutionTools}（executeDdl / executeDdlBatch /
+     * executeDdlRemote）与 {@code CdcTools.createMirrorTable}，四个入口一个都不能漏——只接一半
+     * 比完全不接更糟，运维会以为 allowed=false 已经封住了改结构的路。
+     *
+     * <p>{@code allowed} 缺省即 false：这个开关放行的是不可回滚的结构变更（Oracle/MySQL 的 DDL
+     * 隐式提交），配置写错时应当停在"什么都做不了"，而不是"什么都能做"。
+     */
     public record DdlProperties(boolean allowed) {
         public DdlProperties {
             allowed = Boolean.TRUE.equals(allowed);

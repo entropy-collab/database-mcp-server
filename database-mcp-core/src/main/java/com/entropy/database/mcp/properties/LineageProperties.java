@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 /**
  * Configuration properties for the data lineage module.
@@ -29,6 +30,8 @@ public record LineageProperties(
     boolean autoAnalyze,
     int maxTablesPerGraph
 ) {
+    /** {@code @ConstructorBinding} 的必要性见 {@link BackupProperties}：少了它整段配置会被静默忽略。 */
+    @ConstructorBinding
     public LineageProperties {
         enabled = Boolean.TRUE.equals(enabled);
         foreignKeyEnabled = Boolean.TRUE.equals(foreignKeyEnabled);

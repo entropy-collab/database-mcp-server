@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.properties;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties(prefix = "entropy.mcp.database.quality")
 public record QualityProperties(
@@ -26,6 +27,8 @@ public record QualityProperties(
     boolean alertOnCritical,
     int alertThresholdIssues
 ) {
+    /** {@code @ConstructorBinding} 的必要性见 {@link BackupProperties}：少了它整段配置会被静默忽略。 */
+    @ConstructorBinding
     public QualityProperties {
         enabled = Boolean.TRUE.equals(enabled);
         maxSampleRows = maxSampleRows > 0 ? maxSampleRows : 10000;
