@@ -37,9 +37,20 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtGra
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 
+import java.util.Locale;
+import java.util.Set;
+
 /**
  * Security configuration. Always active to override Spring Boot defaults.
- * Authentication is controlled by entropy.mcp.security.enabled (default: false).
+ * Authentication is controlled by entropy.mcp.security.enabled.
+ *
+ * <p><b>破坏性变更（0.4.0 引入，沿用至今）</b>：默认值由 {@code false} 改为 {@code true}。理由是这个开关的两个
+ * 方向不对称——开着而没配密码会启动失败（响亮、当场发现），关着则是 {@code /mcp} 对任何能连上端口
+ * 的人开放、且每个已注册的 BYOK 连接（含有 DDL 权限的）都能被打穿（无声、要靠读日志才发现）。
+ * 默认值应该站在会响的那一侧。本地开发需要免密时显式写 {@code entropy.mcp.security.enabled=false}。
+ *
+ * <p>并且从 0.5.2 起，{@code production} profile 下把它关掉不再只是一条 {@code log.warn}，而是直接让上下文
+ * 启动失败，除非同时显式打开 {@link #allowUnauthenticatedInProduction} 这个逃生阀。
  *
  * <p>{@code proxyBeanMethods = false}：两个 {@code @Bean} 方法之间没有互相调用，不需要
  * CGLIB 代理。
@@ -50,11 +61,53 @@ public class SecurityConfig {
 
     private static final Logger log = LoggerFactory.getLogger(SecurityConfig.class);
 
-    @Value("${entropy.mcp.security.enabled:false}")
+    /** 密码只认真实环境变量或真实 JVM {@code -D}，见 {@link #resolveAdminPassword()}。 */
+    private static final String ADMIN_PASSWORD_ENV = "MCP_SECURITY_ADMIN_PASSWORD";
+    private static final String ADMIN_PASSWORD_SYSTEM_PROPERTY = "mcp.security.admin-password";
+
+    /**
+     * 被当作「生产」的 profile 名。仓库里实际存在的是 {@code application-production.yml}
+     * （{@code Dockerfile}、{@code docker-compose.yml}、{@code .env.example} 都写
+     * {@code SPRING_PROFILES_ACTIVE=production}），{@code prod} 一并算进来只是因为它是最常见的手写简称，
+     * 漏判的代价（生产裸跑）远大于误判的代价（本地被迫多写一个开关）。
+     */
+    private static final Set<String> PRODUCTION_PROFILES = Set.of("production", "prod");
+
+    /** 逃生阀的属性名，出现在启动失败信息里，所以抽成常量避免两处文案漂移。 */
+    private static final String ALLOW_UNAUTHENTICATED_IN_PRODUCTION =
+        "entropy.mcp.security.allow-unauthenticated-in-production";
+
+    @Value("${entropy.mcp.security.enabled:true}")
     private boolean securityEnabled;
+
+    /**
+     * production profile 下允许裸跑的显式逃生阀，默认 {@code false}。
+     *
+     * <p>为什么留阀而不是完全堵死：仓库的部署文件里确实存在 {@code ENTROPY_MCP_SECURITY_ENABLED=false}，
+     * 硬堵的结果通常是有人把这段校验直接删掉或改回 warn，安全性反而更差。留一个必须显式写出、名字长到
+     * 不好意思提交的开关，可以让「我知道这套生产环境在裸跑」变成配置里 grep 得到、code review 拦得住的事实。
+     *
+     * <p>否决的方案：(1) 只提高日志级别到 error——照样没人看；(2) 用 {@code @Profile("!production")} 挂条件
+     * bean——条件不满足时是「少一个 bean」，症状是 404/403 而不是一条能读懂的启动错误；(3) 新建一个
+     * {@code SecurityProperties} 类——{@code entropy.mcp.security.*} 一直由本类用 {@code @Value} 直读
+     * （{@code enabled}、{@code admin-username} 都是），为一个布尔值引入第二处真相不值得。
+     */
+    @Value("${" + ALLOW_UNAUTHENTICATED_IN_PRODUCTION + ":false}")
+    private boolean allowUnauthenticatedInProduction;
 
     @Value("${entropy.mcp.security.admin-username:admin}")
     private String adminUsername;
+
+    private final Environment environment;
+
+    /**
+     * {@link Environment} 走构造注入而不是 {@code System.getProperty("spring.profiles.active")}：
+     * 后者拿不到 {@code SPRING_PROFILES_ACTIVE} 环境变量、也拿不到 {@code @ActiveProfiles} 与
+     * {@code spring.profiles.include} 合并后的结果，正好在容器部署这条最需要生效的路径上失灵。
+     */
+    public SecurityConfig(Environment environment) {
+        this.environment = environment;
+    }
 
     /**
      * Make the unauthenticated deployment mode impossible to run into by accident.
@@ -64,22 +117,63 @@ public class SecurityConfig {
      * DDL rights — is reachable through it. That is a legitimate choice for a laptop, and a
      * serious exposure anywhere else, so it is stated explicitly at startup instead of being
      * inferable only from the config file.
+     *
+     * <p><b>production profile 下不再只是告警，而是直接让上下文起不来。</b>原因是 warn 这一档已经被证明
+     * 不够：日志里那段横幅存在期间，部署文件里照样写着 {@code ENTROPY_MCP_SECURITY_ENABLED=false}，
+     * 而关掉鉴权不只是放开 {@code /mcp}——{@code anyRequest().permitAll()} 同时放开了会回放原文 SQL 的
+     * {@code /api/**} 审计接口和全部 actuator 端点，100+ 个工具里包含 {@code executeDdl}、
+     * {@code insertData}、{@code backupData}、{@code killSession}。启动失败是这里唯一会被人当场看见的信号。
      */
     @PostConstruct
-    void warnIfUnauthenticated() {
+    void failFastOrWarnIfUnauthenticated() {
         if (securityEnabled) {
             log.info("MCP HTTP authentication is ENABLED; /mcp requires an authenticated principal.");
             return;
         }
+        String productionProfile = activeProductionProfile();
+        if (productionProfile != null && !allowUnauthenticatedInProduction) {
+            throw new IllegalStateException(
+                "production profile 下不允许关闭鉴权；如确需裸跑请显式设置 "
+                + ALLOW_UNAUTHENTICATED_IN_PRODUCTION + "=true 并自行承担。"
+                + " (active profile '" + productionProfile
+                + "' + entropy.mcp.security.enabled=false: /mcp、/api/** 审计接口（含原文 SQL）"
+                + "与全部 actuator 端点都会无凭证开放，其中包括 executeDdl / insertData / backupData /"
+                + " killSession 等写操作与运维操作工具。正常的修法是删掉那处"
+                + " entropy.mcp.security.enabled=false 覆盖（ENTROPY_MCP_SECURITY_ENABLED 环境变量也算）"
+                + "并配置 " + ADMIN_PASSWORD_ENV + "。)");
+        }
         log.warn("""
                 ================================================================
-                MCP HTTP authentication is DISABLED (entropy.mcp.security.enabled=false).
+                MCP HTTP authentication is DISABLED.
+                This is not the default — something explicitly set
+                entropy.mcp.security.enabled=false.
                 /mcp accepts unauthenticated requests, which can execute queries,
                 DDL and ETL writes against every registered BYOK connection.
                 Only run this way on a host that is not reachable by others.
-                To enable: set entropy.mcp.security.enabled=true and provide
+                To re-enable: drop that override and provide
                 MCP_SECURITY_ADMIN_PASSWORD.
                 ================================================================""");
+        if (productionProfile != null) {
+            // 逃生阀是打开的，所以不抛；但这条必须单独留痕，好让事后审计能定位到「谁在生产裸跑」。
+            log.error("Running the '{}' profile WITHOUT authentication because {}=true.",
+                productionProfile, ALLOW_UNAUTHENTICATED_IN_PRODUCTION);
+        }
+    }
+
+    /**
+     * 命中的生产 profile 名，没命中返回 {@code null}（返回名字而不是 boolean，是为了让错误信息里能写出
+     * 到底是哪一个 profile 触发的）。
+     *
+     * <p>只看 {@code getActiveProfiles()}：default profile 不该被当成生产，否则本地不带任何 profile
+     * 起服务也会被这条校验挡住。
+     */
+    private String activeProductionProfile() {
+        for (String profile : environment.getActiveProfiles()) {
+            if (profile != null && PRODUCTION_PROFILES.contains(profile.trim().toLowerCase(Locale.ROOT))) {
+                return profile;
+            }
+        }
+        return null;
     }
 
     /**
@@ -96,7 +190,6 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
-            Environment environment,
             ObjectProvider<JwtAuthenticationConverter> jwtAuthenticationConverter) throws Exception {
         http
             .csrf(csrf -> csrf.disable())
@@ -116,6 +209,9 @@ public class SecurityConfig {
                         .requestMatchers("/mcp").authenticated()
                         .anyRequest().denyAll();
                 } else {
+                    // 这里仍然是 permitAll：关掉鉴权的语义就是「整个服务不设门」，把 /api/** 或 actuator
+                    // 单独留成 401 只会让人以为服务是安全的。真正的收口在 @PostConstruct——production
+                    // profile 想走到这个分支必须显式打开逃生阀。
                     auth.requestMatchers("/mcp").permitAll()
                         .anyRequest().permitAll();
                 }
@@ -157,31 +253,58 @@ public class SecurityConfig {
     }
 
     @Bean
-    @ConditionalOnProperty(name = "entropy.mcp.security.enabled", havingValue = "true")
+    @ConditionalOnProperty(name = "entropy.mcp.security.enabled", havingValue = "true",
+            matchIfMissing = true)
     public UserDetailsService userDetailsService(PasswordEncoder passwordEncoder) {
-        if (System.getProperty("mcp.security.admin-password") == null && System.getenv("MCP_SECURITY_ADMIN_PASSWORD") == null) {
-            throw new IllegalStateException(
-                "MCP security is enabled but no admin password is configured. " +
-                "Set MCP_SECURITY_ADMIN_PASSWORD or mcp.security.admin-password property.");
-        }
-        String adminPassword = System.getenv("MCP_SECURITY_ADMIN_PASSWORD") != null
-            ? System.getenv("MCP_SECURITY_ADMIN_PASSWORD")
-            : System.getProperty("mcp.security.admin-password");
-
-        // BCrypt encode the password - format: $2a$10$<22 char salt><31 char hash>
-        String encodedPassword = passwordEncoder.encode(adminPassword);
+        String adminPassword = resolveAdminPassword();
 
         UserDetails admin = User.builder()
             .username(adminUsername)
-            .password(encodedPassword)  // Store encoded password
+            .password(passwordEncoder.encode(adminPassword))
             .roles("ADMIN", "DBA")
             .build();
 
         return new InMemoryUserDetailsManager(admin);
     }
 
+    /**
+     * 解析管理员密码，缺失或空白都直接让上下文起不来。
+     *
+     * <p>刻意不走 Spring {@code Environment}：那会让 {@code entropy.mcp.security.admin-password}
+     * 能写进 yml 并被提交进仓库。只认真实环境变量或真实 JVM {@code -D}，两者都不会进版本控制。
+     */
+    private static String resolveAdminPassword() {
+        return requireNonBlankPassword(System.getenv(ADMIN_PASSWORD_ENV),
+                System.getProperty(ADMIN_PASSWORD_SYSTEM_PROPERTY));
+    }
+
+    /**
+     * 环境变量优先于系统属性，两者都不可用时抛错。
+     *
+     * <p>为什么空白也要拒：{@code docker-compose.yml} 里 {@code ${MCP_SECURITY_ADMIN_PASSWORD:-}}
+     * 这类写法在变量未设时会传入空串，{@code .env} 里写一行 {@code MCP_SECURITY_ADMIN_PASSWORD=}
+     * 也一样。只判 null 的话服务会带着「admin + 空密码」正常启动并对外提供鉴权，比起不来糟得多。
+     *
+     * <p>空白的环境变量会继续回退到系统属性，而不是直接失败：环境变量被容器编排设成空串是常见的
+     * "没配"，此时 {@code -D} 是更明确的意图表达。
+     */
+    static String requireNonBlankPassword(String fromEnvironment, String fromSystemProperty) {
+        if (fromEnvironment != null && !fromEnvironment.isBlank()) {
+            return fromEnvironment;
+        }
+        if (fromSystemProperty != null && !fromSystemProperty.isBlank()) {
+            return fromSystemProperty;
+        }
+        throw new IllegalStateException(
+            "MCP security is enabled but no admin password is configured. Set the "
+            + ADMIN_PASSWORD_ENV + " environment variable (or the "
+            + ADMIN_PASSWORD_SYSTEM_PROPERTY + " system property) to a non-blank value, "
+            + "or set entropy.mcp.security.enabled=false to run without authentication.");
+    }
+
     @Bean
-    @ConditionalOnProperty(name = "entropy.mcp.security.enabled", havingValue = "true")
+    @ConditionalOnProperty(name = "entropy.mcp.security.enabled", havingValue = "true",
+            matchIfMissing = true)
     public JwtAuthenticationConverter jwtAuthenticationConverter() {
         JwtGrantedAuthoritiesConverter grantedAuthoritiesConverter = new JwtGrantedAuthoritiesConverter();
         grantedAuthoritiesConverter.setAuthorityPrefix("ROLE_");

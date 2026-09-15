@@ -338,10 +338,19 @@ class SqlValidatorTest {
         }
 
         @Test
-        @DisplayName("whitelist is only applied to SELECT-shaped statements")
-        void whitelistSkippedForNonSelectStatements() {
-            // On the DDL path a DROP is not a select, so the table whitelist never sees it.
-            assertThatCode(() -> validatorWithTables("USERS").validateDdl("DROP TABLE admin"))
+        @DisplayName("whitelist applies to writes and DDL, not just to selects")
+        void whitelistAppliesToEveryStatementShape() {
+            // 这条用例原本断言的是反面：「DDL 路径上 DROP 不是 select，白名单永远看不到它」。
+            // 那等于把一个洞钉成了契约——配了 allowed-tables 的部署方以为「只能碰这几张表」，
+            // 而 insertData / upsertData / executeDdl 的目标表当时完全不受约束。
+            SqlValidatorImpl v = validatorWithTables("USERS");
+            assertThat(assertThrows(McpSqlValidationException.class,
+                () -> v.validateDdl("DROP TABLE admin")).getMessage())
+                .startsWith("Tables not allowed:").contains("ADMIN");
+            assertThat(assertThrows(McpSqlValidationException.class,
+                () -> v.validateDdl("INSERT INTO admin VALUES (1)")).getMessage())
+                .startsWith("Tables not allowed:").contains("ADMIN");
+            assertThatCode(() -> v.validateDdl("INSERT INTO users VALUES (1)"))
                 .doesNotThrowAnyException();
         }
 
@@ -524,20 +533,54 @@ class SqlValidatorTest {
             "INSERT INTO users VALUES (1)",
             "UPDATE users SET name = 'x'",
             "DELETE FROM users",
+            "MERGE INTO users USING staging ON (users.id = staging.id) "
+                + "WHEN MATCHED THEN UPDATE SET users.name = staging.name",
             "DROP TABLE users",
             "ALTER TABLE users ADD age INT",
             "TRUNCATE TABLE users",
             "CREATE TABLE t (a INT)",
-            "GRANT SELECT ON users TO bob",
-            "CALL some_proc()"
+            "CREATE VIEW v AS SELECT * FROM users",
+            "CREATE MATERIALIZED VIEW mv AS SELECT * FROM users",
+            "CREATE INDEX i ON users(id)",
+            "CREATE SEQUENCE s",
+            "COMMENT ON TABLE users IS 'x'"
         })
-        void ddlPathSkipsTheOperationWhitelist(String sql) {
+        void ddlPathAcceptsWritesToDataObjects(String sql) {
             assertThatCode(() -> validator().validateDdl(sql)).doesNotThrowAnyException();
             rejectedSelect(validator(), sql);
         }
 
-        @ParameterizedTest(name = "validateDdl still refuses unparseable [{0}]")
+        /**
+         * 这条路此前是把操作类型闸门整段短路掉的，于是它什么都放。这些形态没有一个是
+         * 「改数据」，它们改的是执行环境或权限——真正危险的那一类。
+         */
+        @ParameterizedTest(name = "validateDdl refuses [{0}]")
         @ValueSource(strings = {
+            "CREATE FUNCTION f() RETURNS INT",
+            "CREATE PROCEDURE p AS BEGIN NULL; END;",
+            "GRANT SELECT ON users TO bob",
+            "CALL some_proc()",
+            "CREATE USER bob IDENTIFIED BY 'x'",
+            "ALTER SYSTEM SET x = 1",
+            "DROP FUNCTION f"
+        })
+        void ddlPathRefusesEnvironmentAndPrivilegeChanges(String sql) {
+            McpSqlValidationException ex = assertThrows(McpSqlValidationException.class,
+                () -> validator().validateDdl(sql));
+            assertThat(ex.getMessage())
+                .matches("^(DDL statement not allowed|DROP target not allowed): .*");
+        }
+
+        /**
+         * h2 的 {@code CREATE ALIAS}（连同 Oracle 的 {@code CREATE TRIGGER ... BEGIN}）在
+         * jsqlparser 5.3 里压根解析不出来，所以它们止步于 {@code onlyStatementOf} 而不是白名单。
+         * 两条路都通向拒绝，这条用例把「解析失败必须 fail-closed」这个前提钉住——一旦哪天
+         * 换了个更宽容的解析器，它会先响。
+         */
+        @ParameterizedTest(name = "validateDdl refuses unparseable [{0}]")
+        @ValueSource(strings = {
+            "CREATE ALIAS x FOR 'java.lang.Runtime.getRuntime'",
+            "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW BEGIN NULL; END;",
             "DROP TABLE users; DROP TABLE admin",
             "DRP TABLE users",
             "-- only a comment"
@@ -558,7 +601,74 @@ class SqlValidatorTest {
         }
     }
 
+    // ─── Statements that parse as a Select but are not read-only ──────────
+
+    @Nested
+    @DisplayName("selects that are not read-only")
+    class NotActuallyReadOnly {
+
+        /**
+         * 三种写法在 jsqlparser 5.3 下顶层都解析成 {@code PlainSelect}，而校验器原先只看顶层类名，
+         * 于是标着 {@code readOnlyHint=true} 的 {@code executeQuery} 在 PostgreSQL 连接上可以改数据。
+         */
+        @ParameterizedTest(name = "validateSelect refuses [{0}]")
+        @ValueSource(strings = {
+            "WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x",
+            "WITH x AS (INSERT INTO users VALUES (1) RETURNING *) SELECT * FROM x",
+            "WITH x AS (UPDATE users SET name = 'x' RETURNING *) SELECT * FROM x"
+        })
+        void dataModifyingCtesAreRefused(String sql) {
+            assertThat(assertThrows(McpSqlValidationException.class,
+                () -> validator().validateSelect(sql)).getMessage())
+                .startsWith("Data-modifying CTE is not allowed:");
+        }
+
+        @ParameterizedTest(name = "validateSelect refuses [{0}]")
+        @ValueSource(strings = {
+            "SELECT * INTO newtbl FROM users",
+            "SELECT id INTO #tmp FROM users"
+        })
+        void selectIntoIsRefused(String sql) {
+            assertThat(assertThrows(McpSqlValidationException.class,
+                () -> validator().validateSelect(sql)).getMessage())
+                .isEqualTo("SELECT ... INTO writes data and is not allowed");
+        }
+
+        @ParameterizedTest(name = "validateSelect refuses [{0}]")
+        @ValueSource(strings = {
+            "SELECT * FROM users FOR UPDATE",
+            "SELECT * FROM users FOR SHARE"
+        })
+        void rowLockingClausesAreRefused(String sql) {
+            assertThat(assertThrows(McpSqlValidationException.class,
+                () -> validator().validateSelect(sql)).getMessage())
+                .isEqualTo("Row-locking clauses are not allowed on a read path");
+        }
+
+        @Test
+        @DisplayName("a read-only CTE is still accepted")
+        void readOnlyCtesRemainAccepted() {
+            assertThatCode(() -> validator().validateSelect(
+                "WITH recent AS (SELECT * FROM users) SELECT * FROM recent"))
+                .doesNotThrowAnyException();
+            // 嵌套一层，确认递归没有把合法写法误伤
+            assertThatCode(() -> validator().validateSelect(
+                "WITH a AS (SELECT * FROM users), b AS (SELECT * FROM a) SELECT * FROM b"))
+                .doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("the DDL path applies the same check to a select it is handed")
+        void ddlPathAlsoRefusesDataModifyingCtes() {
+            assertThat(assertThrows(McpSqlValidationException.class,
+                () -> validator().validateDdl("WITH x AS (DELETE FROM users RETURNING *) SELECT * FROM x"))
+                .getMessage())
+                .startsWith("Data-modifying CTE is not allowed:");
+        }
+    }
+
     // ─── Configuration surface ────────────────────────────────────────────
+
 
     @Nested
     @DisplayName("configuration surface")

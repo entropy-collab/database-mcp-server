@@ -23,12 +23,20 @@ import com.entropy.database.mcp.domain.StandardizedPlan;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Repository;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -53,14 +61,23 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
 
     /**
      * Get standardized execution plan for a SQL query.
+     *
+     * <p>Oracle 分支按方言能力（{@link DatabaseDialect#explainWritesToPlanTable()}）判定，不再按类名：
+     * 类名判断对子类和 CGLIB 代理都是静默失效。剩下两个分支还按 {@link DatabaseDialect#getDialectName()}
+     * 分派，那只决定「计划结果怎么解析」（Postgres 是 JSON 树、MySQL 是表格行），把它也提成方言契约需要
+     * 每个方言都表态、默认值一错就让 Postgres/MySQL 退化成"无计划"，本次不扩大战场；但至少不再从
+     * {@code getClass().getSimpleName()} 取名字，方言自己报的名字改名时是一处可查的常量。
      */
     @Override
     public StandardizedPlan getExecutionPlan(String sql) {
-        String dialectName = dialect.getClass().getSimpleName();
+        if (dialect.explainWritesToPlanTable()) {
+            return getOracleExecutionPlan(sql);
+        }
+        String dialectName = dialect.getDialectName() == null
+                ? "" : dialect.getDialectName().toLowerCase(Locale.ROOT);
         return switch (dialectName) {
-            case "OracleDialect" -> getOracleExecutionPlan(sql);
-            case "PostgresDialect" -> getPostgresExecutionPlan(sql);
-            case "MySqlDialect" -> getMysqlExecutionPlan(sql);
+            case "postgres", "postgresql" -> getPostgresExecutionPlan(sql);
+            case "mysql", "mariadb" -> getMysqlExecutionPlan(sql);
             default -> createDefaultPlan(sql);
         };
     }
@@ -109,28 +126,7 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
 
     private StandardizedPlan getOracleExecutionPlan(String sql) {
         try {
-            // Validate SQL before using it in EXPLAIN PLAN to prevent injection.
-            // EXPLAIN PLAN wraps the provided SQL text, so any malicious payload in 'sql'
-            // is executed directly — therefore we re-validate with a SELECT-only constraint.
-            sqlValidator.validateSelect(sql);
-
-            // Execute EXPLAIN PLAN - validate statementId to prevent injection
-            String statementId = "mcp_query_" + System.nanoTime();
-            if (!statementId.matches("[a-zA-Z0-9_]+")) {
-                throw new IllegalArgumentException("Invalid statement ID format");
-            }
-            String explainSql = "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + sql;
-            jdbcTemplate.execute(explainSql);
-
-            // Query the plan with all operations using parameterized query
-            String querySql = "SELECT id, parent_id, operation, options, object_name, " +
-                              "cost, cardinality, bytes, access_predicates, filter_predicates " +
-                              "FROM plan_table WHERE statement_id = ? " +
-                              "ORDER BY id";
-
-            List<Map<String, Object>> rows = jdbcTemplate.queryForList(querySql, statementId);
-
-            // Convert to standardized format - use root node (id=0) or first row
+            List<Map<String, Object>> rows = explainPlanRows(sql);
             if (!rows.isEmpty()) {
                 // Find the root node (id=0) which contains the total cost/cardinality
                 Map<String, Object> rootRow = rows.stream()
@@ -147,6 +143,99 @@ public class ExecutionPlanRepositoryImpl implements ExecutionPlanRepository {
         } catch (Exception e) {
             log.warn("Failed to get Oracle execution plan, using fallback", e);
             return createDefaultPlan(sql);
+        }
+    }
+
+    @Override
+    public List<Map<String, Object>> explainPlanRows(String sql) {
+        // EXPLAIN 会把入参原文当语句执行，所以先按"只能是 SELECT"复校一遍。
+        sqlValidator.validateSelect(sql);
+
+        if (dialect.explainWritesToPlanTable()) {
+            // 「EXPLAIN 要不要分两步」是方言能力，不是调用方按类名猜出来的：子类、CGLIB 代理、将来的
+            // Oracle23Dialect 都会让类名判断静默走单步分支，而单步在 Oracle 上恒返回空计划。
+            return planTableExplainRows(sql);
+        }
+
+        String explainSql = dialect.getExplainPlanSql(sql);
+        if (explainSql == null) {
+            return List.of();
+        }
+        if (!dialect.explainPlanReturnsRows()) {
+            // SQL Server 的 SET SHOWPLAN_TEXT：计划走会话输出，批处理本身没有可读结果集。
+            jdbcTemplate.execute(explainSql);
+            return List.of();
+        }
+        return jdbcTemplate.queryForList(explainSql);
+    }
+
+    /**
+     * 两步 EXPLAIN，必须在同一条物理连接上完成（Oracle 是目前唯一这样的方言）。
+     *
+     * <p>{@code EXPLAIN PLAN FOR} 不返回结果集，而是往 {@code SYS.PLAN_TABLE$} 写行；那张表是
+     * 会话级临时表（实测 {@code TEMPORARY=Y / DURATION=SYS$SESSION}），换一条池连接去查就是空的。
+     * 所以这里用 {@link ConnectionCallback} 把"写计划 → 读计划 → 清理"三步锁在同一个 {@link Connection} 上，
+     * 并用 {@code STATEMENT_ID} 把本次结果与同一会话里的历史计划隔开。
+     *
+     * <p>三条语句都由方言给出：品种判断不再出现在这里，语句拼装也不在这里——{@code STATEMENT_ID} 只能
+     * 以字面量入 SQL，校验该字面量是方言的职责。
+     */
+    private List<Map<String, Object>> planTableExplainRows(String sql) {
+        String statementId = "mcp_query_" + System.nanoTime();
+        String explainSql = dialect.explainPlanStatement(statementId, sql);
+        String fetchSql = dialect.planTableFetchSql();
+        if (explainSql == null || fetchSql == null) {
+            // 方言声称走计划表却不给语句：宁可空手回，也不要把裸 EXPLAIN 当查询执行——那在 Oracle 上
+            // 恒返回空结果集，和"这条 SQL 没有计划"无法区分。
+            log.warn("Dialect {} declares a plan table but provides no EXPLAIN/fetch statement",
+                    dialect.getDialectName());
+            return List.of();
+        }
+        String cleanupSql = dialect.planTableCleanupSql();
+
+        return jdbcTemplate.execute((ConnectionCallback<List<Map<String, Object>>>) con -> {
+            try (Statement statement = con.createStatement()) {
+                statement.execute(explainSql);
+            }
+            // 清理必须在 finally 里：EXPLAIN 已经把行写进临时表了，读取阶段抛异常时若跳过清理，这些行会
+            // 一直留在会话里，而连接会被池复用到 max-lifetime——正是下面注释担心的堆积。
+            try {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                try (PreparedStatement fetch = con.prepareStatement(fetchSql)) {
+                    fetch.setString(1, statementId);
+                    try (ResultSet rs = fetch.executeQuery()) {
+                        ResultSetMetaData meta = rs.getMetaData();
+                        while (rs.next()) {
+                            Map<String, Object> row = new LinkedHashMap<>();
+                            for (int i = 1; i <= meta.getColumnCount(); i++) {
+                                row.put(meta.getColumnLabel(i), rs.getObject(i));
+                            }
+                            rows.add(row);
+                        }
+                    }
+                }
+                return rows;
+            } finally {
+                cleanupPlanTable(con, cleanupSql, statementId);
+            }
+        });
+    }
+
+    /**
+     * 删掉本次写进计划表的行。
+     *
+     * <p>临时表按会话保留行，而连接会被池复用最长 max-lifetime，不清理就会一直堆积。清理自身的失败只记
+     * debug：它发生在 finally 里，抛出去会盖掉真正的读取异常，而"没清干净"最多是多留几行计划。
+     */
+    private void cleanupPlanTable(Connection con, String cleanupSql, String statementId) {
+        if (cleanupSql == null) {
+            return;
+        }
+        try (PreparedStatement cleanup = con.prepareStatement(cleanupSql)) {
+            cleanup.setString(1, statementId);
+            cleanup.executeUpdate();
+        } catch (SQLException | RuntimeException e) {
+            log.debug("plan_table cleanup skipped for {}: {}", statementId, e.getMessage());
         }
     }
 

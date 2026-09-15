@@ -36,6 +36,23 @@ import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.statement.ExplainStatement;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
+import net.sf.jsqlparser.statement.alter.Alter;
+import net.sf.jsqlparser.statement.alter.RenameTableStatement;
+import net.sf.jsqlparser.statement.alter.sequence.AlterSequence;
+import net.sf.jsqlparser.statement.comment.Comment;
+import net.sf.jsqlparser.statement.create.index.CreateIndex;
+import net.sf.jsqlparser.statement.create.sequence.CreateSequence;
+import net.sf.jsqlparser.statement.create.table.CreateTable;
+import net.sf.jsqlparser.statement.create.view.AlterView;
+import net.sf.jsqlparser.statement.create.view.CreateView;
+import net.sf.jsqlparser.statement.delete.Delete;
+import net.sf.jsqlparser.statement.drop.Drop;
+import net.sf.jsqlparser.statement.insert.Insert;
+import net.sf.jsqlparser.statement.merge.Merge;
+import net.sf.jsqlparser.statement.refresh.RefreshMaterializedViewStatement;
+import net.sf.jsqlparser.statement.truncate.Truncate;
+import net.sf.jsqlparser.statement.update.Update;
+import net.sf.jsqlparser.statement.upsert.Upsert;
 import net.sf.jsqlparser.statement.select.Fetch;
 import net.sf.jsqlparser.statement.select.FromItem;
 import net.sf.jsqlparser.statement.select.Join;
@@ -65,6 +82,61 @@ public class SqlValidatorImpl implements SqlValidator {
      * SELECT can carry a UNION, a write, or a version-gated payload past every rule below.
      */
     private static final String EXECUTABLE_COMMENT = "/*!";
+
+    /**
+     * {@code validateDdl} 白名单。
+     *
+     * <p><b>先说清这个方法名的误导性</b>：它校验的不是「DDL」，而是「一切会写库的语句」。
+     * {@code DatabaseWriteRepository.executeDdl}（:42）与 {@code ByokWriteRepository}（:36）
+     * 把 {@code insertData} / {@code upsertData} / ETL 的每一条写入都送进这里，
+     * {@code CrossDatabaseTools}（:324、:346）还送进 Oracle 的 CREATE/DROP DATABASE LINK。
+     * 所以白名单必须同时容纳 DML；只放 DDL 会把所有写工具一并打死。
+     *
+     * <p>此前这条路是把操作类型闸门整段短路掉的（{@code !isDdl} 才检查），等于「只要走这条路就什么都能执行」。
+     * 这条路可被 MCP 调用方直接触发，而 app 模块把 h2 以 runtime 作用域打进了可执行 jar，于是
+     * {@code createNamedConnection("jdbc:h2:mem:x")} + {@code CREATE ALIAS x FOR 'java.lang.Runtime.getRuntime'}
+     * + {@code SELECT x()} 就是一条完整的服务端 JVM 内命令执行链。
+     * {@code ByokProperties.UrlGuard} 的 {@code "create alias"} 关键字只作用于 JDBC URL，拦不到这里。
+     *
+     * <p>用白名单而不是黑名单，判断依据是「是不是我认识的类型」：解析成
+     * {@code CreateFunctionalStatement}（CREATE FUNCTION / PROCEDURE / TRIGGER / ALIAS 都归这里）、
+     * {@code Grant}、{@code AlterSystemStatement}、{@code UnsupportedStatement}、
+     * 或任何未列出的类型，一律拒绝。语句压根解析不出来时 {@link #onlyStatementOf} 已经先抛了，
+     * 所以「没想到的形态」在两条路上都落在拒绝那一侧。
+     *
+     * <p>用精确类相等而不是 {@code instanceof}：{@code CreateFunction} / {@code CreateProcedure}
+     * 继承自 {@code CreateFunctionalStatement}，若来日某个安全类型被派生出危险子类，
+     * 精确匹配会把子类挡在外面，而 {@code instanceof} 会放它进来。
+     */
+    private static final Set<Class<? extends Statement>> ALLOWED_DDL_STATEMENTS = Set.of(
+            // DML —— 写工具走的就是这条路，详见上面的说明
+            Insert.class,
+            Update.class,
+            Delete.class,
+            Merge.class,
+            Upsert.class,
+            // 作用于数据对象的 DDL
+            CreateTable.class,
+            CreateIndex.class,
+            CreateView.class,
+            AlterView.class,
+            CreateSequence.class,
+            AlterSequence.class,
+            Alter.class,
+            Truncate.class,
+            Comment.class,
+            RenameTableStatement.class,
+            RefreshMaterializedViewStatement.class,
+            Drop.class);
+
+
+    /**
+     * {@code DROP} 允许作用的对象类型。{@code Drop} 一个类覆盖了 {@code DROP TABLE} 到
+     * {@code DROP USER} 的全部形态，只放行类本身等于连带放行了删角色、删函数、删表空间，
+     * 所以这里按 {@code Drop.getType()} 再收一道。
+     */
+    private static final Set<String> DROPPABLE_OBJECT_TYPES = Set.of(
+            "TABLE", "INDEX", "VIEW", "MATERIALIZED VIEW", "SEQUENCE", "SYNONYM");
 
     private final DatabaseProperties properties;
 
@@ -107,12 +179,23 @@ public class SqlValidatorImpl implements SqlValidator {
         try { stmt = onlyStatementOf(sql.trim()); }
         catch (Exception e) { throw new McpSqlValidationException(sql, "SQL validation error", e); }
         String op = extractOp(stmt);
-        if (!allowedOperations.contains(op.toUpperCase()) && !isDdl)
+        if (isDdl) {
+            requireAllowedDdl(sql, stmt);
+        } else if (!allowedOperations.contains(op.toUpperCase())) {
             throw new McpSqlValidationException(sql, "Operation not allowed: " + op);
+        }
+        // 顶层类名是 Select 不代表这条语句只读，两条路都要过这道检查：DDL 路径同样可能
+        // 递给一条 SELECT（现有测试就钉了这一点），而 CTE 里的 DML 恰恰伪装成 Select。
+        if (stmt instanceof Select select) {
+            requireReadOnlySelect(sql, select);
+        }
         // Capture a consistent snapshot of allowedTables under lock
         Set<String> currentTables;
         synchronized (tablesLock) { currentTables = allowedTables; }
-        if (!currentTables.isEmpty() && isSelect(stmt)) {
+        // 表白名单对所有语句类型生效。此前只在 isSelect(stmt) 时检查，于是配了 allowed-tables 的
+        // 部署方以为「只能碰这几张表」，而 insertData / upsertData / executeDdl 的目标表完全不受约束。
+        // TablesNamesFinder 对 Insert/Update/Delete/Create/Drop 一样能取到被操作对象名。
+        if (!currentTables.isEmpty()) {
             Set<String> unauth = new LinkedHashSet<>();
             for (String table : extractTables(sql, stmt)) {
                 if (!isWhitelisted(table, currentTables)) unauth.add(table);
@@ -157,8 +240,82 @@ public class SqlValidatorImpl implements SqlValidator {
         return "UNKNOWN";
     }
 
-    private boolean isSelect(Statement stmt) {
-        return stmt instanceof Select;
+    /**
+     * 只放行 {@link #ALLOWED_DDL_STATEMENTS} 里的语句类型，{@code DROP} 再按对象类型收一道。
+     *
+     * @throws McpSqlValidationException 语句类型不在白名单内
+     */
+    private void requireAllowedDdl(String sql, Statement stmt) {
+        // SELECT 交到写入路径上是无害的——只要它真的只读，而这一点由 requireReadOnlySelect
+        // 保证（CTE 内 DML、SELECT INTO、FOR UPDATE 都会在那里被拒）。放行它有两个实际理由：
+        // 结构限制（join 数、子查询深度、行数上限）与表白名单对这条路同样要生效，而不是在这里
+        // 提前拒掉；而 INSERT ... SELECT 这类语句的 SELECT 部分本就属于写入语义的一部分。
+        if (stmt instanceof Select) {
+            return;
+        }
+        if (!ALLOWED_DDL_STATEMENTS.contains(stmt.getClass())) {
+            throw new McpSqlValidationException(sql,
+                    "DDL statement not allowed: " + stmt.getClass().getSimpleName());
+        }
+        if (stmt instanceof Drop drop) {
+            String type = drop.getType() == null ? "" : drop.getType().trim().toUpperCase(Locale.ROOT);
+            if (!DROPPABLE_OBJECT_TYPES.contains(type)) {
+                throw new McpSqlValidationException(sql, "DROP target not allowed: " + drop.getType());
+            }
+        }
+    }
+
+    /**
+     * 确认一条解析成 {@code Select} 的语句真的只读。
+     *
+     * <p>{@link #extractOp} 只看顶层类名，jsqlparser 5.3 下这三种写法都会被判成 SELECT 而放行
+     * （以下形态均已用该版本实测）：
+     * <ul>
+     *   <li>{@code WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x} —— 顶层解析成
+     *       {@code PlainSelect}，CTE 体是 {@code ParenthesedDelete}，PostgreSQL 会真的删数据。
+     *       5.3 的 {@code WithItem} 是泛型的（{@code K extends ParenthesedStatement}），
+     *       所以这里比对 {@code getParenthesedStatement()} 的实际类型；<b>不能</b>调
+     *       {@code WithItem.getSelect()} —— 体是 DML 时它抛的是 {@code ClassCastException}，
+     *       会把一条本该被拒绝的语句变成 500。</li>
+     *   <li>{@code SELECT * INTO newtbl FROM users} —— {@code getIntoTables()} 返回 {@code [newtbl]}，
+     *       SQL Server / PostgreSQL 上会建表写数据。</li>
+     *   <li>{@code SELECT ... FOR UPDATE} —— {@code getForMode()} 返回 {@code UPDATE}。不改数据，
+     *       但会在标着 {@code readOnlyHint=true} 的工具上持有行锁并阻塞业务写入，属于只读承诺之外的副作用。
+     *       {@code ForMode} 挂在 {@code Select} 基类上而不是 {@code PlainSelect}。</li>
+     * </ul>
+     *
+     * <p>递归下去而不只看顶层：集合运算的每个分支、括号子查询、以及每层自己的 CTE 列表都要过。
+     */
+    private void requireReadOnlySelect(String sql, Select select) {
+        if (select.getWithItemsList() != null) {
+            for (WithItem<?> item : select.getWithItemsList()) {
+                if (item == null) continue;
+                if (!(item.getParenthesedStatement() instanceof ParenthesedSelect body)) {
+                    throw new McpSqlValidationException(sql,
+                            "Data-modifying CTE is not allowed: " + item.getAliasName());
+                }
+                requireReadOnlySelect(sql, body);
+            }
+        }
+
+        if (select.getForMode() != null || select.getForUpdateTable() != null) {
+            throw new McpSqlValidationException(sql, "Row-locking clauses are not allowed on a read path");
+        }
+        if (select instanceof ParenthesedSelect parenthesed) {
+            requireReadOnlySelect(sql, parenthesed.getSelect());
+            return;
+        }
+        if (select instanceof SetOperationList operations && operations.getSelects() != null) {
+            for (Select branch : operations.getSelects()) requireReadOnlySelect(sql, branch);
+            return;
+        }
+        if (select instanceof PlainSelect plain) {
+            boolean intoTables = plain.getIntoTables() != null && !plain.getIntoTables().isEmpty();
+            if (intoTables || plain.getIntoTempTable() != null) {
+                throw new McpSqlValidationException(sql, "SELECT ... INTO writes data and is not allowed");
+            }
+            for (Select nested : nestedSelects(plain)) requireReadOnlySelect(sql, nested);
+        }
     }
 
     /**

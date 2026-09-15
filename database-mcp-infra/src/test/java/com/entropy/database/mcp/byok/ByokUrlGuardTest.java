@@ -33,7 +33,11 @@ class ByokUrlGuardTest {
 
     private static final ByokProperties.UrlGuard DEFAULTS = ByokProperties.UrlGuard.defaults();
 
-    // ─── defaults: driver and host wide open ────────────────────────────────
+    /** 默认值收紧后，仍然需要一个「内网放开」的策略来覆盖 host 策略之外的行为。 */
+    private static final ByokProperties.UrlGuard ALLOW_PRIVATE =
+            new ByokProperties.UrlGuard(List.of(), List.of(), false, true);
+
+    // ─── defaults: driver wide open, private networks blocked ───────────────
 
     @ParameterizedTest
     @ValueSource(strings = {
@@ -41,9 +45,8 @@ class ByokUrlGuardTest {
             "jdbc:mysql://mysql.example.com:3306/app?useSSL=true&serverTimezone=UTC",
             "jdbc:postgresql://pg.example.com:5432/app?ssl=true&stringtype=unspecified",
             "jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1",
-            "jdbc:sqlserver://mssql.example.com:1433;databaseName=app;encrypt=true",
-            "jdbc:postgresql://10.0.0.5:5432/app"})
-    void allowsOrdinaryUrlsIncludingPrivateHosts(String jdbcUrl) {
+            "jdbc:sqlserver://mssql.example.com:1433;databaseName=app;encrypt=true"})
+    void allowsOrdinaryPublicUrls(String jdbcUrl) {
         assertThat(DEFAULTS.findViolation(jdbcUrl)).isNull();
     }
 
@@ -53,11 +56,20 @@ class ByokUrlGuardTest {
         assertThat(DEFAULTS.findViolation("jdbc:exotic://host/db")).isNull();
     }
 
+    /**
+     * 破坏性变更：{@code block-private-networks} 默认由 {@code false} 改为 {@code true}。
+     *
+     * <p>{@code blocked-hosts} 仍然是空的——具体要拉黑哪些域名是部署策略；而「内网不可达」不是策略，
+     * 是这个网关的默认边界：{@code 169.254.169.254}（云元数据）、{@code 127.0.0.1}、RFC1918 都不是调用方
+     * 自己的库，连不上时的报错差异本身就是内网端口探测信道。
+     */
     @Test
-    void allowsEveryHostByDefault() {
+    void blocksPrivateNetworksByDefaultButKeepsBlockedHostsEmpty() {
         assertThat(DEFAULTS.blockedHosts()).isEmpty();
-        assertThat(DEFAULTS.blockPrivateNetworks()).isFalse();
-        assertThat(DEFAULTS.findViolation("jdbc:postgresql://127.0.0.1:5432/db")).isNull();
+        assertThat(DEFAULTS.blockPrivateNetworks()).isTrue();
+        assertThat(DEFAULTS.findViolation("jdbc:postgresql://127.0.0.1:5432/db")).isNotNull();
+        assertThat(DEFAULTS.findViolation("jdbc:postgresql://169.254.169.254:5432/db")).isNotNull();
+        assertThat(DEFAULTS.findViolation("jdbc:postgresql://10.0.0.5:5432/app")).isNotNull();
     }
 
     @Test
@@ -71,8 +83,16 @@ class ByokUrlGuardTest {
 
         assertThat(guard.allowedDrivers()).isEmpty();
         assertThat(guard.blockedHosts()).isEmpty();
-        assertThat(guard.blockPrivateNetworks()).isFalse();
+        assertThat(guard.blockPrivateNetworks()).isTrue();
         assertThat(guard.rejectDangerousUrlParameters()).isTrue();
+    }
+
+    /** 本地开发/同机部署的逃生路径：显式关掉开关后 localhost 必须恢复可用。 */
+    @Test
+    void privateHostsBecomeReachableAgainWhenTheSwitchIsExplicitlyDisabled() {
+        assertThat(ALLOW_PRIVATE.findViolation("jdbc:postgresql://localhost:5432/db")).isNull();
+        assertThat(ALLOW_PRIVATE.findViolation("jdbc:mysql://127.0.0.1:3306/test")).isNull();
+        assertThat(ALLOW_PRIVATE.findViolation("jdbc:postgresql://10.0.0.5:5432/app")).isNull();
     }
 
     @Test
@@ -335,10 +355,57 @@ class ByokUrlGuardTest {
     }
 
     @Test
-    void defaultsStillLeaveDriverAndHostWideOpenAfterTheHostParsingFix() {
-        // 默认值是用户明确要求的：allowed-drivers 空、blocked-hosts 空、block-private-networks false
-        assertThat(DEFAULTS.findViolation("jdbc:mysql://app:pw@127.0.0.1:3306/db")).isNull();
-        assertThat(DEFAULTS.findViolation("jdbc:postgresql://[::1]:5432/db")).isNull();
-        assertThat(DEFAULTS.findViolation("jdbc:postgresql://2130706433/db")).isNull();
+    void defaultsNowCatchEveryEquivalentSpellingOfLoopback() {
+        // host 解析修好之后，这些等价写法本来就都能识别；默认值收紧之后它们不再需要显式打开开关才被拦。
+        assertThat(DEFAULTS.findViolation("jdbc:mysql://app:pw@127.0.0.1:3306/db")).isNotNull();
+        assertThat(DEFAULTS.findViolation("jdbc:postgresql://[::1]:5432/db")).isNotNull();
+        assertThat(DEFAULTS.findViolation("jdbc:postgresql://2130706433/db")).isNotNull();
+        // 驱动仍然不受限制：拦的是 host，不是 jdbc: 后面那个词
+        assertThat(DEFAULTS.allowedDrivers()).isEmpty();
+    }
+
+    // ─── Oracle 的钱包 / TNS 路径参数 ────────────────────────────────────────
+
+    /**
+     * 这一族参数的值是<em>文件路径</em>而不是类名，也不以 factory/plugin 之类的危险后缀结尾，所以显式黑名单、
+     * 后缀兜底、值形似类名三层启发式全部绕过——补进黑名单是唯一的办法。
+     *
+     * <p>{@code tns_admin} 的危害尤其容易被低估：它决定 tnsnames.ora / sqlnet.ora 从哪读，别名解析出来的
+     * host 是 host 策略看不到的，等于给 blocked-hosts 与 block-private-networks 开了一道后门。
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?oracle.net.tns_admin=/tmp/attacker",
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?oracle.net.wallet_location=/tmp/attacker",
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?TNS_ADMIN=/tmp/attacker",
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?wallet_location=/tmp/attacker",
+            // 任意文件写入，与 PostgreSQL 的 loggerFile 同类
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?oracle.net.trace_directory=/app/static",
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?oracle.net.trace_file_name=evil.jsp",
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?oracle.net.log_directory=/app/static",
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?oracle.net.log_file_name=evil.jsp"})
+    void rejectsOracleWalletAndTnsPathParameters(String jdbcUrl) {
+        assertThat(DEFAULTS.findViolation(jdbcUrl)).isNotNull();
+    }
+
+    @Test
+    void oracleWalletViolationNamesTheParameterWithoutEchoingTheUrl() {
+        String violation = DEFAULTS.findViolation(
+                "jdbc:oracle:thin:@//oracle.example.com:1521/svc?user=app&password=s3cr3t"
+                        + "&oracle.net.wallet_location=/tmp/attacker");
+
+        assertThat(violation).contains("oracle.net.wallet_location");
+        assertThat(violation).doesNotContain("s3cr3t");
+    }
+
+    /** 正常的 Oracle 连接串不能被这批新增条目误伤。 */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "jdbc:oracle:thin:@//oracle.example.com:1521/ORCLPDB1",
+            "jdbc:oracle:thin:@oracle.example.com:1521:ORCL",
+            "jdbc:oracle:thin:@//oracle.example.com:1521/svc?oracle.jdbc.ReadTimeout=30000",
+            "jdbc:oracle:thin:@(description=(address=(protocol=tcps)(host=oracle.example.com)(port=2484)))"})
+    void ordinaryOracleUrlsStillPass(String jdbcUrl) {
+        assertThat(DEFAULTS.findViolation(jdbcUrl)).isNull();
     }
 }

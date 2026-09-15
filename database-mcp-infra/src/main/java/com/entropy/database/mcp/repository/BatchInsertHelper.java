@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.repository;
 
+import com.entropy.database.mcp.contract.SqlIdentifiers;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpValidationException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,23 +37,25 @@ import java.util.function.BiFunction;
  */
 public final class BatchInsertHelper {
 
-    private static final java.util.regex.Pattern IDENTIFIER_PATTERN =
-            java.util.regex.Pattern.compile("^[A-Za-z_][A-Za-z0-9_$#]*$");
-
     private BatchInsertHelper() {
     }
 
     /**
      * Build an INSERT SQL string for the given table and columns.
      * Table name and column names are validated as safe identifiers to prevent injection.
+     *
+     * <p>规则委派给 {@link SqlIdentifiers#isPlain}，本类不再自带正则：此前这里的
+     * {@code ^[A-Za-z_][A-Za-z0-9_$#]*$} 与 {@code ValidationUtils} / {@code DialectUtils} 的两套
+     * 各差一点，而错误文案里还手抄了一份正则字面量——正则一改文案就变成谎报。异常类型与
+     * 「表名 / 列名分别报」的信息形态保持不变。
      */
     public static String buildInsertSql(String tableName, List<String> columns) {
-        if (tableName == null || !IDENTIFIER_PATTERN.matcher(tableName).matches()) {
+        if (!SqlIdentifiers.isPlain(tableName)) {
             throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
-                    "Invalid table name: must match [A-Za-z_][A-Za-z0-9_$#]*");
+                    "Invalid table name: must match " + SqlIdentifiers.RULE_DESCRIPTION);
         }
         for (String col : columns) {
-            if (col == null || !IDENTIFIER_PATTERN.matcher(col).matches()) {
+            if (!SqlIdentifiers.isPlain(col)) {
                 throw new McpValidationException(ErrorCode.PARAMETER_VALIDATION_FAILED,
                         "Invalid column name: " + col);
             }

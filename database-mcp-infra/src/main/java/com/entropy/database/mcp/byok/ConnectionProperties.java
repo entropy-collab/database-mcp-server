@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.byok;
 
 import com.entropy.database.mcp.dialect.DialectUtils;
+import com.entropy.database.mcp.util.JdbcUrlMasker;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -225,25 +226,30 @@ public record ConnectionProperties(
         return equals < 0 ? normalizedParameter : normalizedParameter.substring(0, equals);
     }
 
-    public static ConnectionProperties fromEnv() {
-        String jdbcUrl = System.getenv("DB_JDBC_URL");
-        String username = System.getenv("DB_USERNAME");
-        String password = System.getenv("DB_PASSWORD");
-        String dialect = System.getenv("DB_DIALECT");
-
-        return builder()
-                .jdbcUrl(jdbcUrl)
-                .username(username)
-                .password(password)
-                .dialect(dialect)
-                .build();
-    }
-
     /**
      * Create a builder for fluent construction of ConnectionProperties.
      */
     public static Builder builder() {
         return new Builder();
+    }
+
+    /**
+     * 隐去密码，并把 URL 交给 {@link JdbcUrlMasker} 处理。
+     *
+     * <p>必须覆盖：record 的隐式 {@code toString()} 会打印 {@code password=<明文>}，而 URL 本身也可能带
+     * {@code user/pw@} 或 {@code ?password=}。目前 {@code src/main} 里没有任何地方把本对象插进日志或异常
+     * 消息，所以这不是在修一个正在发生的泄漏——是在拆掉一把上了膛的枪：日后任何一句
+     * {@code log.debug("{}", properties)}、或者任何把它带进 {@code IllegalStateException} 消息的写法，
+     * 都会成为一次泄密，而这种代码在 review 时看起来完全无害。
+     */
+    @Override
+    public String toString() {
+        return "ConnectionProperties[jdbcUrl=" + JdbcUrlMasker.mask(jdbcUrl)
+                + ", username=" + username
+                + ", password=****"
+                + ", dialect=" + dialect
+                + ", driverClassName=" + driverClassName
+                + ", readonly=" + readonly + "]";
     }
 
     /**

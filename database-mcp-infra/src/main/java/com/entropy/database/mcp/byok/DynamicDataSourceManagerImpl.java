@@ -17,20 +17,26 @@ package com.entropy.database.mcp.byok;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpLeaseExpiredException;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.monitor.HikariPoolStats;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
 import com.entropy.database.mcp.properties.ByokProperties;
+import com.entropy.database.mcp.util.JdbcUrlMasker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 
@@ -99,6 +105,32 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
     /** Guards {@link #registrations} and {@link #contentFingerprintToKey} as one unit. */
     private final Object registryLock = new Object();
+
+    /**
+     * connection name → 正在进行中的建池动作。
+     *
+     * <p>建池（{@code ByokDataSourceFactory.create} 里的 Hikari 初始化与首连接探测）过去在条带锁内执行，目标库
+     * 不可达时这段是 TCP 超时量级，同条带（64 分之一）的其它连接名全部串行等在后面——这是可用性问题，不是死锁。
+     * 现在锁内只做「查缓存 / 认领指纹 / 放占位」这些纯 map 操作，真正建池搬到锁外，同 key 的并发者 join 同一个
+     * future。
+     *
+     * <p>否决了「锁外各自建池、再用 {@code putIfAbsent} 竞争、失败者关掉自己多建的池」：那个写法在目标库慢的时候
+     * 会把 N 个并发调用变成 N 次真实建连接（正是我们想避免的开销），而且「同一个 key 只建一个池」从此只能靠
+     * 「最终只留下一个」来近似断言，测不出白建的那几个。
+     *
+     * <p>条目由建池方在 {@code finally} 里按身份移除（{@code remove(key, mine)}），所以这个 map 不会随历史连接名
+     * 增长。
+     */
+    private final Map<String, CompletableFuture<LeasedDataSource>> inFlightCreations = new ConcurrentHashMap<>();
+
+    /**
+     * 「连接名已失效」的订阅者，见 {@link DynamicDataSourceManager#addEvictionListener}。
+     *
+     * <p>{@link CopyOnWriteArrayList} 而不是加锁的 ArrayList：注册只发生在启动阶段（每个上层缓存一次），遍历
+     * 却发生在每次驱逐，且遍历时不能持有任何锁——回调是别人的代码，在锁内调用它就把外部实现的耗时纳入了本类的
+     * 锁序。
+     */
+    private final List<EvictionListener> evictionListeners = new CopyOnWriteArrayList<>();
 
     private final Duration leaseDuration;
     private final Duration maxLifetime;
@@ -188,6 +220,9 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      *
      * <p>关闭动作走 {@link #closeIfUnreferenced(LeasedDataSource)}：一个池可能同时挂在 canonical 名字和
      * 若干别名下，别名过期时无条件 close 会把 canonical 正在用的池一起关掉。
+     *
+     * <p>这里是唯一的「连接名彻底消失」汇聚点（过期、体积淘汰、显式 invalidate、被替换、shutdown 都会到这里），
+     * 所以 {@link #notifyEvicted(String)} 也放在这里，上层按名字缓存的派生对象才有机会跟着释放。
      */
     private void onCacheRemoval(String key,
                                 LeasedDataSource value,
@@ -202,6 +237,37 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             log.info("Removing datasource: {} (cause: {})", key, cause);
             closeIfUnreferenced(value);
         }
+        if (key != null) {
+            notifyEvicted(key);
+        }
+    }
+
+    /**
+     * 广播「连接名已失效」。
+     *
+     * <p>不持任何锁，且逐个吞掉监听器抛出的异常：监听器是上层（features 层的 facade 缓存）注册进来的外部代码，
+     * 它出错不该让池的清理半途而废，更不该把自己的耗时算进本类的锁序。
+     *
+     * <p>会不会误报？{@code RemovalCause.REPLACED} 也会走到这里——池被同名的新池替换时，上层刚好可能已经缓存了
+     * 指向<em>新</em>上下文的 facade，于是它被白清一次。代价只是下一次调用重新 new 一个瘦包装对象；反过来，为了
+     * 躲这一次白清而把 REPLACED 排除掉，就得假定「替换必然伴随一次 acquire」——{@code registerPinned} 的替换路径
+     * 并不满足这个假定，漏掉的那次就是永久泄漏。
+     */
+    private void notifyEvicted(String key) {
+        for (EvictionListener listener : evictionListeners) {
+            try {
+                listener.onConnectionEvicted(key);
+            } catch (RuntimeException e) {
+                log.warn("Eviction listener failed for connection '{}': {}", key, e.getMessage(), e);
+            }
+        }
+    }
+
+    @Override
+    public void addEvictionListener(EvictionListener listener) {
+        if (listener != null) {
+            evictionListeners.add(listener);
+        }
     }
 
     /**
@@ -212,14 +278,49 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     }
 
     /**
+     * 一次 {@link #acquire(String, ConnectionProperties)} 最多尝试几轮。
+     *
+     * <p>2 = 一次正常尝试 + 一次自愈重试，而不是 {@code while (true)}：会触发重试的两种情况（交付前发现池已被
+     * 移除回调关掉、名字在我们建池期间被 {@code registerPinned}/{@code registerExisting} 抢走）都是一次性窗口，
+     * 重来一轮必然落到新条目上。如果重来还是不行，说明有东西在稳定地关闭这个名字，无限重试只会把一次可诊断的
+     * 报错变成一次挂死。
+     */
+    private static final int MAX_ACQUIRE_ATTEMPTS = 2;
+
+    /**
      * Acquire a datasource context by key.
      * Uses content fingerprint to deduplicate: if the same physical connection (jdbcUrl+username+dialect)
      * is already cached under a different name, this name becomes an alias to the existing pool.
+     *
+     * <p>整个流程被拆成「有界重试 + 单轮尝试」，因为快路径与移除回调之间存在一个真实的竞态：回调不持条带锁
+     * （理由见 {@link #onCacheRemoval}），所以 {@code renewLease()} 返回之后、调用方真正
+     * {@code getConnection()} 之前，池可能已经被关掉，业务侧看到的是 "HikariDataSource has been closed"，而缓存
+     * 条目此时已经消失、下一次调用又正常——典型的间歇性、不可复现报错。
      */
     @Override
     public ByokDataSourceContext acquire(String key, ConnectionProperties connection) {
         guardJdbcUrl(key, connection.jdbcUrl());
 
+        for (int attempt = 1; attempt <= MAX_ACQUIRE_ATTEMPTS; attempt++) {
+            ByokDataSourceContext context = attemptAcquire(key, connection);
+            if (context != null) {
+                return context;
+            }
+            log.warn("Datasource {} could not be handed out (pool closed concurrently), retrying {}/{}",
+                    key, attempt, MAX_ACQUIRE_ATTEMPTS);
+        }
+        throw new McpToolException(ErrorCode.CONNECTION_FAILED,
+                "Connection '" + key + "' could not be handed out: its pool was closed concurrently on "
+                        + MAX_ACQUIRE_ATTEMPTS + " consecutive attempts", key);
+    }
+
+    /**
+     * 一轮获取尝试。
+     *
+     * @return 可以交给调用方的上下文；{@code null} 表示这一轮拿到的东西已经不可用（池在交付前被关闭，或名字被
+     *         别的注册路径抢走），状态已经清理干净，由 {@link #acquire} 再来一轮
+     */
+    private ByokDataSourceContext attemptAcquire(String key, ConnectionProperties connection) {
         String fingerprint = connection.getCacheKey();
 
         // Check if an identical physical connection already exists under a different name
@@ -231,42 +332,83 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             }
         }
 
-        LeasedDataSource existing = leasedCache.getIfPresent(key);
-        if (existing != null && !existing.isClosed()) {
+        // 快路径：不取任何锁读缓存。这里不再为「过期后驱逐」额外取条带锁——evictIfCurrent 的每一步都按对象身份
+        // 收口（见其注释），条带锁在这条路径上没有保护任何东西，只是让 Hikari 的 close 挡住同条带的其它连接名。
+        ByokDataSourceContext reused = reuseCached(key, leasedCache.getIfPresent(key));
+        if (reused != null) {
+            return reused;
+        }
+        return createOrJoin(key, connection, fingerprint);
+    }
+
+    /**
+     * 复用缓存里已有的条目。
+     *
+     * <p>{@code null} 有两种含义，但对调用方是同一件事「没有可复用的池，去建一个」：条目本来就不存在，或者条目
+     * 已经过期/已关闭并在这里被摘掉了。
+     */
+    private ByokDataSourceContext reuseCached(String key, LeasedDataSource cached) {
+        if (cached == null) {
+            return null;
+        }
+        if (!cached.isClosed()) {
             try {
-                return existing.renewLease();
+                return handOff(key, cached, cached.renewLease());
             } catch (McpLeaseExpiredException e) {
                 log.warn("Datasource {} exceeded max lifetime, evicting and recreating", key);
-                Object lock = lockFor(key);
-                synchronized (lock) {
-                    evictIfCurrent(key, existing);
-                }
             }
-        } else if (existing != null && existing.isClosed()) {
-            // Connection is being closed by the removal callback, evict and recreate
+        } else {
+            // 移除回调正在关这个池
             log.warn("Datasource {} is closed (eviction in progress), evicting and recreating", key);
-            evictIfCurrent(key, existing);
         }
+        evictIfCurrent(key, cached);
+        return null;
+    }
 
-        Object lock = lockFor(key);
-        synchronized (lock) {
-            // Double-check after acquiring lock
-            existing = leasedCache.getIfPresent(key);
-            if (existing != null && !existing.isClosed()) {
-                try {
-                    return existing.renewLease();
-                } catch (McpLeaseExpiredException e) {
-                    log.warn("Datasource {} exceeded max lifetime during lock, evicting and recreating", key);
-                    evictIfCurrent(key, existing);
-                }
-            } else if (existing != null && existing.isClosed()) {
-                // Evict closed connection and proceed to create new one
-                log.warn("Datasource {} is closed (eviction in progress), evicting", key);
-                evictIfCurrent(key, existing);
+    /**
+     * 交付前的最后一道复查：{@code renewLease()} 返回之后池仍然活着，才把上下文交出去。
+     *
+     * <p>这只把竞态窗口从「整个租约过期窗口」缩到「复查与调用方 getConnection() 之间的几纳秒」，并没有彻底消除。
+     * 彻底消除需要引用计数式的借还协议（借出期间不许 close，close 改成摘条目 + 延迟关池给已发出的引用一个
+     * grace）——否决它的理由有三条：调用方遍布 tools/features，没有任何一层现在有「用完归还」的生命周期，漏还一
+     * 次就是永久泄漏一个池；延迟关闭需要一个本类目前没有的调度器；而 {@code shutdown()} 作为
+     * {@code DisposableBean} 必须同步关完，延迟关闭会让进程退出时留下活连接。
+     *
+     * @return {@code context}，或者 {@code null} 表示池已经关闭、条目已被摘除，交给上层重试
+     */
+    private ByokDataSourceContext handOff(String key, LeasedDataSource leased, ByokDataSourceContext context) {
+        if (!leased.isClosed()) {
+            return context;
+        }
+        evictIfCurrent(key, leased);
+        return null;
+    }
+
+    /**
+     * 建池，或者搭上同 key 已经在进行中的那次建池。
+     *
+     * <p>锁的使用分成两段：占位与复查用 {@link #inFlightCreations}（CHM 的 putIfAbsent 本身就是原子的），发布
+     * （register + 写缓存）才取条带锁——发布是纯 map 操作，而条带锁要挡住的是同样持条带锁的
+     * {@code registerPinned}/{@code registerExisting}。建池本身在两段之间，不持任何锁。
+     *
+     * <p>因此「占位后复查缓存」和「发布前再复查一次缓存」两处复查都不可省：占位只保证同一时刻同一个 key 只有一个
+     * 建池方，不保证建池期间没有别的路径占用这个名字。
+     */
+    private ByokDataSourceContext createOrJoin(String key, ConnectionProperties connection, String fingerprint) {
+        CompletableFuture<LeasedDataSource> mine = new CompletableFuture<>();
+        CompletableFuture<LeasedDataSource> inFlight = inFlightCreations.putIfAbsent(key, mine);
+        if (inFlight != null) {
+            return joinCreation(key, inFlight);
+        }
+        try {
+            // 抢到占位之后再复查：占位挡不住「上一个建池方刚刚发布完就退出」
+            ByokDataSourceContext reused = reuseCached(key, leasedCache.getIfPresent(key));
+            if (reused != null) {
+                return reused;
             }
 
             // Re-check canonical key in case another thread created it
-            canonicalKey = contentFingerprintToKey.get(fingerprint);
+            String canonicalKey = contentFingerprintToKey.get(fingerprint);
             if (canonicalKey != null && !canonicalKey.equals(key)) {
                 ByokDataSourceContext adopted = adoptAlias(key, canonicalKey, connection);
                 if (adopted != null) {
@@ -274,16 +416,75 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 }
             }
 
+            // 建池在锁外：createLeasedDataSource 里是 Hikari 初始化（视配置做首连接探测），dialectResolver 传
+            // DataSource 时同样会 getConnection()，目标库不可达时这两步都是 TCP 超时量级。放在条带锁内会让同条带
+            // （64 分之一）的其它连接名全部串行等在后面。
             DatabaseDialect dialect = dialectResolver.resolve(connection.dialect(), null);
             LeasedDataSource newLeased = createLeasedDataSource(key, connection, dialect);
 
-            // Register before publishing to the cache: the other order leaves a window in which a
-            // concurrent acquire() finds the context but isReadonly() still answers false, which for a
-            // read-only connection means write tools are let through.
-            register(key, newLeased, connection, dialect.getClass().getSimpleName(), fingerprint);
-            leasedCache.put(key, newLeased);
-            return newLeased.renewLease();
+            boolean published;
+            synchronized (lockFor(key)) {
+                LeasedDataSource concurrent = leasedCache.getIfPresent(key);
+                // 建池期间这个名字被别的路径占了（典型是启动阶段的 registerPinned）。让它赢：pinned 连接绝不能
+                // 被一个带租约的池覆盖掉。
+                published = concurrent == null || concurrent == newLeased || concurrent.isClosed();
+                if (published) {
+                    // Register before publishing to the cache: the other order leaves a window in which a
+                    // concurrent acquire() finds the context but isReadonly() still answers false, which for a
+                    // read-only connection means write tools are let through.
+                    register(key, newLeased, connection, dialect.getClass().getSimpleName(), fingerprint);
+                    leasedCache.put(key, newLeased);
+                    mine.complete(newLeased);
+                }
+            }
+            if (!published) {
+                log.warn("Connection '{}' was taken by another registration path while its pool was being "
+                        + "built; discarding the pool we just created", key);
+                // 关池在锁外，理由同上
+                newLeased.close();
+                return null;
+            }
+            return handOff(key, newLeased, newLeased.renewLease());
+        } catch (RuntimeException | Error e) {
+            // 让等待方拿到和我们一样的失败原因，而不是各自再去连一次不可达的库
+            mine.completeExceptionally(e);
+            throw e;
+        } finally {
+            // 先摘占位再兜底完成：顺序反过来的话，刚好在这两步之间挂上来的等待方会拿到一个永远不会完成的 future。
+            // complete(null) 对已完成的 future 是 no-op，只用于覆盖上面那些「复用/别名」提前 return 的分支。
+            inFlightCreations.remove(key, mine);
+            mine.complete(null);
         }
+    }
+
+    /**
+     * 等同 key 正在进行中的那次建池。
+     *
+     * <p>等待发生在锁外——等待方既不持条带锁也不持 {@code registryLock}，建池方也只在发布那一小段取条带锁，所以
+     * 这里不引入新的锁序。
+     *
+     * @return 建池方发布出来的上下文；{@code null} 表示建池方最后没有发布（走了复用/别名/被抢占分支），由
+     *         {@link #acquire} 的有界重试再来一轮
+     */
+    private ByokDataSourceContext joinCreation(String key, CompletableFuture<LeasedDataSource> inFlight) {
+        LeasedDataSource shared;
+        try {
+            shared = inFlight.join();
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new McpToolException(ErrorCode.CONNECTION_FAILED,
+                    "Connection '" + key + "' failed to initialise: " + cause.getMessage(), cause, key);
+        }
+        if (shared == null) {
+            return null;
+        }
+        return handOff(key, shared, shared.renewLease());
     }
 
     /**
@@ -299,10 +500,10 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      * 已经消失的名字。代价是 canonical 先过期时指纹索引会清空，同内容的下一个名字会另开一个池——只是少了
      * 一次去重，不会出错。
      *
-     * <p>这里<em>不</em>取 canonical 的条带锁：本方法的第二个调用点已经持有 {@code key} 的条带锁，再去拿
-     * canonical 的锁就会出现「A 等 B、B 等 A」的锁序环（两个名字互为对方指纹的 canonical 时）。不加锁是安全的，
-     * 因为所有状态改动都按对象身份收口：{@code evictIfCurrent} 只在缓存里仍是同一个对象时才移除，注册完成后
-     * 又会复查 {@code isClosed()} 以防和过期回调撞车。
+     * <p>这里<em>不</em>取任何条带锁（两个调用点也都不再持锁：建池已经搬到锁外，见 {@link #createOrJoin}）。
+     * 一旦在这里去拿 canonical 的锁，两个名字互为对方指纹 canonical 时就会出现「A 等 B、B 等 A」的锁序环。不加锁
+     * 是安全的，因为所有状态改动都按对象身份收口：{@code evictIfCurrent} 只在缓存里仍是同一个对象时才移除，注册
+     * 完成后又会复查 {@code isClosed()} 以防和过期回调撞车。
      *
      * @return 复用成功时的上下文；{@code null} 表示这次没能复用（canonical 已过期/已关闭/归属不一致），
      *         调用方应继续走新建流程
@@ -375,12 +576,13 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
     public void registerExisting(String key, DataSource existingDataSource, DatabaseDialect dialect) {
         guardJdbcUrl(key, jdbcUrlOf(existingDataSource));
 
-        Object lock = lockFor(key);
-        synchronized (lock) {
-            LeasedDataSource previous = leasedCache.getIfPresent(key);
+        // createExisting 只是包一层已有的 DataSource，不建池、不连库，所以留在锁内没有可用性代价。
+        LeasedDataSource previous;
+        synchronized (lockFor(key)) {
+            previous = leasedCache.getIfPresent(key);
             if (previous != null) {
                 log.warn("Datasource {} already registered, replacing", key);
-                evictIfCurrent(key, previous);
+                detachIfCurrent(key, previous);
             }
 
             ByokDataSourceContext context = dataSourceFactory.createExisting(key, existingDataSource, dialect);
@@ -395,6 +597,10 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 metricsCollector.recordByokConnectionCreated();
             }
         }
+        // 关池搬到锁外：HikariDataSource.close() 会等在用连接归还，锁内做会挡住同条带的其它连接名
+        if (previous != null) {
+            closeIfUnreferenced(previous);
+        }
     }
 
     @Override
@@ -407,18 +613,18 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
 
         DatabaseDialect dialect = dialectResolver.resolve(connection.dialect(), null);
 
-        Object lock = lockFor(key);
-        synchronized (lock) {
-            LeasedDataSource previous = leasedCache.getIfPresent(key);
-            if (previous != null) {
-                log.warn("Connection {} already registered, replacing with the configured one", key);
-                evictIfCurrent(key, previous);
-            }
-
-            ByokDataSourceContext context = null;
-            try {
-                context = dataSourceFactory.create(key, connection, dialect);
-                LeasedDataSource leased = LeasedDataSource.pinned(key, context);
+        // 建池在锁外，理由同 createOrJoin：启动阶段目标库不可达时，这一步是 TCP 超时量级，锁内做会把同条带的其它
+        // 配置连接一起堵住，进而拖长整个 ApplicationContext 的启动。
+        ByokDataSourceContext context = dataSourceFactory.create(key, connection, dialect);
+        LeasedDataSource previous = null;
+        try {
+            LeasedDataSource leased = LeasedDataSource.pinned(key, context);
+            synchronized (lockFor(key)) {
+                previous = leasedCache.getIfPresent(key);
+                if (previous != null) {
+                    log.warn("Connection {} already registered, replacing with the configured one", key);
+                    detachIfCurrent(key, previous);
+                }
 
                 // Same ordering rule as acquire(): registry first, cache second.
                 // Fingerprint is deliberately null: a pinned pool must not become the alias target of
@@ -426,22 +632,24 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
                 // inherit a connection that never expires.
                 register(key, leased, connection, dialect.getDialectName(), null);
                 leasedCache.put(key, leased);
-
-                log.info("Registered pinned connection '{}' (dialect={}, readonly={})",
-                        key, dialect.getDialectName(), connection.readonly());
-                if (metricsCollector != null) {
-                    metricsCollector.recordByokConnectionCreated();
-                }
-            } catch (Exception e) {
-                if (context != null) {
-                    try {
-                        context.closePool();
-                    } catch (Exception closeEx) {
-                        log.warn("Failed to close pool after failed pinned registration: {}", key, closeEx);
-                    }
-                }
-                throw e;
             }
+
+            log.info("Registered pinned connection '{}' (dialect={}, readonly={})",
+                    key, dialect.getDialectName(), connection.readonly());
+            if (metricsCollector != null) {
+                metricsCollector.recordByokConnectionCreated();
+            }
+        } catch (Exception e) {
+            try {
+                context.closePool();
+            } catch (Exception closeEx) {
+                log.warn("Failed to close pool after failed pinned registration: {}", key, closeEx);
+            }
+            throw e;
+        }
+        // 关掉被替换的旧池，同样在锁外
+        if (previous != null) {
+            closeIfUnreferenced(previous);
         }
     }
 
@@ -530,7 +738,7 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
         var metadata = new ConnectionMetadata(
                 key,
                 dialectName,
-                maskKey(connection != null ? connection.jdbcUrl() : "external"),
+                JdbcUrlMasker.mask(connection != null ? connection.jdbcUrl() : "external"),
                 "system",
                 java.time.Instant.now(),
                 leaseDuration,
@@ -581,14 +789,32 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
      * Evict {@code value} and close it, but only remove the cache entry while it still holds exactly
      * that value - a plain {@code invalidate(key)} would throw away a replacement another thread has
      * already installed.
+     *
+     * <p>不要在条带锁内调用：{@link #closeIfUnreferenced} 里的 {@code HikariDataSource.close()} 会等在用连接
+     * 归还，锁内做就把同条带（64 分之一）的其它连接名一起堵住了。持锁的调用点请改用
+     * {@link #detachIfCurrent(String, LeasedDataSource)}，出锁后再关。
      */
     private void evictIfCurrent(String key, LeasedDataSource value) {
         if (value == null) {
             return;
         }
-        unregisterIfOwnedBy(key, value);
-        leasedCache.asMap().remove(key, value);
+        detachIfCurrent(key, value);
         closeIfUnreferenced(value);
+    }
+
+    /**
+     * 只把条目从注册表与缓存里摘掉，<em>不</em>关池。
+     *
+     * <p>拆出来是为了让「摘条目」和「关池」能分处锁内锁外：摘条目是纯 map 操作，关池不是。
+     *
+     * @return 缓存里当时是否确实还是 {@code value}
+     */
+    private boolean detachIfCurrent(String key, LeasedDataSource value) {
+        if (value == null) {
+            return false;
+        }
+        unregisterIfOwnedBy(key, value);
+        return leasedCache.asMap().remove(key, value);
     }
 
     /**
@@ -610,17 +836,6 @@ public class DynamicDataSourceManagerImpl implements DynamicDataSourceManager, D
             }
         }
         value.close();
-    }
-
-    private String maskKey(String jdbcUrl) {
-        if (jdbcUrl == null) return "null";
-        int atIndex = jdbcUrl.indexOf('@');
-        if (atIndex > 0 && jdbcUrl.contains("//")) {
-            String prefix = jdbcUrl.substring(0, jdbcUrl.indexOf("//") + 2);
-            String suffix = jdbcUrl.substring(atIndex);
-            return prefix + "****" + suffix;
-        }
-        return jdbcUrl;
     }
 
     // ─── Public Metadata API ────────────────────────────────────────────────

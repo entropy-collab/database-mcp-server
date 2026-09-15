@@ -111,4 +111,38 @@ public interface DynamicDataSourceManager extends PoolStatsSource {
      * This is a no-op if no entries have expired.
      */
     void evictExpired();
+
+    /**
+     * 注册一个「连接名已失效」的回调。
+     *
+     * <p>存在的理由：连接池的生命周期只有这里知道（租约过期、体积淘汰、显式替换、shutdown），而上层按连接名
+     * 缓存的派生对象（{@code RoutingDatabaseFacade} 的 per-connection facade，facade 背后的
+     * {@code DatabaseCache}）此前拿不到任何失效信号，只能只增不删——每个历史用过的 BYOK 连接名都会永久钉住
+     * 一份查询缓存和一个已经 close 的 Hikari 池。
+     *
+     * <p>否决了「上层自己用有界 + expireAfterAccess 的缓存兜住」：那样上层的过期时间与真实池寿命互相独立，
+     * 既可能在池仍然活着的时候把 facade 扔掉（无害但白建），也会在池已经关掉之后继续钉住缓存到自己过期为止，
+     * 而这条时间线上没有任何东西能被断言，测试只能靠 sleep。
+     *
+     * @param listener 回调实现。会在 Caffeine 的 removal 通知线程上被调用（默认
+     *                 {@link java.util.concurrent.ForkJoinPool#commonPool()}），因此实现必须是线程安全的、
+     *                 不阻塞、不抛异常；抛出的异常会被吞掉并记日志，不影响其它监听器和池的关闭。
+     */
+    void addEvictionListener(EvictionListener listener);
+
+    /**
+     * 「连接名已失效」的回调契约。
+     *
+     * <p>只传连接名而不传上下文对象：别名与规范名共享同一个物理池（同一个
+     * {@link ByokDataSourceContext}），失效是按<em>名字</em>发生的，把上下文一起传出去会诱导实现方按对象身份
+     * 去清理，从而在别名过期时误伤规范名仍在使用的那份状态。
+     */
+    interface EvictionListener {
+
+        /**
+         * @param key 刚从缓存里消失的连接名。可能是别名，也可能是规范名；同一个名字可能被通知多次
+         *            （先显式驱逐、再收到异步的 removal 通知），实现方必须幂等。
+         */
+        void onConnectionEvicted(String key);
+    }
 }

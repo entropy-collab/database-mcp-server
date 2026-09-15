@@ -22,6 +22,7 @@ import com.entropy.database.mcp.repository.QueryLimits;
 import com.entropy.database.mcp.security.DataMaskingService;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.session.McpToolContext;
+import com.entropy.database.mcp.util.JdbcUrlMasker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -415,6 +416,13 @@ public class DatabaseReadRepository {
         return (T) cached;
     }
 
+    /**
+     * 连接元数据。
+     *
+     * <p>{@code url} 走 {@link JdbcUrlMasker}：{@code DatabaseMetaData.getURL()} 返回的是驱动构造时那个
+     * URL，调用方塞在 {@code ?password=} 或 {@code user/pw@} 里的凭证会原路返回给 MCP 调用方——也就是进
+     * 模型上下文、再进客户端保存的对话历史。这里是唯一一处会把原始 URL 交出去的读路径。
+     */
     public Map<String, Object> getDatabaseInfo() {
         try (var conn = jdbcTemplate.getDataSource().getConnection()) {
             var meta = conn.getMetaData();
@@ -423,7 +431,7 @@ public class DatabaseReadRepository {
                 "productVersion", meta.getDatabaseProductVersion(),
                 "driverName", meta.getDriverName(),
                 "driverVersion", meta.getDriverVersion(),
-                "url", meta.getURL(),
+                "url", JdbcUrlMasker.mask(meta.getURL()),
                 "user", meta.getUserName()
             );
         } catch (Exception e) {

@@ -40,7 +40,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -71,7 +76,10 @@ class DynamicDataSourceManagerImplTest {
                 Duration.ofMinutes(5),
                 100,
                 10,
-                2
+                2,
+                // 用例连的都是 jdbc:mysql://localhost:3306/test，而 UrlGuard.defaults() 现在默认拦内网，
+                // 所以这里显式关掉内网守卫——本类测的是池的生命周期，不是 URL 策略。
+                new ByokProperties.UrlGuard(List.of(), List.of(), false, true)
         );
         return new DynamicDataSourceManagerImpl(
                 new DynamicDataSourceManagerImpl.Dependencies(
@@ -310,47 +318,8 @@ class DynamicDataSourceManagerImplTest {
         assertThat(manager.getConnectionMetadata("  ")).isNull();
     }
 
-    @Test
-    void maskKeyWithPassword() {
-        DynamicDataSourceManagerImpl manager = createManager();
-
-        try {
-            java.lang.reflect.Method method = DynamicDataSourceManagerImpl.class.getDeclaredMethod("maskKey", String.class);
-            method.setAccessible(true);
-            String result = (String) method.invoke(manager, "jdbc:mysql://user:secret@localhost:3306/test");
-            assertThat(result).isEqualTo("jdbc:mysql://****@localhost:3306/test");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @Test
-    void maskKeyWithoutPassword() {
-        DynamicDataSourceManagerImpl manager = createManager();
-
-        try {
-            java.lang.reflect.Method method = DynamicDataSourceManagerImpl.class.getDeclaredMethod("maskKey", String.class);
-            method.setAccessible(true);
-            String result = (String) method.invoke(manager, "jdbc:mysql://localhost:3306/test");
-            assertThat(result).isEqualTo("jdbc:mysql://localhost:3306/test");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @Test
-    void maskKeyNull() {
-        DynamicDataSourceManagerImpl manager = createManager();
-
-        try {
-            java.lang.reflect.Method method = DynamicDataSourceManagerImpl.class.getDeclaredMethod("maskKey", String.class);
-            method.setAccessible(true);
-            String result = (String) method.invoke(manager, (Object) null);
-            assertThat(result).isEqualTo("null");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
+    // URL 掩码已抽到 JdbcUrlMasker，覆盖见 JdbcUrlMaskerTest。原先三个用例靠反射调私有 maskKey，
+    // 既钉不住「掩码结果会经 ConnectionMetadata 外发」这个真实契约，也拦不住那两个绕过口子。
 
     // ─── lease eviction must not disarm a rebuilt read-only connection ──────
 
@@ -574,6 +543,121 @@ class DynamicDataSourceManagerImplTest {
         assertThat(stats.get("b").canonicalName()).isEqualTo("a");
         assertThat(stats.get("b").isAlias()).isTrue();
         assertThat(stats.values().stream().map(HikariPoolStats::canonicalName).distinct()).hasSize(1);
+    }
+
+    // ─── 池的生命周期：驱逐通知、自愈重建、并发建池 ──────────────────────────
+
+    /**
+     * 上层按连接名缓存的派生对象（{@code RoutingDatabaseFacade} 的 per-connection facade）只能靠这个回调知道
+     * 「这个名字没了」，否则它的 map 只增不删。
+     */
+    @Test
+    void evictionNotifiesRegisteredListeners() {
+        DeferringExecutor cacheExecutor = new DeferringExecutor();
+        DynamicDataSourceManagerImpl manager = createManager(Duration.ofMinutes(30), cacheExecutor);
+        ConnectionProperties props = connection("jdbc:mysql://localhost:3306/test", false);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create(eq("a"), any(ConnectionProperties.class), eq(dialect)))
+                .thenReturn(context);
+
+        List<String> evicted = Collections.synchronizedList(new ArrayList<>());
+        manager.addEvictionListener(evicted::add);
+
+        manager.acquire("a", props);
+        assertThat(evicted).isEmpty();
+
+        invalidateCacheEntry(manager, "a");
+        cacheExecutor.runAll();
+
+        assertThat(evicted).containsExactly("a");
+    }
+
+    /**
+     * 移除回调不持条带锁，所以缓存里可能躺着一个池已经被 close 掉的条目。这时 {@code acquire} 必须自己驱逐并重建，
+     * 而不是把死池交出去让业务侧撞上 "HikariDataSource has been closed"。
+     */
+    @Test
+    void acquireRebuildsAPoolThatWasClosedBehindOurBack() {
+        DynamicDataSourceManagerImpl manager = createManager();
+        ConnectionProperties props = connection("jdbc:mysql://localhost:3306/test", false);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext first = mock(ByokDataSourceContext.class);
+        ByokDataSourceContext second = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        when(dataSourceFactory.create(eq("k"), any(ConnectionProperties.class), eq(dialect)))
+                .thenReturn(first, second);
+
+        assertThat(manager.acquire("k", props)).isSameAs(first);
+
+        // 模拟「回调已经关了池，但条目还在缓存里」这一瞬间
+        cachedEntry(manager, "k").close();
+
+        assertThat(manager.acquire("k", props)).isSameAs(second);
+        verify(dataSourceFactory, times(2))
+                .create(anyString(), any(ConnectionProperties.class), any(DatabaseDialect.class));
+        assertThat(manager.getActiveConnectionCount()).isEqualTo(1);
+        assertThat(manager.getConnectionMetadata("k")).isNotNull();
+    }
+
+    /**
+     * 建池搬到条带锁外之后，「同一个 key 只建一个池」不再由锁保证，而是由 per-key 的 future 占位保证：抢不到占位的
+     * 线程 join 同一个 future，而不是各自建一个再扔掉。
+     */
+    @Test
+    void concurrentAcquireOfTheSameKeyBuildsExactlyOnePool() throws Exception {
+        DynamicDataSourceManagerImpl manager = createManager();
+        ConnectionProperties props = connection("jdbc:mysql://localhost:3306/test", false);
+        DatabaseDialect dialect = mock(DatabaseDialect.class);
+        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
+
+        when(dialectResolver.resolve("mysql", null)).thenReturn(dialect);
+        // 建池慢到足以让所有线程都进入 acquire，正是目标库不可达时的形状
+        when(dataSourceFactory.create(eq("k"), any(ConnectionProperties.class), eq(dialect)))
+                .thenAnswer(invocation -> {
+                    Thread.sleep(200);
+                    return context;
+                });
+
+        int threads = 8;
+        CyclicBarrier start = new CyclicBarrier(threads);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<ByokDataSourceContext>> results = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                results.add(pool.submit(() -> {
+                    start.await(5, TimeUnit.SECONDS);
+                    return manager.acquire("k", props);
+                }));
+            }
+            for (Future<ByokDataSourceContext> result : results) {
+                assertThat(result.get(10, TimeUnit.SECONDS)).isSameAs(context);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        verify(dataSourceFactory, times(1))
+                .create(anyString(), any(ConnectionProperties.class), any(DatabaseDialect.class));
+        assertThat(manager.getActiveConnectionCount()).isEqualTo(1);
+        assertThat(manager.getConnectionCount()).isEqualTo(1);
+    }
+
+    /** 缓存里当前挂在 {@code key} 名下的条目。反射：管理器故意不对外暴露单条条目。 */
+    @SuppressWarnings("unchecked")
+    private static LeasedDataSource cachedEntry(DynamicDataSourceManagerImpl manager, String key) {
+        try {
+            java.lang.reflect.Field field =
+                    DynamicDataSourceManagerImpl.class.getDeclaredField("leasedCache");
+            field.setAccessible(true);
+            return ((com.github.benmanes.caffeine.cache.Cache<String, LeasedDataSource>) field.get(manager))
+                    .getIfPresent(key);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     // ─── JDBC URL guard ─────────────────────────────────────────────────────
