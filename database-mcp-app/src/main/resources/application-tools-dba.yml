@@ -1,0 +1,21 @@
+# 工具暴露预设：DBA 诊断
+#
+# 用法（可与 production 叠加，逗号分隔，后者优先）：
+#   java -jar app.jar --spring.profiles.active=production,tools-dba
+#
+# 覆盖范围：健康检查、会话与锁、表空间与 undo、统计信息、权限清单、连接池指标，
+# 外加最基本的查询能力用于取证。
+#
+# 注意 killSession 在 oracle-session 组里，它还额外要求
+# entropy.mcp.database.ddl.allowed=true 才会真正执行。
+entropy:
+  mcp:
+    tools:
+      groups:
+        - intent-router
+        - connection-admin
+        - database-health
+        - oracle-session
+        - pool-monitor
+        - query
+        - query-analysis

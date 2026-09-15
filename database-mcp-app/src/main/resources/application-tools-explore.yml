@@ -1,0 +1,20 @@
+# 工具暴露预设：日常查询与探索
+#
+# 用法（可与 production 叠加，逗号分隔，后者优先）：
+#   java -jar app.jar --spring.profiles.active=production,tools-explore
+#
+# 覆盖范围：注册连接 + 跑 SELECT + 看表结构 + 导出 + 看执行计划。
+# 不含写入、DDL、ETL、CDC、备份、血缘、DBA 诊断。
+#
+# intent-router（suggestTools）刻意留在每套预设里：预设把工具砍到 20~30 个之后，
+# 模型更需要一个"我该调哪个"的入口，而它只占 1 个工具位、只读、不连库。
+entropy:
+  mcp:
+    tools:
+      groups:
+        - intent-router
+        - connection-admin
+        - query
+        - schema
+        - query-analysis
+        - export

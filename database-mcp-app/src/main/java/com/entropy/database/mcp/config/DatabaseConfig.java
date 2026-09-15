@@ -21,11 +21,13 @@ import com.entropy.database.mcp.backup.DatabaseBackupService;
 import com.entropy.database.mcp.byok.ByokDataSourceFactory;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.DynamicDataSourceManagerImpl;
+import com.entropy.database.mcp.credential.CredentialCipher;
 import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.etl.JobExecutionEngine;
 import com.entropy.database.mcp.routing.RoutingDatabaseFacade;
 import com.entropy.database.mcp.properties.ByokProperties;
 import com.entropy.database.mcp.properties.CacheConfig;
+import com.entropy.database.mcp.properties.CredentialCipherProperties;
 import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.properties.QueryConfig;
 import com.entropy.database.mcp.properties.StatementTimeoutProperties;
@@ -186,6 +188,65 @@ public class DatabaseConfig {
         // along; only this call site failed to pass it.
         return new JobExecutionEngine(dataSourceManager, metricsCollector, etlConfig, etlTaskExecutor,
                 sqlValidator);
+    }
+
+    /**
+     * 密文凭证的解密器。私钥没配就<b>不注册这个 bean</b>，整套机制随之关闭。
+     *
+     * <p>为什么用「bean 不存在」而不是「bean 存在但内部有个 enabled 开关」：下游
+     * （{@code ConnectionAdminTools}、{@code ConfiguredConnectionRegistrar}）都用
+     * {@code ObjectProvider} 取它，缺失即代表关闭，不需要在每个调用点再判一次开关——
+     * 少一个「忘了判」的失效模式。
+     *
+     * <p>私钥解析失败在这里直接抛出，也就是启动失败。这是有意的：配了一把解不开的私钥，
+     * 却让服务照常起来，只会等到第一个真实密文进来时才暴露，而那时报出来的是「密文无法解开」，
+     * 排查方向完全被带偏。
+     *
+     * <p>判「有没有配」用的是 {@link CredentialCipherProperties#enabled()}（空白视为没配），
+     * 而不是 {@code @ConditionalOnProperty}：后者只看属性在不在，空串照样算「在」。
+     * 容器编排里 {@code PRIVATE_KEY: ${MCP_CREDENTIAL_PRIVATE_KEY}} 在变量缺失时给的正是空串，
+     * 那样每个没启用这套机制的部署都会因为「私钥为空」起不来。返回 {@code null} 让 Spring 注册
+     * 一个 NullBean，下游 {@code ObjectProvider.getIfAvailable()} 取到的仍然是 {@code null}。
+     *
+     * <p>这里没有 {@code @ConditionalOnMissingBean}：在普通 {@code @Configuration} 里它的语义
+     * 依赖 bean 定义的扫描顺序（Spring 官方只推荐在自动配置类上用），而这个 bean 在全仓只有这一处
+     * 定义，条件本来也从不生效——留着只是把一条会误导人的规则摆在这儿。
+     */
+    @Bean
+    public @Nullable CredentialCipher credentialCipher(CredentialCipherProperties properties) {
+        requireCipherConfiguredWhenSealedCredentialsAreRequired(properties);
+        if (!properties.enabled()) {
+            return null;
+        }
+        var cipher = new CredentialCipher(CredentialCipher.readPrivateKey(properties.privateKey()));
+        log.info("Sealed credential support enabled: maxTtl={}, requireSealedCredentials={}",
+                properties.maxTtl(), properties.requireSealedCredentials());
+        return cipher;
+    }
+
+    /**
+     * {@code require-sealed-credentials=true} 但没配私钥时，让上下文起不来。
+     *
+     * <p>这组配置自相矛盾：明文那条路被开关关掉，密文那条路又因为没有解密器不可用，于是每一次连接
+     * 注册都失败——而服务会正常启动、{@code tools/list} 照常列出两个注册工具，失败点落在第一次工具
+     * 调用上。那时报出来的是「未配置私钥，请改用 createNamedConnection」，而 createNamedConnection
+     * 又会回「本服务端不接受明文口令」，把排查的人在两句话之间来回踢。
+     *
+     * <p>选择站在会响的那一侧（同 {@code SecurityConfig.requireNonBlankPassword}）：宁可启动失败，
+     * 也不要一个「起来了但什么都注册不了」的服务。这两个开关是同一个决定的两半，本来就该一起配。
+     */
+    static void requireCipherConfiguredWhenSealedCredentialsAreRequired(
+            CredentialCipherProperties properties) {
+        if (properties.requireSealedCredentials() && !properties.enabled()) {
+            throw new IllegalStateException(
+                "entropy.mcp.security.credential-cipher.require-sealed-credentials is true but no "
+                + "private key is configured, so no connection could ever be registered: the "
+                + "plaintext path is switched off and the sealed path has no key to decrypt with. "
+                + "Set entropy.mcp.security.credential-cipher.private-key (inject it through the "
+                + "MCP_CREDENTIAL_PRIVATE_KEY environment variable) — the two must be configured "
+                + "together — or set require-sealed-credentials=false to keep accepting plaintext "
+                + "credentials.");
+        }
     }
 
 }

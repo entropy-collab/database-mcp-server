@@ -12,8 +12,9 @@ management:
     web:
       exposure:
         # Keep the exposed surface to the operational essentials. env/beans/mappings/loggers/
-        # configprops/threaddump/heapdump leak configuration, credentials and memory contents,
-        # and are only permitAll-safe when entropy.mcp.security.enabled=false.
+        # configprops/threaddump/heapdump leak configuration, credentials and memory contents;
+        # 只有 entropy.mcp.security.enabled=false 时它们才是 permitAll 的（鉴权打开后
+        # health/info 之外的 actuator 端点都要求认证），所以这份白名单不能放宽。
         include: health,info,metrics,prometheus
   endpoint:
     health:
@@ -25,9 +26,15 @@ management:
 
 logging:
   level:
-    org.springframework.ai.mcp: DEBUG
-    io.modelcontextprotocol: DEBUG
-    org.springframework.ai.tool: DEBUG
+    # 这三个 logger 一旦调到 DEBUG，MCP SDK 会把每一条 JSON-RPC 报文原样打进日志
+    # （io.modelcontextprotocol.spec.McpSchema 的 "Received JSON message"）。
+    # createNamedConnection 的 password 就在报文里，等于把目标库口令明文写进日志文件——
+    # jdbcUrlMasked 那一套遮蔽全白做。所以默认必须停在 INFO。
+    # 排查协议问题时临时开启：--logging.level.io.modelcontextprotocol=DEBUG，
+    # 并且只在没有真实凭证的环境里开。
+    org.springframework.ai.mcp: INFO
+    io.modelcontextprotocol: INFO
+    org.springframework.ai.tool: INFO
 
 spring:
   # These two entries used to exclude Boot 3's
@@ -65,13 +72,28 @@ entropy:
     # HTTP-layer authentication (Basic, plus Bearer/JWT when
     # spring.security.oauth2.resourceserver.jwt.* is configured). When true, /mcp needs an
     # authenticated principal, /api/** needs ROLE_ADMIN and every actuator endpoint other than
-    # health/info needs authentication. Requires MCP_SECURITY_ADMIN_PASSWORD.
+    # health/info needs authentication. Requires a non-blank MCP_SECURITY_ADMIN_PASSWORD —
+    # without it the context fails to start (刻意的：宁可起不来，也不要带着空密码对外服务)。
+    #
+    # 破坏性变更（0.4.0 引入，沿用至今）：默认值由 false 改为 true。本地免密开发请显式覆盖：
+    #   java -jar app.jar --entropy.mcp.security.enabled=false
     #
     # Do NOT confuse this with entropy.mcp.database.security below: that one is a different
     # switch that only tunes SQL-level guardrails (allowed-tables / max-joins /
     # max-subquery-depth) and has no effect on HTTP authentication.
     security:
-      enabled: false
+      enabled: true
+      # 密文凭证（默认关闭）。私钥在就启用：服务端持私钥，运维持公钥，
+      # 用 CredentialSealCli keygen / seal 生成。启用后多出 createSealedConnection，
+      # 调用方只传连接名 + jdbcUrl + 一段密文，账号口令不进模型上下文与对话历史。
+      # 私钥只从环境变量读，不要写进任何配置文件或镜像；变量没设=空串=机制关闭，服务照常起来。
+      credential-cipher:
+        private-key: ${MCP_CREDENTIAL_PRIVATE_KEY:}
+        # 运行时注册允许的最长剩余有效期；密文在有效期内可重放，所以这就是重放窗口。
+        max-ttl: 15m
+        # true = createNamedConnection 拒收明文口令，运行时注册只剩密文一条路。
+        # 这是会让现有客户端立刻报错的开关，默认留 false。
+        require-sealed-credentials: false
     database:
       enabled: true
       dialect: generic
@@ -107,8 +129,12 @@ entropy:
         default-duplicate-rate-threshold: 0.01
         alert-on-critical: true
         alert-threshold-issues: 3
+      # DDL 执行闸门，默认关闭。开启等于允许 MCP 调用方修改库结构（建表、改列、删索引），
+      # 而 Oracle/MySQL 的 DDL 隐式提交、出错无法回滚，误操作只能人工反向修复。
+      # 关闭时 executeDdl / executeDdlBatch / executeDdlRemote / createMirrorTable 一律拒绝；
+      # validateDdl 不受影响（只做语法校验、不连库），预检能力刻意保留。
       ddl:
-        allowed: true
+        allowed: false
       security:
         # SQL-level guardrails only. HTTP authentication is entropy.mcp.security.enabled.
         # Empty allowed-tables means no table restriction.
@@ -143,7 +169,33 @@ entropy:
         query-ttl: 30s
         metadata-ttl: 5m
         max-warm-size: 10
+      # ── 预声明连接（推荐的默认路径）─────────────────────────────────────────
+      # 由部署方声明、启动时建成 pinned 池，进程存活期间一直可用、不会像 BYOK 那样到期失效。
+      # 工具按名引用，下游分不出它和 BYOK 连接的区别：两者走同一个 ByokDataSourceFactory，
+      # 因此同样受 SQL 校验、脱敏、审计与语句超时约束。
+      #
+      # 为什么优先用这条路径：BYOK 要求调用方把数据库密码作为 createNamedConnection 的入参传进来，
+      # 那条链路会让密码进入模型上下文、并留在客户端保存的对话历史里。预声明之后，对话里从头到尾
+      # 只出现连接名，凭证一步都不经过模型。
+      #
+      # 默认为空（BYOK-only）。按需取消注释；密码务必走 ${ENV_VAR}，不要写明文。
+      # connections:
+      #   oracle-prod:
+      #     jdbc-url: jdbc:oracle:thin:@//db-host:1521/ORCLPDB
+      #     username: mcp_reader
+      #     password: ${ORACLE_PASSWORD}
+      #     readonly: true      # 拒绝经此连接的写入
+      #     required: true      # 连不上则启动失败；false 时只告警并跳过
+      #   analytics:
+      #     jdbc-url: jdbc:postgresql://analytics-host:5432/warehouse
+      #     username: mcp_reader
+      #     password: ${ANALYTICS_PASSWORD}
+      #     readonly: true
       byok:
+        # 运行时由调用方创建的连接（BYOK）。密码作为 createNamedConnection 的入参传入，因此会进入
+        # 模型上下文与客户端保存的对话历史——这条路径只适合临时接入。
+        #
+        # 固定的那几个库请改用上面的 connections 预声明：对话里只出现连接名，凭证一步都不经过模型。
         lease-duration: 1h
         max-lifetime: 2h
         cleanup-interval: 5m
@@ -158,7 +210,12 @@ entropy:
           # Empty blocked-hosts means no host is blocked. An entry starting with "." or "*." matches
           # by domain suffix, e.g. ".internal".
           blocked-hosts: []
-          block-private-networks: false
+          # 默认拦内网：BYOK 的连接地址由调用方指定，不拦等于把服务变成内网端口探测器与云元数据
+          # （169.254.169.254）的代理。判定覆盖 localhost、RFC1918、169.254、IPv6 ULA/link-local，
+          # 以及 127.1 / 2130706433 / 0x7f.0.0.1 这些等价写法。
+          # 本地开发连本机数据库时显式改成 false。
+          block-private-networks: true
+
           # On by default: this is the real remote-code-execution vector, not the host. Rejects the
           # JDBC URL parameters that turn a connection string into code execution or local file
           # access - H2 INIT / RUNSCRIPT, MySQL allowLoadLocalInfile / allowUrlInLocalInfile /
@@ -174,13 +231,18 @@ entropy:
       metrics:
         slow-query-threshold-ms: 5000
       backup:
+        # 备份记录（含 SQL 脚本全文）只存在进程内存里，重启即全部丢失，本服务不落盘也不建表。
+        # max-records / retention-days 是这块内存的硬上限，超出即静默淘汰，之后 restoreBackup /
+        # quickRestore 会报 NOT_FOUND。备份脚本全文常驻堆内，这两个值是唯一的 OOM 闸门。
+        #
+        # 破坏性变更（0.4.0 引入，沿用至今）：删掉了 auto-cleanup / default-backup-schema / recover-mode-cascade
+        #   三个从未被读取的键；新增 max-records；retention-days 默认由 30 改为 7 并真正生效——
+        #   此前它只管手工调用的 cleanupBackups，内存里的 7 天硬过期是写死的常量，配 30 是谎报。
         enabled: true
         incremental-enabled: true
         max-backup-rows: 500000
-        retention-days: 30
-        auto-cleanup: true
-        default-backup-schema: backup_schema
-        recover-mode-cascade: true
+        max-records: 200
+        retention-days: 7
       lineage:
         enabled: true
         foreign-key-enabled: true
@@ -211,7 +273,7 @@ entropy:
     monitoring:
       pool:
         enabled: true
-    # MCP 工具暴露面。126 个工具全量进 tools/list 时，模型每轮都要读完整的工具描述，
+    # MCP 工具暴露面。全部工具（约 130 个）全量进 tools/list 时，模型每轮都要读完整的工具描述，
     # 既涨 token 也让相近工具（getStatistics / getPoolStats、backupTable /
     # exportQueryToTable）更容易被选错。这里的裁剪发生在启动期：不在清单里的工具根本不会
     # 出现在 tools/list，而不是调用时才报错。
@@ -230,12 +292,26 @@ entropy:
     # 这是刻意的——工具改名后配置悄悄失效比启动报错难查得多。改工具名时记得同步这里。
     #
     # 数据面（只读查询，高并发，可多副本）：plane=data 按工具描述里的 标签：[...] 自动切分，
-    #   带 read 且不带 write/ddl/destructive/admin 的才留下。实测保留 89/116。
+    #   带 read 且不带 write/ddl/destructive/admin 的才留下。约留下四分之三，准确数量看启动日志
+    #   打印的 "MCP tool exposure: X of Y tools registered"（这里不钉快照数字：加一个工具就会过期）。
     #   比手写 groups 白名单准：cross-database 里的联邦查询留下、createDbLink/dropDbLink 摘掉。
-    # 控制面（连接注册、备份恢复、ETL、CDC、DDL，单副本）：plane=control，是 data 的补集。
+    # 控制面（备份恢复、ETL、CDC、DDL，单副本）：plane=control，是 data 的补集。
     # 标签缺失的新工具会落进 control——对暴露面最大的数据面 fail-closed。
     # include 刻意能穿透 plane，用于"数据面额外放一个受控写工具"。
-    # plane 是暴露面收敛手段，不是安全边界：真正的闸是 ddl.allowed 与 entropy.mcp.security.*。
+    # plane 是暴露面收敛手段，不是安全边界：真正的闸是 ddl.allowed 与 entropy.mcp.security.*，
+    #   它们拦的是执行——摘掉工具不等于禁用能力，放进来也不等于放行。
+    #
+    # plane=data 下 connection-admin 只保留 3 个只读工具（listConnections / describeConnection /
+    #   getConnectionCount）；createNamedConnection 带 write 标签，仍属控制面。所以纯数据面副本
+    #   能查看和校验连接，但注册要么靠 include: [createNamedConnection] 穿透，要么由控制面副本统一做。
+    #   （0.4.0 之前这三个只读工具误带 admin 标签，整组都进不了数据面，见 ToolPlane 的注释。）
+    #   createSealedConnection 同样带 write 标签，也在控制面。
+    #
+    # 开箱预设（profile 形式，可与 production 叠加，逗号分隔，后者优先）：
+    #   --spring.profiles.active=production,tools-explore   查询与探索        23 个
+    #   --spring.profiles.active=production,tools-dba        DBA 诊断          31 个
+    #   --spring.profiles.active=production,tools-govern     目录/血缘/质量    36 个
+    # 对应 application-tools-*.yml，各文件头部写了覆盖范围与依赖的其他开关。
     #
     # 收敛专家级低频操作参考配置：
     #   exclude: [flashbackQuery, createDbLink, dropDbLink, showBlockingTree, killSession]

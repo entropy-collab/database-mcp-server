@@ -43,7 +43,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @SpringBootTest(properties = {
         "entropy.mcp.database.ddl.allowed=true",
-        "entropy.mcp.gateway.enabled=false"
+        "entropy.mcp.gateway.enabled=false",
+        // 0.4.0 起 entropy.mcp.security.enabled 默认 true，不显式关掉的话本上下文会因为没有
+        // MCP_SECURITY_ADMIN_PASSWORD 而启动失败。@Import(TestSecurityConfig) 救不了：它只用
+        // @Primary 顶掉 SecurityFilterChain，不会阻止 UserDetailsService 那个 @Bean 被创建。
+        "entropy.mcp.security.enabled=false"
 })
 @Import(TestSecurityConfig.class)
 class AdminToolsTest {

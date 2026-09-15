@@ -1,0 +1,21 @@
+# 工具暴露预设：数据治理（目录 / 血缘 / 质量）
+#
+# 用法（可与 production 叠加，逗号分隔，后者优先）：
+#   java -jar app.jar --spring.profiles.active=production,tools-govern
+#
+# 覆盖范围：资产目录与敏感列扫描、外键血缘与影响分析、表级质量检查，
+# 外加表结构与查询能力用于取证。不含写入、DDL、ETL、CDC、备份。
+#
+# 注意血缘依赖 entropy.mcp.database.lineage.foreign-key-enabled，
+# 关闭时 getUpstream / getDownstream 恒返回空边集。
+entropy:
+  mcp:
+    tools:
+      groups:
+        - intent-router
+        - connection-admin
+        - catalog
+        - lineage
+        - quality
+        - schema
+        - query

@@ -17,11 +17,16 @@ package com.entropy.database.mcp.config;
 
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.etl.JobExecutionEngine;
+import com.entropy.database.mcp.properties.CredentialCipherProperties;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
@@ -48,5 +53,31 @@ class DatabaseConfigWiringTest {
         engine.validateSourceSql("SELECT 1 FROM DUAL");
 
         verify(validator).validateSelect("SELECT 1 FROM DUAL");
+    }
+
+    /**
+     * {@code require-sealed-credentials=true} 但没配私钥 = 一个「起来了但什么都注册不了」的服务：
+     * 明文那条路被开关拒，密文那条路没有解密器也拒，而失败点落在第一次工具调用上。
+     * 这里断言的是校验方法本身抛错；在真实上下文里它由 {@code credentialCipher} bean 方法调用，
+     * 于是 Spring 上下文直接起不来。
+     */
+    @Test
+    void refusesToStartWhenSealedCredentialsAreRequiredWithoutAPrivateKey() {
+        assertThatThrownBy(() -> DatabaseConfig.requireCipherConfiguredWhenSealedCredentialsAreRequired(
+                new CredentialCipherProperties(null, Duration.ofMinutes(15), true)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("require-sealed-credentials")
+                .hasMessageContaining("MCP_CREDENTIAL_PRIVATE_KEY");
+    }
+
+    /** 两个都配了（正常的密文部署），以及两个都没配（默认部署）都必须放行。 */
+    @Test
+    void acceptsTheTwoConsistentCombinations() {
+        assertThatCode(() -> {
+            DatabaseConfig.requireCipherConfiguredWhenSealedCredentialsAreRequired(
+                    new CredentialCipherProperties("a-private-key", Duration.ofMinutes(15), true));
+            DatabaseConfig.requireCipherConfiguredWhenSealedCredentialsAreRequired(
+                    new CredentialCipherProperties(null, Duration.ofMinutes(15), false));
+        }).doesNotThrowAnyException();
     }
 }

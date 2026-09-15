@@ -15,7 +15,12 @@ import java.util.Map;
 @ExtendWith(SpringExtension.class)
 @SpringBootTest(properties = {
     "entropy.mcp.database.enabled=true",
-    "entropy.mcp.database.dialect=h2"
+    "entropy.mcp.database.dialect=h2",
+    // 鉴权默认已改为开启，开启就必须有 admin 口令。这个用例只查 information_schema，
+    // 显式关掉鉴权比给它编一个口令更准确地表达意图。此前它能启动是因为 SecurityConfigTest
+    // 的静态块往 JVM 里塞了一个永不清理的系统属性，surefire 默认 reuseForks=true 于是被顺带蹭到；
+    // 那条泄漏修掉后，这里的依赖就显形了。
+    "entropy.mcp.security.enabled=false"
 })
 public class TestH2Schemas {
 

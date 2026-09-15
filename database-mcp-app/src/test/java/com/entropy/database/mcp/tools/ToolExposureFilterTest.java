@@ -237,13 +237,35 @@ class ToolExposureFilterTest {
                     .isTrue());
             assertThat(names.size()).isLessThan(catalog.size());
         }
+
+        /**
+         * 目录的"暴露视图"必须与真正注册的工具集一致。
+         *
+         * <p>{@link ToolCatalog} 是从 bean 反射来的全集，不经过本过滤器；{@code suggestTools} 又
+         * 只从目录里挑候选。0.4.0 之前两者没有任何联系，配了预设之后它会把已被摘掉、根本调不到的
+         * 工具推荐给模型，{@code totalTools} 还照报全量。
+         */
+        @Test
+        void catalogExposedViewMatchesTheRegisteredSet() {
+            List<String> names = specBeans.orderedStream()
+                    .flatMap(List::stream)
+                    .map(spec -> spec.tool().name())
+                    .toList();
+
+            assertThat(catalog.exposedDescriptors().stream().map(ToolCatalog.ToolDescriptor::name))
+                    .containsExactlyInAnyOrderElementsOf(names);
+            assertThat(catalog.exposedSize()).isEqualTo(names.size());
+            // 全量视图必须不受裁剪影响：过滤器自己要靠它做判定，"X of Y" 的 Y 也得是总数
+            assertThat(catalog.size()).isGreaterThan(catalog.exposedSize());
+        }
     }
 
     /**
-     * 对着真实的 116 个工具验证按标签推导的数据面。
+     * 对着容器里注册的全部真实工具验证按标签推导的数据面。
      *
      * <p>单测用的假工具只有 4 个，证明不了"真实描述里的标签行足以支撑切分"——这个用例才是
-     * {@code plane=data} 敢用在生产上的依据。
+     * {@code plane=data} 敢用在生产上的依据。断言写成与 {@code catalog.size()} 的相对关系而不是
+     * 具体数量：钉快照数字的话，加一个工具就要改一次，而改错了没人看得出来。
      */
     @Nested
     @SpringBootTest(properties = {
@@ -287,6 +309,21 @@ class ToolExposureFilterTest {
                     .contains("executeQuery", "listTables", "describeTable", "checkHealth")
                     .doesNotContain("executeDdl", "insertData", "upsertData", "createDbLink",
                             "submitEtlJob", "backupTable", "killSession");
+        }
+
+        /**
+         * 只读的连接查看工具必须留在数据面，注册工具必须被摘掉。
+         *
+         * <p>这三个只读工具在 0.4.0 之前误带 {@code admin} 标签，而 {@code admin} 在
+         * {@link ToolPlane} 的判据里算"会改动状态"，于是整个 connection-admin 组都进不了数据面——
+         * 纯数据面副本连"看一眼有哪些连接、连上没有"都做不到。标签修正后此处钉住结论，
+         * 防止有人再把 {@code admin} 打回只读工具上。
+         */
+        @Test
+        void keepsReadOnlyConnectionInspectionButNotRegistration() {
+            assertThat(registeredNames())
+                    .contains("listConnections", "describeConnection", "getConnectionCount")
+                    .doesNotContain("createNamedConnection");
         }
 
         /** 切分必须真的切掉了一部分，否则这个开关等于没生效。 */

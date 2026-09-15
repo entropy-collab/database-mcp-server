@@ -205,7 +205,7 @@ class P0ToP3EndToEndTest {
     @Test
     @DisplayName("P0: describeConnection should return connection details")
     void testDescribeConnection() throws Exception {
-        String response = postToolCall("describeConnection", Map.of("connectionName", "primary"));
+        String response = postToolCall("describeConnection", Map.of("connection", "primary"));
         String text = getToolText(response);
         JsonNode result = mapper.readTree(text);
 

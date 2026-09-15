@@ -6,9 +6,16 @@ entropy:
   mcp:
     # HTTP authentication for /mcp, /api/** and the non-public actuator endpoints.
     # This is NOT entropy.mcp.database.security (SQL guardrails) - see application.yml.
+    # 与 application.yml 的默认值一致（0.4.0 起同为 true）。刻意保留这行显式声明：
+    # 万一有人把基线默认值改回 false，生产 profile 也不会跟着静默失去鉴权。
     security:
       enabled: true
     gateway:
       enabled: true
     database:
       dialect: oracle
+      # 与 application.yml 的默认值一致（同为 false）。刻意保留这行显式声明：万一有人为了本地
+      # 调试把基线默认值改回 true，生产 profile 也不会跟着静默放开改库结构的权限。
+      # 生产上确实要改结构时，应当临时在部署参数里覆盖，而不是把这行改掉。
+      ddl:
+        allowed: false

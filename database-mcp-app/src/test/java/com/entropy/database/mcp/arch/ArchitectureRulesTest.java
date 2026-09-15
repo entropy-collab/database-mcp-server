@@ -100,7 +100,6 @@ class ArchitectureRulesTest {
     private static final Set<String> CONNECTION_REGISTRY_TYPES =
             Set.of(DYNAMIC_DATA_SOURCE_MANAGER, BYOK_DATA_SOURCE_CONTEXT);
 
-    private static final String ETL_TOOLS = BASE_PACKAGE + ".tools.EtlTools";
     private static final String POOL_MONITOR_TOOLS = BASE_PACKAGE + ".tools.PoolMonitorTools";
     private static final String CONNECTION_ADMIN_TOOLS = BASE_PACKAGE + ".tools.ConnectionAdminTools";
 
@@ -111,15 +110,6 @@ class ArchitectureRulesTest {
      */
     private static final List<Exemption> R1_R2_EXEMPTIONS = List.of(
             new Exemption(
-                    ETL_TOOLS,
-                    Set.of(DYNAMIC_DATA_SOURCE_MANAGER,
-                            BYOK_DATA_SOURCE_CONTEXT,
-                            "org.springframework.jdbc.core.JdbcTemplate"),
-                    Set.of("<init>", "createNamedConnection"),
-                    Set.of("acquire", "getJdbcTemplate", "getDialect", "queryForList"),
-                    "createNamedConnection registers a BYOK connection and smoke-tests it: registration is "
-                            + "connection management, not a database operation, so there is no facade seam for it"),
-            new Exemption(
                     POOL_MONITOR_TOOLS,
                     CONNECTION_REGISTRY_TYPES,
                     Set.of(),
@@ -127,11 +117,18 @@ class ArchitectureRulesTest {
                     "read-only management plane: only reads HikariCP pool statistics from the registry"),
             new Exemption(
                     CONNECTION_ADMIN_TOOLS,
-                    CONNECTION_REGISTRY_TYPES,
+                    Set.of(DYNAMIC_DATA_SOURCE_MANAGER,
+                            BYOK_DATA_SOURCE_CONTEXT,
+                            "org.springframework.jdbc.core.JdbcTemplate"),
                     Set.of(),
                     Set.of("listConnectionKeys", "getConnectionMetadata",
-                            "getConnectionCount", "getActiveConnectionCount"),
-                    "read-only management plane: only lists connection keys and reads connection metadata/counts"));
+                            "getConnectionCount", "getActiveConnectionCount",
+                            "acquire", "getJdbcTemplate", "getDialect", "queryForList"),
+                    "connection management plane: lists connection keys and reads metadata/counts, and "
+                            + "createNamedConnection registers a BYOK connection then smoke-tests it. "
+                            + "Registration is connection management, not a database operation, so there "
+                            + "is no facade seam for it. This used to be EtlTools' exemption; the tool "
+                            + "moved here so it is no longer gated by entropy.mcp.gateway.enabled"));
 
     // ---------------------------------------------------------------------------------------------
     // Baselines: current violation counts. Lower them as violations are fixed; never raise them.
