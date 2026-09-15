@@ -498,4 +498,17 @@ public class MySqlDialect extends AbstractDatabaseDialect {
         String audit = quote(table + "_audit");
         return schema == null || schema.isBlank() ? audit : quote(schema) + "." + audit;
     }
+
+    /**
+     * MySQL/MariaDB 默认未开 {@code NO_BACKSLASH_ESCAPES}，字符串字面量里反斜杠是转义符。
+     *
+     * <p>这正是备份脚本转义 bug 的源头：只把 {@code '} 翻倍时，一个以反斜杠结尾的列值会让
+     * {@code '...\'} 里的引号被吃掉、字面量不闭合，后续文本被并入字符串，足以改写语句边界。
+     * 声明成 {@code ESCAPE} 后 {@code stringLiteral} 会连反斜杠一起翻倍；不声明会退回
+     * {@link BackslashInLiteral#UNKNOWN}，那条路只是把这类行拒收——安全，但把合法数据也挡在外面。
+     */
+    @Override
+    public BackslashInLiteral backslashInLiteral() {
+        return BackslashInLiteral.ESCAPE;
+    }
 }

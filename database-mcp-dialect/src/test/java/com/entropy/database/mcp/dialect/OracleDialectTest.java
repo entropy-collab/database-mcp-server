@@ -110,4 +110,26 @@ class OracleDialectTest {
 
         Assertions.assertThat(sql.chars().filter(c -> c == '?').count()).isEqualTo(3);
     }
+
+    /**
+     * Oracle 的字面量里反斜杠是普通字符，只有 {@code '} 需要翻倍。多翻一个反斜杠就是往数据里塞字符，
+     * 还原出来的值与原值不同——所以 Oracle 必须显式声明 LITERAL，而不是留在默认的 UNKNOWN 上被保守处理。
+     */
+    @Test
+    void stringLiteralOnlyDoublesQuotes() {
+        Assertions.assertThat(dialect.backslashInLiteral())
+                .isEqualTo(DatabaseDialect.BackslashInLiteral.LITERAL);
+        Assertions.assertThat(dialect.stringLiteral("C:\\path\\")).isEqualTo("'C:\\path\\'");
+        Assertions.assertThat(dialect.stringLiteral("it's")).isEqualTo("'it''s'");
+    }
+
+    /** {@code SET STATEMENT_ID} 不接受绑定参数，所以那个字面量的字符集校验属于方言。 */
+    @Test
+    void explainPlanStatementValidatesTheStatementId() {
+        Assertions.assertThat(dialect.explainPlanStatement("mcp_query_1", "SELECT 1 FROM dual"))
+                .isEqualTo("EXPLAIN PLAN SET STATEMENT_ID = 'mcp_query_1' FOR SELECT 1 FROM dual");
+
+        Assertions.assertThatThrownBy(() -> dialect.explainPlanStatement("x' OR '1", "SELECT 1"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

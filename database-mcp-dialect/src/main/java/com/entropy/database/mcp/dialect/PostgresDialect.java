@@ -579,4 +579,16 @@ public class PostgresDialect extends AbstractDatabaseDialect {
         }
         return null;
     }
+
+    /**
+     * PostgreSQL 自 9.1 起 {@code standard_conforming_strings} 默认为 {@code on}，普通字面量里的反斜杠
+     * 就是普通字符。显式声明是为了不被当成「未表态」——{@link BackslashInLiteral#UNKNOWN} 会让生成 SQL
+     * 文本的调用方把含反斜杠的行直接拒收，而这类值在 PG 上是完全合法的数据。
+     *
+     * <p>不覆盖 {@code E'...'} 转义字符串的情形：本服务从不生成 {@code E} 前缀的字面量。
+     */
+    @Override
+    public BackslashInLiteral backslashInLiteral() {
+        return BackslashInLiteral.LITERAL;
+    }
 }

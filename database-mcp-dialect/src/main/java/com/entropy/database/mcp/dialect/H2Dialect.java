@@ -227,4 +227,10 @@ public class H2Dialect extends AbstractDatabaseDialect {
     public String getHealthCheckSql() {
         return "SELECT 'OK' AS status";
     }
+
+    /** H2 的字符串字面量里反斜杠是普通字符；显式声明以免被当成未表态而拒收含反斜杠的行。 */
+    @Override
+    public BackslashInLiteral backslashInLiteral() {
+        return BackslashInLiteral.LITERAL;
+    }
 }

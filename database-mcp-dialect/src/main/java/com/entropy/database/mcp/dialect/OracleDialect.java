@@ -261,6 +261,59 @@ public class OracleDialect extends AbstractDatabaseDialect {
     }
 
     /**
+     * Oracle 的 EXPLAIN 是两步的：先往会话级临时表 {@code SYS.PLAN_TABLE$} 写行，再查回来。
+     *
+     * <p>这个 true 就是调用方判断「要不要走两步」的唯一依据，取代了
+     * {@code "OracleDialect".equals(dialect.getClass().getSimpleName())}——子类与 CGLIB 代理都会让类名
+     * 判断静默走错分支，从而退回「Oracle 上 EXPLAIN 拿不到行」。
+     */
+    @Override
+    public boolean explainWritesToPlanTable() {
+        return true;
+    }
+
+    /**
+     * {@code EXPLAIN PLAN SET STATEMENT_ID = '...' FOR ...}：用 STATEMENT_ID 把本次计划与同一会话里的
+     * 历史计划隔开。
+     *
+     * <p>{@code SET STATEMENT_ID} 只接受字面量，不能绑参数，所以这里自己把它限死在标识符字符集内；
+     * 校验放在方言而不是调用方，是因为拼这个字面量的就是方言。
+     */
+    @Override
+    public String explainPlanStatement(String statementId, String sql) {
+        if (statementId == null || !statementId.matches("[A-Za-z0-9_]+")) {
+            throw new IllegalArgumentException("Invalid statement ID format: " + statementId);
+        }
+        return "EXPLAIN PLAN SET STATEMENT_ID = '" + statementId + "' FOR " + sql;
+    }
+
+    /** 读回本次计划的语句；列顺序与 {@code StandardizedPlan.fromOracleExplain} 的期望一致。 */
+    @Override
+    public String planTableFetchSql() {
+        return "SELECT id, parent_id, operation, options, object_name, "
+                + "cost, cardinality, bytes, access_predicates, filter_predicates "
+                + "FROM plan_table WHERE statement_id = ? ORDER BY id";
+    }
+
+    /** plan_table 按会话保留行，而连接会被池复用到 max-lifetime，不删就一直堆。 */
+    @Override
+    public String planTableCleanupSql() {
+        return "DELETE FROM plan_table WHERE statement_id = ?";
+    }
+
+    /**
+     * Oracle 的字符串字面量里反斜杠是普通字符，只有 {@code '} 需要翻倍。
+     *
+     * <p>显式声明的意义在于「不被当成没表态」：默认的 {@link BackslashInLiteral#UNKNOWN} 会让生成 SQL
+     * 文本的调用方对含反斜杠的值保持保守，而 Oracle 上一个以反斜杠结尾的值是完全合法的数据，没有理由
+     * 拒绝它。
+     */
+    @Override
+    public BackslashInLiteral backslashInLiteral() {
+        return BackslashInLiteral.LITERAL;
+    }
+
+    /**
      * Query the execution plan from PLAN_TABLE.
      */
     public String getExecutionPlan() {
@@ -643,7 +696,7 @@ public class OracleDialect extends AbstractDatabaseDialect {
             FROM %s VERSIONS BETWEEN SCN ? AND MAXVALUE t
             WHERE t.VERSIONS_OPERATION IS NOT NULL
             ORDER BY t.VERSIONS_STARTTIME
-            """.formatted(qualifiedName(schema, table));
+            """.formatted(quoteQualified(schema, table));
     }
 
     @Override
@@ -671,13 +724,6 @@ public class OracleDialect extends AbstractDatabaseDialect {
 
     @Override
     public String cdcCreateMirrorTableSql(String targetSchema, String targetTable, String sourceQuery) {
-        return "CREATE TABLE %s AS %s".formatted(qualifiedName(targetSchema, targetTable), sourceQuery);
-    }
-
-    /** Quotes {@code schema.table}, omitting the schema when it is absent. */
-    private String qualifiedName(String schema, String table) {
-        return schema == null || schema.isBlank()
-                ? quote(table)
-                : quote(schema) + "." + quote(table);
+        return "CREATE TABLE %s AS %s".formatted(quoteQualified(targetSchema, targetTable), sourceQuery);
     }
 }

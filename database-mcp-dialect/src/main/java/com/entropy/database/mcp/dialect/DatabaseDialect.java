@@ -165,6 +165,59 @@ public interface DatabaseDialect {
     }
 
     /**
+     * 该方言的 EXPLAIN 是否分两步：先把计划写进一张计划表，再查回来。
+     *
+     * <p>Oracle 是目前唯一这样的：{@code EXPLAIN PLAN FOR} 不返回结果集，而是往会话级临时表
+     * {@code SYS.PLAN_TABLE$}（实测 {@code TEMPORARY=Y / DURATION=SYS$SESSION}）写行，必须紧接着在
+     * 同一条物理连接上读回来。
+     *
+     * <p>做成契约而不是让调用方判品种：{@code ExecutionPlanRepositoryImpl} 原来写的是
+     * {@code "OracleDialect".equals(dialect.getClass().getSimpleName())}，任何子类、CGLIB 代理或将来的
+     * {@code Oracle23Dialect} 都会静默走单步分支，退回「Oracle 上 EXPLAIN 拿不到行」这个刚修掉的 bug。
+     * 否决了改成 {@code switch (getDialectName())}：那个默认实现本身就是从类名推导的，换不掉同一类脆弱性。
+     */
+    default boolean explainWritesToPlanTable() {
+        return false;
+    }
+
+    /**
+     * 两步 EXPLAIN 的第一步：把计划写进计划表，并用 {@code statementId} 把本次结果与同一会话里的历史
+     * 计划隔开。
+     *
+     * <p>{@code statementId} 由调用方生成，会以字面量形式拼进 SQL（{@code SET STATEMENT_ID} 不接受绑定
+     * 参数），所以实现必须自己校验它是纯标识符字符，不合法就抛 {@link IllegalArgumentException}。
+     * 默认实现退化成 {@link #getExplainPlanSql(String)}，供 {@link #explainWritesToPlanTable()} 为
+     * {@code false} 的方言复用。
+     */
+    default String explainPlanStatement(String statementId, String sql) {
+        return getExplainPlanSql(sql);
+    }
+
+    /**
+     * 两步 EXPLAIN 的第二步：读回本次写入的计划行。
+     *
+     * <p>契约：恰好一个 {@code ?}，绑 {@link #explainPlanStatement(String, String)} 用过的
+     * {@code statementId}；结果列顺序与 {@code StandardizedPlan.fromOracleExplain} 的期望一致。
+     *
+     * @return 语句，或 {@code null} 表示该方言不走计划表
+     */
+    default String planTableFetchSql() {
+        return null;
+    }
+
+    /**
+     * 两步 EXPLAIN 的收尾：删掉本次写进计划表的行。
+     *
+     * <p>契约同 {@link #planTableFetchSql()}：恰好一个 {@code ?}，绑 {@code statementId}。计划表按会话
+     * 保留行，而连接会被池复用到 {@code max-lifetime}，不清理就会一直堆积。
+     *
+     * @return 语句，或 {@code null} 表示无需清理
+     */
+    default String planTableCleanupSql() {
+        return null;
+    }
+
+    /**
      * SQL that counts the rows of {@code tableName} <em>exactly</em>.
      *
      * <p>Contract: <strong>no {@code ?} placeholder</strong> - the table name is an identifier in a
@@ -301,6 +354,29 @@ public interface DatabaseDialect {
     }
 
     /**
+     * Quotes {@code schema.table}, omitting the schema when it is absent.
+     *
+     * <p>Callers that hand-build SQL need the qualification rule that the metadata queries get for
+     * free from their {@code schema} argument: an unqualified name resolves against the session's
+     * current schema, which is wrong whenever the table lives in another one. The quality checks
+     * probed {@code quote(table)} only, so on a connection whose login schema is not the table's
+     * every probe raised "table or view does not exist", was swallowed, and the report came back as
+     * {@code totalRows=0} with a perfect score.
+     *
+     * <p>The schema reaches SQL by interpolation, so a name that is not a plain identifier is
+     * refused rather than rendered.
+     */
+    default String quoteQualified(String schema, String table) {
+        if (schema == null || schema.isBlank()) {
+            return quote(table);
+        }
+        if (!isValidIdentifier(schema)) {
+            throw new IllegalArgumentException("Invalid schema name: " + schema);
+        }
+        return quote(schema) + "." + quote(table);
+    }
+
+    /**
      * Validate database identifier (table name, column name, etc.).
      */
     default boolean isValidIdentifier(String name) {
@@ -308,6 +384,50 @@ public interface DatabaseDialect {
             return false;
         }
         return name.matches("[a-zA-Z_][a-zA-Z0-9_]*");
+    }
+
+    /**
+     * 字符串字面量里反斜杠的语义。
+     *
+     * <p>标准 SQL 只认「引号翻倍」，反斜杠是普通字符（Oracle、PostgreSQL 的
+     * {@code standard_conforming_strings=on}、H2、SQL Server）。MySQL/MariaDB 反过来：默认<b>没开</b>
+     * {@code NO_BACKSLASH_ESCAPES}，反斜杠是转义符，于是同一段文本在两种语义下字面量的结束位置不同。
+     *
+     * <p>{@link #UNKNOWN} 是默认值，含义是「这个方言还没表态」，而不是「按标准 SQL 处理」：把没表态
+     * 当标准会在 MySQL 上生成不闭合的字面量，把没表态当 MySQL 又会在 Oracle 上多插一个反斜杠。生成
+     * SQL 文本的调用方必须对 {@code UNKNOWN} 保持保守——拒掉两种语义下边界不一致的语句，而不是赌
+     * 服务端的 {@code sql_mode}。
+     */
+    enum BackslashInLiteral {
+        /** 反斜杠是普通字符，只需把 {@code '} 翻倍。 */
+        LITERAL,
+        /** 反斜杠是转义符，必须连同 {@code \} 一起翻倍。 */
+        ESCAPE,
+        /** 方言未声明；调用方按「不可信」处理。 */
+        UNKNOWN
+    }
+
+    /** 见 {@link BackslashInLiteral}；默认未声明。 */
+    default BackslashInLiteral backslashInLiteral() {
+        return BackslashInLiteral.UNKNOWN;
+    }
+
+    /**
+     * 把一个字符串值渲染成本方言的 SQL 字面量（含外层单引号）。
+     *
+     * <p>转义规则属于方言，不属于拼 SQL 的调用方：{@code DatabaseBackupServiceImpl.formatValue} 原来
+     * 只做引号翻倍，在 MySQL/MariaDB（默认未开 {@code NO_BACKSLASH_ESCAPES}）上，一个以反斜杠结尾的
+     * 列值会让 {@code '...\'} 的收尾引号被吃掉、字面量不闭合，后续文本被并进字符串，足以改写语句边界。
+     *
+     * <p>{@link BackslashInLiteral#UNKNOWN} 时只翻倍引号：多翻一个反斜杠在标准 SQL 上就是往数据里
+     * 塞字符，属于静默数据损坏，比拒绝更糟。所以「不确定」这件事留给调用方在生成/重放前显式复校。
+     */
+    default String stringLiteral(String value) {
+        String escaped = value.replace("'", "''");
+        if (backslashInLiteral() == BackslashInLiteral.ESCAPE) {
+            escaped = escaped.replace("\\", "\\\\");
+        }
+        return "'" + escaped + "'";
     }
 
     /**

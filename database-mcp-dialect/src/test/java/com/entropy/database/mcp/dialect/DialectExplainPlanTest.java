@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.dialect;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -77,5 +78,42 @@ class DialectExplainPlanTest {
     void onlySqlServerWithholdsThePlanFromTheResultSet(DatabaseDialect dialect) {
         assertThat(dialect.explainPlanReturnsRows())
                 .isEqualTo(!(dialect instanceof SqlServerDialect));
+    }
+
+    /**
+     * Oracle 是唯一「EXPLAIN 分两步」的方言，且这件事必须由方言自己声明。
+     *
+     * <p>调用方原来按 {@code "OracleDialect".equals(dialect.getClass().getSimpleName())} 判断，子类、
+     * CGLIB 代理、将来的 {@code Oracle23Dialect} 都会静默走单步分支，而单步在 Oracle 上恒返回空计划。
+     */
+    @ParameterizedTest
+    @MethodSource("allDialects")
+    void onlyOracleWritesItsPlanToAPlanTable(DatabaseDialect dialect) {
+        boolean oracle = dialect instanceof OracleDialect;
+        assertThat(dialect.explainWritesToPlanTable()).isEqualTo(oracle);
+        // 声明走计划表就必须给出读回与清理语句，否则调用方只能空手回。
+        assertThat(dialect.planTableFetchSql() != null).isEqualTo(oracle);
+        assertThat(dialect.planTableCleanupSql() != null).isEqualTo(oracle);
+    }
+
+    @Test
+    void oraclePlanTableStatementsCarryOnePlaceholderForTheStatementId() {
+        OracleDialect oracle = new OracleDialect();
+
+        assertThat(oracle.explainPlanStatement("mcp_query_7", QUERY))
+                .isEqualTo("EXPLAIN PLAN SET STATEMENT_ID = 'mcp_query_7' FOR " + QUERY);
+        assertThat(oracle.planTableFetchSql()).contains("FROM plan_table WHERE statement_id = ?");
+        assertThat(oracle.planTableCleanupSql()).isEqualTo(
+                "DELETE FROM plan_table WHERE statement_id = ?");
+    }
+
+    /** 不走计划表的方言：这个方法退化成单步的 EXPLAIN 语句，调用方无需另判。 */
+    @ParameterizedTest
+    @MethodSource("supported")
+    void explainPlanStatementFallsBackToTheSingleStepSql(DatabaseDialect dialect, String expected) {
+        if (dialect.explainWritesToPlanTable()) {
+            return;
+        }
+        assertThat(dialect.explainPlanStatement("mcp_query_1", QUERY)).isEqualTo(expected);
     }
 }

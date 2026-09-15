@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.dialect;
 
+import com.entropy.database.mcp.contract.SqlIdentifiers;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpValidationException;
 
@@ -99,9 +100,14 @@ public final class DialectUtils {
      *
      * <p>Deliberately stricter than any dialect's own identifier rules: the value is destined for
      * string concatenation, so anything unusual is rejected instead of escaped.
+     *
+     * <p>规则委派给 {@link SqlIdentifiers#isPlain}，本方法只保留自己那一层 trim：仓库里曾有四套
+     * 各差一点的标识符正则，同一个 schema 名在不同入口的接受集不同。trim 留在这里而不是下沉，
+     * 是因为它属于本方法的契约（{@link #schemaExpression} 拼进 SQL 的也是 trim 之后的值），
+     * 而 {@code SqlIdentifiers} 刻意不替调用方改写输入。
      */
     public static boolean isPlainIdentifier(String name) {
-        return name != null && name.trim().matches("[A-Za-z_][A-Za-z0-9_$#]*");
+        return name != null && SqlIdentifiers.isPlain(name.trim());
     }
 
     // ─── CDC watermark normalization ──────────────────────────────────────
