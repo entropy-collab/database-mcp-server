@@ -86,6 +86,33 @@ class OraclePartitionDdlSupportTest {
                     .doesNotThrowAnyException();
         }
 
+        /**
+         * 分区键是 {@code VARCHAR2} 的 yyyyMMdd 字符串，边界因此是**字符串字面量**而不是数字。
+         *
+         * <p>单列这一条是因为它与上面的数字边界走的不是同一条解析路径，而真实迁移脚本用的正是
+         * 这一种（按月分区、分区键为 {@code VARCHAR2(8 CHAR)}）。只测数字边界就断言「建表解锁了」
+         * 是不成立的。列定义里的 {@code VARCHAR2(n CHAR)}、内联 {@code CONSTRAINT ... PRIMARY KEY}、
+         * {@code DEFAULT SYSTIMESTAMP} 一并带上，都是同一份脚本里的真实写法。
+         */
+        @Test
+        void stringPartitionBoundsAsInTheRealSchema() {
+            assertThatCode(() -> validator().validateDdl("""
+                    CREATE TABLE ALIPAY_PAY_TXN_DETAIL (
+                        ID          NUMBER(22) NOT NULL,
+                        ORDER_NO    VARCHAR2(128 CHAR) NOT NULL,
+                        PAY_TYPE    VARCHAR2(32 CHAR) DEFAULT 'PAY' NOT NULL,
+                        TXN_DATE    VARCHAR2(8 CHAR) NOT NULL,
+                        UPDATE_TIME TIMESTAMP(6) DEFAULT SYSTIMESTAMP NOT NULL,
+                        CONSTRAINT PK_ALIPAY_PAY_TXN_DETAIL PRIMARY KEY (ID)
+                    )
+                    PARTITION BY RANGE (TXN_DATE) (
+                        PARTITION P202606 VALUES LESS THAN ('20260701'),
+                        PARTITION P202607 VALUES LESS THAN ('20260801'),
+                        PARTITION P_MAX   VALUES LESS THAN (MAXVALUE)
+                    )"""))
+                    .doesNotThrowAnyException();
+        }
+
         /** HASH 分区在 5.3 上就能过，不是这次升级带来的。 */
         @Test
         void hashPartitionedTable() {
