@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.security;
 
+import com.entropy.database.mcp.contract.SqlTailNormalizer;
 import com.entropy.database.mcp.exception.McpSqlValidationException;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import net.sf.jsqlparser.expression.BinaryExpression;
@@ -150,6 +151,14 @@ public class SqlValidatorImpl implements SqlValidator {
     // volatile ensures visibility of the reference swap; all access goes through tablesLock
     private volatile Set<String> allowedTables = new HashSet<>();
 
+    /**
+     * 解析失败时的补救链。当前只装内置的那一个，**不做 ServiceLoader 发现**——理由见
+     * {@link SqlTailNormalizer} 的类注释：这个缝放松的是写入路径的闸门，与 {@code DialectProvider}
+     * 的信任模型不同，不该让「jar 在 classpath 上」就等于「有权放宽校验」。
+     */
+    private final SqlTailNormalizers tailNormalizers =
+            new SqlTailNormalizers(List.of(new PartitionedIndexTailNormalizer()));
+
     public SqlValidatorImpl(DatabaseProperties properties) {
         this.properties = properties;
         this.allowedOperations = Collections.unmodifiableSet(new HashSet<>(ALLOWED_OPS));
@@ -176,8 +185,9 @@ public class SqlValidatorImpl implements SqlValidator {
         if (sql.contains(EXECUTABLE_COMMENT))
             throw new McpSqlValidationException(sql, "Executable comments are not allowed");
         Statement stmt;
-        try { stmt = onlyStatementOf(sql.trim()); }
-        catch (Exception e) { throw new McpSqlValidationException(sql, "SQL validation error", e); }
+        String trimmed = sql.trim();
+        try { stmt = onlyStatementOf(trimmed); }
+        catch (Exception e) { stmt = parseAfterStrippingTail(sql, trimmed, isDdl, e); }
         String op = extractOp(stmt);
         if (isDdl) {
             requireAllowedDdl(sql, stmt);
@@ -224,6 +234,36 @@ public class SqlValidatorImpl implements SqlValidator {
             throw new IllegalArgumentException("Expected a single statement but found " + statements.size());
         }
         return statements.get(0);
+    }
+
+    /**
+     * 解析失败后的唯一一次补救：请 {@link SqlTailNormalizer} 摘掉厂商方言的尾巴再解析一次。
+     *
+     * <p><b>成功路径零变化</b>：只有 {@link #onlyStatementOf} 抛了才会走到这里，解析得动的语句
+     * 完全不经过这条路。
+     *
+     * <p><b>只在写入路径上生效</b>：{@code isDdl == false}（也就是 validateSelect）直接照旧抛。
+     * 查询没有厂商 DDL 尾巴这类问题，放松只读路径的解析要求没有收益，只有风险。
+     *
+     * <p>摘完之后走的是**完整的既有校验管线**：下游的语句类型白名单仍看解析出来的 AST 类型，
+     * 表白名单仍从 AST 取对象名——{@link #extractTables} 的 {@code sql} 参数只用于错误信息。
+     * 也就是说这条路放松的只是「能不能解析成功」，不是「解析成功之后准不准」。异常信息里带的
+     * 始终是调用方给的原文。
+     */
+    private Statement parseAfterStrippingTail(String sql, String trimmed, boolean isDdl, Exception cause) {
+        if (!isDdl) {
+            throw new McpSqlValidationException(sql, "SQL validation error", cause);
+        }
+        Optional<String> stripped = tailNormalizers.stripTail(trimmed);
+        if (stripped.isEmpty()) {
+            throw new McpSqlValidationException(sql, "SQL validation error", cause);
+        }
+        try {
+            return onlyStatementOf(stripped.get());
+        } catch (Exception retryFailed) {
+            // 摘掉尾巴仍然解析不出来：报原始失败原因，那个对调用方更有用。
+            throw new McpSqlValidationException(sql, "SQL validation error", cause);
+        }
     }
 
     private String extractOp(Statement stmt) {

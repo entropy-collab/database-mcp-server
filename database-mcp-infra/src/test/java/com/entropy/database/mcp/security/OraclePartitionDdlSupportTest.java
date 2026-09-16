@@ -101,6 +101,42 @@ class OraclePartitionDdlSupportTest {
             assertThatCode(() -> validator().validateDdl("CREATE UNIQUE INDEX UK_T ON T (ID)"))
                     .doesNotThrowAnyException();
         }
+
+        /**
+         * 分区表上的本地/全局索引。解析器两个版本都不认这个尾巴，放行靠的是
+         * {@link PartitionedIndexTailNormalizer} 在解析失败后把尾巴摘掉再校验一次；
+         * 执行时用的仍是带尾巴的原文。
+         */
+        @Test
+        void localAndGlobalIndex() {
+            assertThatCode(() -> validator().validateDdl(
+                    "CREATE UNIQUE INDEX UK_T ON T (ID, TXN_DATE) LOCAL")).doesNotThrowAnyException();
+            assertThatCode(() -> validator().validateDdl(
+                    "CREATE INDEX IDX_T ON T (TXN_DATE) LOCAL")).doesNotThrowAnyException();
+            assertThatCode(() -> validator().validateDdl(
+                    "CREATE INDEX IDX_T ON T (TXN_DATE) GLOBAL")).doesNotThrowAnyException();
+            assertThatCode(() -> validator().validateDdl(
+                    "CREATE BITMAP INDEX IDX_T ON T (FLAG) LOCAL")).doesNotThrowAnyException();
+        }
+
+        /** 跨行是迁移脚本的常态，尾巴前有换行也要认。 */
+        @Test
+        void localIndexAcrossLines() {
+            assertThatCode(() -> validator().validateDdl("""
+                    CREATE UNIQUE INDEX UK_ALIPAY_PAY_TXN_DETAIL
+                        ON ALIPAY_PAY_TXN_DETAIL (ID, TXN_DATE)
+                        LOCAL""")).doesNotThrowAnyException();
+        }
+
+        /**
+         * {@code TABLESPACE} 尾巴是解析器**原生认识**的，不经过尾巴摘除。放在这里是为了记录这条
+         * 边界：不是「所有索引尾巴都靠摘」，只有 LOCAL / GLOBAL 需要。
+         */
+        @Test
+        void tablespaceTailIsParsedNativelyNotStripped() {
+            assertThatCode(() -> validator().validateDdl(
+                    "CREATE INDEX IDX_T ON T (C) TABLESPACE TS_DATA")).doesNotThrowAnyException();
+        }
     }
 
     @Nested
@@ -112,14 +148,9 @@ class OraclePartitionDdlSupportTest {
          * 它的唯一/普通索引通常都写 {@code LOCAL}，于是建表能过、索引过不去。
          */
         @Test
-        void localIndex() {
-            assertRejected("CREATE UNIQUE INDEX UK_T ON T (ID, TXN_DATE) LOCAL");
-            assertRejected("CREATE INDEX IDX_T ON T (TXN_DATE) LOCAL");
-        }
-
-        @Test
-        void globalIndex() {
-            assertRejected("CREATE INDEX IDX_T ON T (TXN_DATE) GLOBAL");
+        void localIndexOnANonIndexStatement() {
+            // 尾巴摘除只认 CREATE ... INDEX 开头的语句，别的语句以 LOCAL 结尾一律不救。
+            assertRejected("ALTER TABLE T MODIFY PARTITION P1 LOCAL");
         }
 
         /** LIST 分区的 {@code VALUES ('A')} / {@code VALUES (DEFAULT)} 形状仍不认。 */
@@ -148,6 +179,69 @@ class OraclePartitionDdlSupportTest {
                     .isInstanceOf(McpSqlValidationException.class)
                     .satisfies(thrown -> assertThat(((McpSqlValidationException) thrown).getSql())
                             .isEqualTo(ddl));
+        }
+    }
+
+    /**
+     * 尾巴摘除这条路是在放松写入路径的闸门，所以只测「合法分区 DDL 现在能过」远远不够——
+     * 那只证明了正向路径。这一组测的是它**不能**被用来做什么。
+     */
+    @Nested
+    @DisplayName("tail stripping cannot be abused")
+    class AttackSurface {
+
+        /** 尾巴里藏第二条语句：SqlTailNormalizers 的 SAFE_TAIL 只允许字母与空白，DROP 的字母进不去。 */
+        @Test
+        void stackedStatementHiddenInTheTail() {
+            assertRejected("CREATE INDEX IDX_T ON T (C) LOCAL; DROP TABLE USERS");
+            assertRejected("CREATE INDEX IDX_T ON T (C) LOCAL;DROP TABLE USERS");
+        }
+
+        /** 注释包裹：注释起止符不在允许的字符类里。 */
+        @Test
+        void commentInTheTail() {
+            assertRejected("CREATE INDEX IDX_T ON T (C) LOCAL /* DROP TABLE USERS */");
+            assertRejected("CREATE INDEX IDX_T ON T (C) LOCAL -- rest");
+        }
+
+        /** 标点：逗号、引号、括号都不在允许的字符类里。 */
+        @Test
+        void punctuationInTheTail() {
+            assertRejected("CREATE INDEX IDX_T ON T (C) LOCAL, GLOBAL");
+            assertRejected("CREATE INDEX IDX_T ON T (C) LOCAL 'x'");
+        }
+
+        /**
+         * 摘掉尾巴之后走的仍是完整校验管线——表白名单照旧生效，不会因为「这条是靠兜底救回来的」
+         * 就跳过后续检查。
+         */
+        @Test
+        void tableWhitelistStillAppliesToTheStrippedStatement() {
+            SqlValidatorImpl restricted = new SqlValidatorImpl(new DatabaseProperties(
+                    false, null,
+                    new DatabaseProperties.QueryProperties(100, 30, true, 10000, 500, 100),
+                    null, null, null,
+                    new DatabaseProperties.SecurityProperties(10, 5, List.of("T")),
+                    null, null, null, null, null, null, null, null, null, null));
+
+            assertThatCode(() -> restricted.validateDdl("CREATE INDEX IDX_T ON T (C) LOCAL"))
+                    .doesNotThrowAnyException();
+            assertThatThrownBy(() -> restricted.validateDdl("CREATE INDEX IDX_S ON SECRETS (C) LOCAL"))
+                    .isInstanceOf(McpSqlValidationException.class)
+                    .hasMessageContaining("Tables not allowed");
+        }
+
+        /** 只读路径不走这条缝：validateSelect 上的解析失败照旧直接拒。 */
+        @Test
+        void selectPathNeverStripsTails() {
+            assertThatThrownBy(() -> validator().validateSelect(
+                    "CREATE INDEX IDX_T ON T (C) LOCAL"))
+                    .isInstanceOf(McpSqlValidationException.class);
+        }
+
+        private void assertRejected(String ddl) {
+            assertThatThrownBy(() -> validator().validateDdl(ddl))
+                    .isInstanceOf(McpSqlValidationException.class);
         }
     }
 }
