@@ -39,6 +39,20 @@ public class SqliteDialect extends AbstractDatabaseDialect {
     }
 
     /**
+     * SQLite 没有 schema 概念，所以「省略 schema 时搜哪个 schema」这个问题无解，返回 {@code null}。
+     *
+     * <p>{@code null} 是诚实的答案而不是缺失的实现：本方言的元数据查询里根本没有 schema 谓词
+     * （见上面 {@link #tablesQuery(String)} 与 {@link #columnsQuery(String, String)}），
+     * {@code main} / {@code temp} 那套 ATTACH 名字与其他库的 schema 不是一回事，硬报一个名字
+     * 会让调用方以为自己搜的是某个具体 schema。{@link #currentSchemaQuery()} 因此也是 {@code null}。
+     */
+    @Override
+    public String currentSchemaExpression() {
+        return null;
+    }
+
+
+    /**
      * The table-valued {@code pragma_table_info} form rather than {@code PRAGMA table_info(...)}: a
      * PRAGMA statement cannot take a bind parameter, so the table name had to be concatenated and the
      * query carried no placeholder at all - the one shape callers cannot bind for. The column labels

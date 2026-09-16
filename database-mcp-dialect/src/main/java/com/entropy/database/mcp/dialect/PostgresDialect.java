@@ -29,10 +29,21 @@ public class PostgresDialect extends AbstractDatabaseDialect {
         return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
+    /**
+     * PostgreSQL 的「默认 schema」是 {@code search_path} 的首项，默认建库时就是 {@code public}。
+     * 用 {@code current_schema()} 而不是字面量 {@code 'public'}：改过 search_path 的连接上
+     * 字面量就是错的。
+     */
+    @Override
+    public String currentSchemaExpression() {
+        return "current_schema()";
+    }
+
     /** Resolves the schema side of a metadata predicate without spending a placeholder on it. */
     private String schemaExpression(String schema) {
-        return DialectUtils.schemaExpression(schema, "current_schema()");
+        return DialectUtils.schemaExpression(resolveSchema(schema), currentSchemaExpression());
     }
+
 
     @Override
     public String tableCommentsQuery(String schema) {

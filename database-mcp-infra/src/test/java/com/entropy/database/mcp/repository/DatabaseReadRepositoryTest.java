@@ -399,15 +399,75 @@ class DatabaseReadRepositoryTest {
             assertThat(columns.get(0)).containsKeys("COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE");
         }
 
+        /**
+         * 线上那次失败就死在这条路上：结果 map 原来是 {@code Map.of(..., "schema", schema, ...)}，
+         * {@code Map.of} 不收 null 值，所以调用方省略 schema 时——SQL 已经跑完、列也查回来了——
+         * 建结果那一步抛出一个 {@code getMessage()} 为 null 的 NPE，MCP 层把它渲染成字面量
+         * {@code null null}，审计只留下 {@code success:false} 和一个空的错误文本。
+         */
         @Test
-        @DisplayName("columnCount matches the returned column list for an unknown table")
-        void unknownTableReportsNoColumns() {
+        @DisplayName("省略 schema 不再炸，并回填实际搜过的那个 schema")
+        void omittedSchemaResolvesToTheCurrentOne() {
+            Map<String, Object> described = repository(100, 10000).describeTable("NUMS", null);
+
+            assertThat(described).containsOnlyKeys("table", "schema", "columnCount", "columns");
+            // H2 的 CURRENT_SCHEMA 就是 PUBLIC；关键在于这里是一个真实的 schema 名而不是 null。
+            assertThat(described.get("schema")).isEqualTo("PUBLIC");
+            assertThat(described.get("columnCount")).isEqualTo(2);
+        }
+
+        @Test
+        @DisplayName("省略 schema 与显式传同一个 schema 命中同一份缓存")
+        void omittedAndExplicitSchemaShareTheCacheEntry() {
+            DatabaseReadRepository repo = repository(100, 10000);
+
+            Map<String, Object> omitted = repo.describeTable("NUMS", null);
+            assertThat(cache.metadataKeys()).contains("columns:PUBLIC.NUMS");
+            assertSame(omitted, repo.describeTable("NUMS", "PUBLIC"));
+        }
+
+        /**
+         * 表不存在时必须给出可诊断的结果，而不是一个「成功但没有列」的空壳：形状跟随
+         * {@code DatabaseBackupServiceImpl} 已有的 {@code Map.of("error", "Table not found: ...")}
+         * 约定，并额外写明本次真正搜过的 schema。
+         */
+        @Test
+        @DisplayName("表不存在时返回 error，并写明搜过的 schema")
+        void unknownTableReportsADiagnosableError() {
             Map<String, Object> described =
                 repository(100, 10000).describeTable("NO_SUCH_TABLE", "PUBLIC");
 
-            assertThat(described.get("columnCount")).isEqualTo(0);
-            assertThat((List<?>) described.get("columns")).isEmpty();
+            assertThat(described).containsKeys("error", "table", "schema", "schemaSource", "hint");
+            assertThat((String) described.get("error"))
+                .contains("Table not found")
+                .contains("NO_SUCH_TABLE")
+                .contains("PUBLIC");
             assertThat(described.get("table")).isEqualTo("NO_SUCH_TABLE");
+            assertThat(described.get("schema")).isEqualTo("PUBLIC");
+            assertThat(described.get("schemaSource")).isEqualTo("caller");
+            // 刻意不带 columns / columnCount：带上 0 与空数组就与真正成功的结果无法区分。
+            assertThat(described).doesNotContainKeys("columns", "columnCount");
+        }
+
+        @Test
+        @DisplayName("命中默认 schema 而没找到时，结果说明 schema 是方言兜的")
+        void unknownTableUnderTheDefaultSchemaSaysSoAndNamesIt() {
+            Map<String, Object> described =
+                repository(100, 10000).describeTable("NO_SUCH_TABLE", null);
+
+            assertThat(described.get("schemaSource")).isEqualTo("dialect-default");
+            assertThat(described.get("schema")).isEqualTo("PUBLIC");
+            assertThat((String) described.get("hint")).contains("PUBLIC");
+        }
+
+        @Test
+        @DisplayName("否定结果不进缓存，建表后重试能看到变化")
+        void notFoundIsNotCached() {
+            DatabaseReadRepository repo = repository(100, 10000);
+
+            assertThat(repo.describeTable("NO_SUCH_TABLE", "PUBLIC")).containsKey("error");
+
+            assertThat(cache.metadataKeys()).doesNotContain("columns:PUBLIC.NO_SUCH_TABLE");
         }
 
         @Test
@@ -420,6 +480,7 @@ class DatabaseReadRepositoryTest {
             assertSame(first, repo.describeTable("NUMS", "PUBLIC"));
         }
     }
+
 
     // ─── listTables / listIndexes ─────────────────────────────────────────
 

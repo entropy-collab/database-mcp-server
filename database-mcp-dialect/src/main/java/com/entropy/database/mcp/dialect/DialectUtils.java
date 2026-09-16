@@ -95,6 +95,18 @@ public final class DialectUtils {
     }
 
     /**
+     * The trimmed schema name when {@code name} is usable as one, {@code null} otherwise.
+     *
+     * <p>{@code null} 的含义是「拿不到可用的 schema 名」，也就是
+     * {@link DatabaseDialect#resolveSchema(String)} 的契约。抽成一个方法是为了让接口默认实现和
+     * 覆写它的方言（Oracle / DB2 还要再转大写）用的是同一条判据——{@code Interface.super} 在
+     * 「实现类继承自另一个类」时不可用，各方言只能各写一遍，那正是四套不同标识符正则的老路。
+     */
+    public static String plainIdentifierOrNull(String name) {
+        return isPlainIdentifier(name) ? name.trim() : null;
+    }
+
+    /**
      * Whether {@code name} is a bare identifier, i.e. carries no quote, backslash, whitespace or
      * statement separator that could escape a SQL literal.
      *

@@ -74,10 +74,14 @@ public class H2Dialect extends AbstractDatabaseDialect {
      * <p>{@code CURRENT_SCHEMA} rather than {@code IS NULL}: {@code INFORMATION_SCHEMA} never stores a
      * null {@code TABLE_SCHEMA}, so the {@code IS NULL} form this class used to emit matched no row at
      * all and every schema-less metadata lookup reported "table not found".
+     *
+     * <p>表达式本身取自 {@link DatabaseDialect#currentSchemaExpression()}，H2 与接口默认值一致
+     * （{@code CURRENT_SCHEMA}，新库里就是 {@code PUBLIC}），所以这里不覆写那个钩子。
      */
     private String schemaExpression(String schema) {
-        return DialectUtils.schemaExpression(schema, "CURRENT_SCHEMA");
+        return DialectUtils.schemaExpression(resolveSchema(schema), currentSchemaExpression());
     }
+
 
     @Override
     public String columnsQuery(String table, String schema) {

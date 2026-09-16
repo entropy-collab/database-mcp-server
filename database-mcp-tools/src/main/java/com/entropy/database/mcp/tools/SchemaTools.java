@@ -82,14 +82,15 @@ public class SchemaTools extends McpToolBase {
             【查看表结构】查看指定表的列名、数据类型、是否可空等元数据。
             前置条件：已知表名；不确定时先用 listTables 或 searchTables 定位。
             使用场景：写 SQL 前确认字段名与类型、数据迁移时核对字段映射。
-            返回字段：表名、Schema 名、columns（每列含列名、数据类型、是否可空）。
+            返回字段：table、schema（本次实际搜索的 Schema）、columnCount、columns（每列含列名、数据类型、是否可空）。
+            注意：表在所搜索的 Schema 下不存在时不抛错，返回 error、table、schema（实际搜过的那个）、schemaSource（caller 还是 dialect-default）、hint，据此判断是不是该显式传 schema。
             不要用于：查看索引（用 listIndexes）。
             标签：[read, schema, metadata, table]
             """,
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public Map<String, Object> describeTable(
             @McpToolParam(description = "表名，必填（如 TBL_STL_TXN_DTL_202405）", required = true) String table,
-            @McpToolParam(description = "Schema 名，省略时默认 PUBLIC", required = false) String schema,
+            @McpToolParam(description = ToolParams.SCHEMA_OPTIONAL_DESCRIPTION, required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         validateRequired(table, "table");
         return routingFacade.describeTable(table, schema, connection);
@@ -99,16 +100,18 @@ public class SchemaTools extends McpToolBase {
             【列出索引】查看指定表的所有索引及其列组合。
             使用场景：排查查询慢的原因、核对 explainPlan 中的全表扫描告警、评估索引设计。
             返回字段：数组，每项含索引名、是否唯一、索引列顺序。
+            注意：表不存在、表没有索引、以及表在别的 Schema 下这三种情况都返回空数组，无法区分；拿不到预期结果时先用 describeTable 确认表在哪个 Schema。
             不要用于：获取索引优化建议（用 recommendIndexes）。
             标签：[read, schema, index, performance]
             """,
             annotations = @McpTool.McpAnnotations(readOnlyHint = true, openWorldHint = false))
     public List<Map<String, Object>> listIndexes(
             @McpToolParam(description = "表名") String table,
-            @McpToolParam(description = "Schema 名，可省略", required = false) String schema,
+            @McpToolParam(description = ToolParams.SCHEMA_OPTIONAL_DESCRIPTION, required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         return routingFacade.listIndexes(table, schema, connection);
     }
+
 
     @McpTool(description = """
             【列出视图】查看指定 Schema 下的所有视图及其 SQL 定义。
@@ -151,7 +154,10 @@ public class SchemaTools extends McpToolBase {
     public Map<String, Object> describe(
             @McpToolParam(description = "对象类型，取值：TABLE、SCHEMA、INDEX、VIEW") String type,
             @McpToolParam(description = "对象名。type=TABLE 或 INDEX 时必填（传表名）；type=SCHEMA 或 VIEW 时忽略") String name,
-            @McpToolParam(description = "Schema 名。type=SCHEMA 或 VIEW 时必填", required = false) String schema,
+            @McpToolParam(description = "Schema 名。type=SCHEMA 或 VIEW 时必填；"
+                    + "type=TABLE 或 INDEX 时可省略，省略时按连接方言的当前 Schema 解析"
+                    + "（Oracle 登录用户 / MySQL 当前 database / SQL Server 默认 Schema / "
+                    + "DB2 CURRENT SCHEMA / PostgreSQL·H2 current_schema()）", required = false) String schema,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         validateRequired(type, "type");
         return switch (type.toUpperCase()) {

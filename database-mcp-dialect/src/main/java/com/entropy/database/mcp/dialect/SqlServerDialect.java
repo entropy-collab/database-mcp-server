@@ -30,12 +30,24 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
     }
 
     /**
+     * SQL Server 的「默认 schema」是调用者自己的默认 schema，通常但不一定是 {@code dbo}。
+     *
+     * <p>用 {@code SCHEMA_NAME()} 而不是字面量 {@code 'dbo'}：{@code CREATE USER ... WITH
+     * DEFAULT_SCHEMA = sales} 之后字面量就是错的，而错的 schema 默认值会把存在的表报成不存在。
+     */
+    @Override
+    public String currentSchemaExpression() {
+        return "SCHEMA_NAME()";
+    }
+
+    /**
      * Resolves the schema side of a metadata predicate without spending a placeholder on it.
      * {@code SCHEMA_NAME()} is the caller's default schema, which is what an omitted schema means.
      */
     private String schemaExpression(String schema) {
-        return DialectUtils.schemaExpression(schema, "SCHEMA_NAME()");
+        return DialectUtils.schemaExpression(resolveSchema(schema), currentSchemaExpression());
     }
+
 
     @Override
     public String tablesQuery(String schema) {

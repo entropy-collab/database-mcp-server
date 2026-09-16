@@ -54,7 +54,9 @@ import java.util.Map;
  * </ul>
  *
  * <p>A {@code schema} argument is never a placeholder: the dialect resolves it internally, falling
- * back to the session's current schema when it is {@code null}. Generating an {@code IS NULL}
+ * back to the session's current schema when it is {@code null} — that fallback is
+ * {@link #currentSchemaExpression()}, and {@link #currentSchemaQuery()} is how a caller finds out
+ * which schema it actually resolved to. Generating an {@code IS NULL}
  * comparison instead is what made H2 metadata lookups match nothing, since
  * {@code INFORMATION_SCHEMA.COLUMNS.TABLE_SCHEMA} is never null; making it a conditional {@code ?}
  * is what forced callers to guess an argument list from the SQL text, which they got wrong in both
@@ -96,6 +98,67 @@ public interface DatabaseDialect {
     String applyLimit(String sql, int limit, int offset);
     boolean supportsLimit();
     boolean supportsSchema();
+
+    // ─── 「调用方没指定 schema」时到底搜哪个 schema ────────────────────────────
+
+    /**
+     * 调用方省略 schema 时，元数据查询实际会去搜的那个 schema —— 以本方言自己的 SQL 表达式给出。
+     *
+     * <p>为什么这件事属于方言：「默认 schema」这个概念每种库都不一样。Oracle 里就是登录用户
+     * （{@code USER}，而 {@code PUBLIC} 是角色不是 schema，拿它去比 {@code all_tab_columns.owner}
+     * 一行都匹配不上）；MySQL/MariaDB 里是当前 database（{@code DATABASE()}）；SQL Server 是调用者的
+     * 默认 schema（{@code SCHEMA_NAME()}，通常 {@code dbo}）；DB2 是 {@code CURRENT SCHEMA}；
+     * PostgreSQL 是 {@code current_schema()}（search_path 首项，通常 {@code public}）；H2 是
+     * {@code CURRENT_SCHEMA}。理由与 {@link #getExplainPlanSql(String)}、
+     * {@link #classifyPlanLine(String)} 完全一致：<strong>不要在调用方写按 {@link #getDialectName()}
+     * 分支的 {@code switch}，更不要在工具层写一个跨方言的字面量默认值。</strong>一个错的 schema 默认值
+     * 会让「表明明存在」变成「表不存在」，比诚实地报错更糟。
+     *
+     * <p>这里不是新行为，而是把各方言私有 {@code schemaExpression()} 里本来就在用的那个表达式收口到
+     * 契约上：以前它只存在于 {@link DialectUtils#schemaExpression(String, String)} 的第二个实参里，
+     * 谁都读不到，于是「省略 schema 时搜的是哪儿」这件事无法回填进结果、也无法被测试钉住。
+     *
+     * @return 该 SQL 表达式；{@code null} 表示本方言没有 schema 概念（SQLite），元数据查询里根本没有
+     *         schema 谓词
+     */
+    default String currentSchemaExpression() {
+        return "CURRENT_SCHEMA";
+    }
+
+    /**
+     * 把调用方传来的 schema 归一成本方言目录里真正存的那个形态。
+     *
+     * <p>{@code null} 的含义是「拿不到可用的 schema 名，按 {@link #currentSchemaExpression()} 去搜」，
+     * 覆盖三种情况：没传、传了空白、传了不是纯标识符的东西（后者会被拼进 SQL，所以宁可拒收也不转义，
+     * 见 {@link DialectUtils#isPlainIdentifier(String)}）。
+     *
+     * <p>默认实现只 trim。Oracle 与 DB2 覆写成转大写，因为它们把不带引号的标识符折成大写存进目录，
+     * 调用方传 {@code qditp} 要能匹配上 {@code QDITP}。
+     */
+    default String resolveSchema(String requested) {
+        return DialectUtils.plainIdentifierOrNull(requested);
+    }
+
+    /**
+     * {@link #currentSchemaExpression()} 的可执行形态：一行一列，值是本次会话真实的 schema 名。
+     *
+     * <p>存在的理由只有一个：把「实际搜的是哪个 schema」回填进结果与报错里。表达式本身
+     * （{@code USER}、{@code current_schema()}）对调用方没有意义——线上那次 describeTable 省略
+     * schema 之后，调用方需要看到的是 {@code QDITP} 这个具体名字，才能判断自己是不是问错了地方。
+     *
+     * <p>默认实现由表达式推导。Oracle 与 DB2 覆写：它们的 {@code SELECT} 必须带 {@code FROM}
+     * （{@code DUAL} / {@code SYSIBM.SYSDUMMY1}）。
+     *
+     * <p>刻意不加列别名：调用方按第一列读值，而 {@code AS current_schema} 在 H2 2.x 上直接语法错
+     * （{@code CURRENT_SCHEMA} 是保留字，实测 {@code expected "identifier"}）。别名对调用方没有用处，
+     * 却要为每个方言的保留字表负责。
+     *
+     * @return 该 SQL，或 {@code null} 表示无从查起（没有 schema 概念的方言）
+     */
+    default String currentSchemaQuery() {
+        String expression = currentSchemaExpression();
+        return expression == null ? null : "SELECT " + expression;
+    }
 
     /**
      * Rewrites a user-provided SQL that contains LIMIT/FETCH clauses into a dialect-compatible form.

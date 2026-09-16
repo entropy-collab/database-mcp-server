@@ -33,11 +33,36 @@ public class OracleDialect extends AbstractDatabaseDialect {
         return "\"" + name.toUpperCase().replace("\"", "\"\"") + "\"";
     }
 
+    /**
+     * Oracle 的「默认 schema」就是登录用户本人。
+     *
+     * <p>{@code PUBLIC} 在 Oracle 里是角色而不是 schema，拿它去比 {@code all_tab_columns.owner}
+     * 一行都匹配不上——这正是 describeTable 省略 schema 时的正确答案必须由方言给出、而不能在工具层
+     * 写一个跨库通用字面量的原因。
+     */
+    @Override
+    public String currentSchemaExpression() {
+        return "USER";
+    }
+
+    /** Oracle 的 {@code SELECT} 必须带 {@code FROM}。 */
+    @Override
+    public String currentSchemaQuery() {
+        return "SELECT USER FROM DUAL";
+    }
+
+    /** Oracle 把不带引号的标识符折成大写存进数据字典，所以调用方给的 schema 先转大写。 */
+    @Override
+    public String resolveSchema(String requested) {
+        String resolved = DialectUtils.plainIdentifierOrNull(requested);
+        return resolved == null ? null : resolved.toUpperCase();
+    }
+
     /** Oracle folds identifiers to upper case, so a requested schema is the owner in upper case. */
     private String ownerExpression(String schema) {
-        return DialectUtils.schemaExpression(
-                schema == null ? null : schema.toUpperCase(), "USER");
+        return DialectUtils.schemaExpression(resolveSchema(schema), currentSchemaExpression());
     }
+
 
     @Override
     public String tableCommentsQuery(String schema) {

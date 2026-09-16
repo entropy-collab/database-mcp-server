@@ -26,14 +26,33 @@ public class Db2Dialect extends AbstractDatabaseDialect {
         return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
+    /** DB2 的「默认 schema」是 {@code CURRENT SCHEMA}（注意是两个词，没有下划线）。 */
+    @Override
+    public String currentSchemaExpression() {
+        return "CURRENT SCHEMA";
+    }
+
+    /** DB2 的 {@code SELECT} 必须带 {@code FROM}，单行表是 {@code SYSIBM.SYSDUMMY1}。 */
+    @Override
+    public String currentSchemaQuery() {
+        return "SELECT CURRENT SCHEMA FROM SYSIBM.SYSDUMMY1";
+    }
+
+    /** DB2 同 Oracle：不带引号的标识符折成大写存进 {@code SYSCAT}。 */
+    @Override
+    public String resolveSchema(String requested) {
+        String resolved = DialectUtils.plainIdentifierOrNull(requested);
+        return resolved == null ? null : resolved.toUpperCase();
+    }
+
     /**
      * Resolves the schema side of a metadata predicate without spending a placeholder on it.
      * DB2 folds unquoted identifiers to upper case, so a requested schema is upper-cased first.
      */
     private String schemaExpression(String schema) {
-        return DialectUtils.schemaExpression(
-                schema == null ? null : schema.toUpperCase(), "CURRENT SCHEMA");
+        return DialectUtils.schemaExpression(resolveSchema(schema), currentSchemaExpression());
     }
+
 
     /**
      * {@code SYSCAT.TABLES} names its columns {@code TABSCHEMA} / {@code TABNAME}; the

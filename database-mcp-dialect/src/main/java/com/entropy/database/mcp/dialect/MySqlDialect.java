@@ -53,10 +53,24 @@ public class MySqlDialect extends AbstractDatabaseDialect {
         return "`" + name.replace("`", "``") + "`";
     }
 
+    /**
+     * MySQL/MariaDB 的「默认 schema」是当前 database。
+     *
+     * <p>JDBC 层面 MySQL 的 database 是 catalog 而不是 schema，但本仓库的元数据查询一律走
+     * {@code information_schema}，其中 {@code TABLE_SCHEMA} 存的就是 database 名——没有任何一处走
+     * {@code DatabaseMetaData.getColumns(catalog, schema, ...)}，所以这里不需要 catalog/schema 的
+     * 特殊处理。哪天有人改用 JDBC 元数据 API，这条注释就是提醒。
+     */
+    @Override
+    public String currentSchemaExpression() {
+        return "DATABASE()";
+    }
+
     /** Resolves the schema side of a metadata predicate without spending a placeholder on it. */
     private String schemaExpression(String schema) {
-        return DialectUtils.schemaExpression(schema, "DATABASE()");
+        return DialectUtils.schemaExpression(resolveSchema(schema), currentSchemaExpression());
     }
+
 
     @Override
     public String tableCommentsQuery(String schema) {

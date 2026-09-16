@@ -117,14 +117,41 @@ public class PerformanceTimingAspect {
         try {
             Object result = pjp.proceed();
             long duration = System.currentTimeMillis() - start;
-            recordResult(toolName, sql, connectionKey, duration, extractRowCount(result), true);
+            // 没抛异常 ≠ 成功：本仓库有一批读路径把「表不存在」这类失败当返回值交出去
+            // （DatabaseBackupServiceImpl 的 Map.of("error", "Table not found: ...")、
+            // DatabaseReadRepository.describeTable 的 not-found 结果）。原来这些都被记成
+            // success:true 且错误文本为空，审计里与真正成功的调用一模一样。
+            String resultError = extractError(result);
+            recordResult(toolName, sql, connectionKey, duration, extractRowCount(result),
+                    resultError == null, resultError);
             return result;
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - start;
-            recordResult(toolName, sql, connectionKey, duration, 0, false);
+            // errorMessage 原来恒传 null，于是审计只剩一个 success:false 空壳——线上那次
+            // describeTable 失败就是这样：43ms、success:false、错误文本为空、日志里没有任何一行。
+            // 用 toString() 兜底是因为 NPE 这类异常 getMessage() 本身就是 null。
+            recordResult(toolName, sql, connectionKey, duration, 0, false, describeFailure(e));
             throw e;
         }
     }
+
+    /** 结果里自带的错误文本；没有就返回 null，表示这次调用确实成功。 */
+    private String extractError(Object result) {
+        if (result instanceof java.util.Map<?, ?> map) {
+            Object error = map.get("error");
+            if (error != null && !String.valueOf(error).isBlank()) {
+                return String.valueOf(error);
+            }
+        }
+        return null;
+    }
+
+    /** 异常的可读描述；{@code getMessage()} 为 null（NPE 就是）时退回类名。 */
+    private String describeFailure(Exception e) {
+        String message = e.getMessage();
+        return (message == null || message.isBlank()) ? e.toString() : message;
+    }
+
 
     /**
      * 连接池记账方法：只记耗时指标，绝不写审计。这条通知是整轮改动的不变式所在——
@@ -176,11 +203,6 @@ public class PerformanceTimingAspect {
                 ? ConnectionArgExtractor.extractConnectionName(args, signature)
                 : ConnectionArgExtractor.extractConnectionName(args);
         return connectionOpt.orElse(null);
-    }
-
-    private void recordResult(String toolName, String sql, String connectionKey,
-                              long duration, int rows, boolean success) {
-        recordResult(toolName, sql, connectionKey, duration, rows, success, null);
     }
 
     private void recordResult(String toolName, String sql, String connectionKey,

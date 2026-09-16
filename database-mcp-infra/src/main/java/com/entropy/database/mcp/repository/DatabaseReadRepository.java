@@ -50,6 +50,13 @@ public class DatabaseReadRepository {
     public static final int DEFAULT_FETCH_SIZE = 100;
     public static final int DEFAULT_QUERY_TIMEOUT_SECONDS = 30;
 
+    /** 元数据缓存里存会话当前 schema 的键；缓存本身是连接维度的，所以不需要再带连接名。 */
+    private static final String CURRENT_SCHEMA_CACHE_KEY = "current_schema";
+    /** 方言没有 schema 概念（SQLite）时，结果里对「搜的是哪个 schema」的诚实回答。 */
+    static final String NO_SCHEMA_CONCEPT = "(dialect has no schema concept)";
+    /** 当前 schema 查不出来时的占位串，明确写成「查不到」而不是编一个看起来合法的名字。 */
+    static final String UNKNOWN_SCHEMA = "(unresolved current schema)";
+
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseDialect dialect;
     private final SqlValidator sqlValidator;
@@ -147,9 +154,25 @@ public class DatabaseReadRepository {
         return result;
     }
 
+    /**
+     * 一张表的列元数据；表在本次搜索的 schema 下不存在时返回一条可诊断的 error 结果，而不是 null。
+     *
+     * <p>原来这里是 {@code Map.of("table", table, "schema", schema, ...)}。{@code Map.of} 不接受 null
+     * 值，所以调用方省略 schema 时——SQL 已经跑完、列也查回来了——建结果那一步抛 NPE，而且是一个
+     * {@code getMessage()} 为 null 的 NPE：MCP 层把它渲染成字面量 {@code null null}，
+     * {@code PerformanceTimingAspect} 把审计记成 {@code success:false} 且错误文本为空，日志里
+     * WARN/ERROR 一条都没有。线上实测：{@code describeTable(table=..., connection="qditp")} 恒
+     * 失败 43ms，补上 {@code schema="QDITP"} 就正常返回 52 列。
+     *
+     * <p>两处修法各自独立：结果 map 改成允许 null 的 {@link LinkedHashMap}（并回填真实搜过的
+     * schema），空结果集改成走 {@link #tableNotFound}。
+     */
     @SuppressWarnings("unchecked")
     public Map<String, Object> describeTable(String table, String schema) {
-        String cacheKey = "columns:" + schema + "." + table;
+        // 缓存键用「真实搜过的 schema」而不是入参：省略与显式传同一个 schema 是同一次查询，
+        // 用入参会留下 "columns:null.T" 与 "columns:QDITP.T" 两份内容相同的条目。
+        String searchedSchema = resolveSearchedSchema(schema);
+        String cacheKey = "columns:" + searchedSchema + "." + table;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
             return checkType(cached, cacheKey, "Map<String, Object>");
@@ -159,15 +182,90 @@ public class DatabaseReadRepository {
         // resolves the schema itself.
         String sql = dialect.columnsQuery(table, schema);
         List<Map<String, Object>> columns = jdbcTemplate.queryForList(sql, normalizeTableName(table));
-        Map<String, Object> result = Map.of(
-            "table", table,
-            "schema", schema,
-            "columnCount", columns.size(),
-            "columns", columns
-        );
-        cache.putMetadata(cacheKey, result);
-        return result;
+        if (columns.isEmpty()) {
+            // 否定结果不进缓存：建表 / 授权之后立刻重试应当能看到变化。
+            return tableNotFound(table, searchedSchema, schema);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("table", table);
+        result.put("schema", searchedSchema);
+        result.put("columnCount", columns.size());
+        result.put("columns", columns);
+        // 不可变：这个 map 会被缓存并发共享，而 McpToolExceptionAspect 会对返回值试着
+        // putIfAbsent("connection", ...)。Map.of 时代那次写入本来就被拒并降级成 debug 日志，
+        // 这里保持同样的行为，而不是让它去改一个共享的缓存对象。
+        Map<String, Object> immutable = java.util.Collections.unmodifiableMap(result);
+        cache.putMetadata(cacheKey, immutable);
+        return immutable;
     }
+
+    /**
+     * 「表没找到」的返回形状，跟随仓库里已有的约定：
+     * {@code DatabaseBackupServiceImpl} 的 {@code Map.of("error", "Table not found: " + tableName)}，
+     * 以及它那条更细的增量备份分支（error + reason + hint）。
+     *
+     * <p>刻意不带 {@code columns} / {@code columnCount}：带上 {@code columnCount=0} 与空数组，
+     * 调用方读到的就是一个「成功但这张表没有列」的结果，与真正的失败无法区分——这正是本次要修掉的
+     * 那种沉默。{@code schemaSource} 说明这个 schema 是调用方给的还是方言兜的，
+     * 命中默认值的调用方据此才能判断自己是不是问错了地方。
+     */
+    private Map<String, Object> tableNotFound(String table, String searchedSchema, String requestedSchema) {
+        boolean defaulted = dialect.resolveSchema(requestedSchema) == null;
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("error", "Table not found: " + table + " (schema searched: " + searchedSchema + ")");
+        result.put("table", table);
+        result.put("schema", searchedSchema);
+        result.put("schemaSource", defaulted ? "dialect-default" : "caller");
+        result.put("hint", defaulted
+                ? "未传 schema，已按 " + dialect.getDialectName() + " 方言的当前 schema（"
+                        + searchedSchema + "）搜索。表在别的 schema 下就要显式传 schema；"
+                        + "不确定时先用 listSchemas / searchTables 定位。"
+                : "表名与 schema 都按 " + dialect.getDialectName()
+                        + " 方言归一化后仍未命中。可能是表不存在、名字拼错，"
+                        + "或当前账号对该表的元数据视图没有查询权限。");
+        return java.util.Collections.unmodifiableMap(result);
+    }
+
+    /**
+     * 本次元数据查询真正搜的那个 schema 名。
+     *
+     * <p>方言早就会把省略的 schema 兜成会话当前 schema（{@code owner = USER}、
+     * {@code table_schema = DATABASE()} …），但那是一个只有数据库看得懂的 SQL 表达式，调用方看不到
+     * 它解析成了什么。这里把它问出来，好让结果与报错里能写上「实际搜的是 QDITP」。
+     */
+    private String resolveSearchedSchema(String requested) {
+        String resolved = dialect.resolveSchema(requested);
+        return resolved != null ? resolved : currentSchema();
+    }
+
+    /**
+     * 会话当前 schema 名，按连接缓存（{@link DatabaseCache} 本身就是连接维度的）。
+     *
+     * <p>取不到时返回占位串而不是抛错：这个值只用于把结果标注得可读，不该让一次
+     * describeTable 因为标注失败而失败。
+     */
+    private String currentSchema() {
+        Object cached = cache.getMetadata(CURRENT_SCHEMA_CACHE_KEY);
+        if (cached instanceof String name) {
+            return name;
+        }
+        String sql = dialect.currentSchemaQuery();
+        if (sql == null) {
+            // SQLite：没有 schema 概念，元数据查询里也没有 schema 谓词。
+            return NO_SCHEMA_CONCEPT;
+        }
+        try {
+            String name = jdbcTemplate.queryForObject(sql, String.class);
+            String resolved = (name == null || name.isBlank()) ? UNKNOWN_SCHEMA : name;
+            cache.putMetadata(CURRENT_SCHEMA_CACHE_KEY, resolved);
+            return resolved;
+        } catch (org.springframework.dao.DataAccessException e) {
+            log.warn("Could not resolve the current schema of this {} connection with [{}]; "
+                    + "metadata results will report it as {}", dialect.getDialectName(), sql, UNKNOWN_SCHEMA, e);
+            return UNKNOWN_SCHEMA;
+        }
+    }
+
 
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listIndexes(String table, String schema) {

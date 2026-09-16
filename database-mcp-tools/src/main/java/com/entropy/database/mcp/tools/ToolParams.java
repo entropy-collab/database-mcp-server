@@ -71,6 +71,22 @@ public final class ToolParams {
             确认连接已就绪，再执行查询。""";
 
     /**
+     * Description for optional {@code schema} parameters on single-table metadata tools.
+     *
+     * <p>原来 {@code describeTable} 这里写的是「省略时默认 PUBLIC」。那句话在代码里没有对应实现，
+     * 而且在 Oracle 上是错的：{@code PUBLIC} 是角色不是 schema，真正的默认值由方言的
+     * {@code currentSchemaExpression()} 给出——Oracle 是登录用户、MySQL 是当前 database、
+     * SQL Server 是调用者默认 schema、DB2 是 CURRENT SCHEMA、PostgreSQL/H2 是 current_schema()。
+     * 描述文本是模型唯一能读到的契约，写错等于教模型去传一个不存在的 schema，所以这里按方言逐一说清，
+     * 措辞与 {@code DatabaseHealthTools} 已有的那几条保持一致。
+     */
+    public static final String SCHEMA_OPTIONAL_DESCRIPTION = """
+            Schema 名，可省略；省略时按连接方言的当前 Schema 解析——\
+            Oracle 取登录用户、MySQL/MariaDB 取当前 database、SQL Server 取调用者的默认 Schema（通常 dbo）、\
+            DB2 取 CURRENT SCHEMA、PostgreSQL/H2 取 current_schema()。\
+            表不在该 Schema 下时必须显式传入（例如只读账号访问业务 Schema 的表）。""";
+
+    /**
      * Standard SQL templates shared across tool classes.
      */
     public static final Map<String, String> TEMPLATES = Map.of(

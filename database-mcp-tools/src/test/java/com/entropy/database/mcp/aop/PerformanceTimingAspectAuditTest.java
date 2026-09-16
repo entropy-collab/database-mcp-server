@@ -244,8 +244,78 @@ class PerformanceTimingAspectAuditTest {
                 .satisfies(entry -> {
                     assertThat(entry.success()).isFalse();
                     assertThat(entry.rowCount()).isZero();
+                    // errorMessage 原来恒传 null，审计只剩一个 success:false 空壳
+                    assertThat(entry.error()).isEqualTo("ORA-00942");
                 });
     }
+
+    /**
+     * 缺陷 5：{@code getMessage()} 为 null 的异常也必须留下可读的错误文本。
+     *
+     * <p>线上那次 {@code describeTable} 省略 schema 的失败正是这一种：结果 map 用了不收 null 的
+     * {@code Map.of}，抛出来的 NPE 消息本身就是 null，于是审计写下 {@code success:false} 加一个空的
+     * 错误文本，日志里 WARN/ERROR 一条都没有——一次完全静默的失败。
+     */
+    @Test
+    void anExceptionWithoutAMessageStillLeavesReadableErrorText() {
+        ProceedingJoinPoint pjp = failingJoinPoint("describeTable",
+                new Object[]{"ALIPAY_PAY_TXN_DETAIL", null, CONNECTION}, new NullPointerException());
+
+        try {
+            aspect.timeDatabaseOperation(pjp);
+            org.assertj.core.api.Assertions.fail("the aspect must not swallow the failure");
+        } catch (Throwable t) {
+            assertThat(t).isInstanceOf(NullPointerException.class);
+        }
+
+        assertThat(auditLogger.entries()).singleElement()
+                .satisfies(entry -> {
+                    assertThat(entry.success()).isFalse();
+                    assertThat(entry.error())
+                            .isNotBlank()
+                            .contains("NullPointerException");
+                });
+    }
+
+    /**
+     * 缺陷 6：没抛异常 ≠ 成功。本仓库有一批读路径把「表不存在」当返回值交出去
+     * （{@code DatabaseBackupServiceImpl} 的 {@code Map.of("error", "Table not found: ...")}、
+     * {@code DatabaseReadRepository.describeTable} 的 not-found 结果）。原来这些全被记成
+     * {@code success:true} 且错误文本为空，审计里与真正成功的调用一模一样。
+     */
+    @Test
+    void aResultCarryingAnErrorIsAuditedAsAFailure() throws Throwable {
+        aspect.timeDatabaseOperation(joinPointOf(
+                RoutingDatabaseFacade.class.getMethod("describeTable", String.class, String.class, String.class),
+                new Object[]{"ALIPAY_PAY_TXN_DETAIL", null, CONNECTION},
+                Map.of("error", "Table not found: ALIPAY_PAY_TXN_DETAIL (schema searched: QDITP)",
+                        "table", "ALIPAY_PAY_TXN_DETAIL",
+                        "schema", "QDITP")));
+
+        assertThat(auditLogger.entries()).singleElement()
+                .satisfies(entry -> {
+                    assertThat(entry.success()).isFalse();
+                    assertThat(entry.error())
+                            .contains("Table not found")
+                            .contains("QDITP");
+                });
+    }
+
+    /** 反向断言：正常结果里没有 error 键，仍然记成成功且错误文本为空。 */
+    @Test
+    void aNormalResultStaysASuccessWithNoErrorText() throws Throwable {
+        aspect.timeDatabaseOperation(joinPointOf(
+                RoutingDatabaseFacade.class.getMethod("describeTable", String.class, String.class, String.class),
+                new Object[]{"NUMS", "PUBLIC", CONNECTION},
+                Map.of("table", "NUMS", "schema", "PUBLIC", "columnCount", 2)));
+
+        assertThat(auditLogger.entries()).singleElement()
+                .satisfies(entry -> {
+                    assertThat(entry.success()).isTrue();
+                    assertThat(entry.error()).isNull();
+                });
+    }
+
 
     /**
      * 整轮改动的不变式：连接池记账方法可观测、但不审计。窄化审计切点时把

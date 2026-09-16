@@ -29,10 +29,14 @@ public class GenericDialect extends AbstractDatabaseDialect {
     /**
      * Resolves the schema side of a metadata predicate without spending a placeholder on it.
      * {@code CURRENT_SCHEMA} is the SQL-standard spelling, which is all a fallback dialect can assume.
+     *
+     * <p>表达式取自 {@link DatabaseDialect#currentSchemaExpression()} 的默认值，与这里原来硬写的
+     * 字面量一致；未知方言不改变行为，胜过给它一份猜出来的默认 schema。
      */
     private String schemaExpression(String schema) {
-        return DialectUtils.schemaExpression(schema, "CURRENT_SCHEMA");
+        return DialectUtils.schemaExpression(resolveSchema(schema), currentSchemaExpression());
     }
+
 
     @Override
     public String tablesQuery(String schema) {
