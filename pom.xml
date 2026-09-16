@@ -68,7 +68,7 @@
         <db2.jdbc.version>12.1.5.0</db2.jdbc.version>
         <guava.version>33.7.1-jre</guava.version>
         <caffeine.version>3.2.4</caffeine.version>
-        <jsqlparser.version>5.3</jsqlparser.version>
+        <jsqlparser.version>5.4</jsqlparser.version>
     </properties>
 
     <repositories>
@@ -117,6 +117,9 @@
                     JMH + jopt-simple + commons-math3 三个 jar 会流进每一个依赖它的模块、
                     进可执行 jar，也进第三方方言作者的编译期 classpath。仓库里没有任何一处
                     import org.openjdk.jmh —— 基准测试框架不是运行时依赖。
+
+                    5.4 上游已经把它改成 test 作用域，所以这条排除在当前版本上是空操作。保留是
+                    当棘轮用：作用域曾经错过一次，排除留着，下次错了也不会再漏进来，成本为零。
 
                     排除写在 dependencyManagement 而不是各模块：core / infra / features / app
                     都直接声明了 jsqlparser，写在 core 只能管住 core 自己那一条边。
