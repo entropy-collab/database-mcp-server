@@ -581,6 +581,47 @@ public class PostgresDialect extends AbstractDatabaseDialect {
     }
 
     /**
+     * PostgreSQL 的计划节点词汇。
+     *
+     * <p>默认实现是 Oracle 形状，在 PG 上几乎全不中：{@code Seq Scan} 里没有 {@code TABLE ACCESS}，
+     * 所以最重要的那条全表扫描告警在 PG 上根本不会触发；{@code Index Scan} 只是碰巧被
+     * {@code INDEX} + {@code SCAN} 蒙对。
+     *
+     * <p>{@code Merge Join} 归 {@link PlanOperation#OTHER}：归并连接既不是哈希连接也不是嵌套循环，
+     * 塞进 {@link PlanOperation#HASH_JOIN} 会让调用方按哈希连接的内存模型给建议，而归并连接的代价来自
+     * 两侧的有序性。不确定就不表态。
+     */
+    @Override
+    public PlanOperation classifyPlanLine(String planLine) {
+        if (planLine == null) {
+            return PlanOperation.OTHER;
+        }
+        String upper = planLine.toUpperCase(java.util.Locale.ROOT);
+        if (upper.contains("SEQ SCAN")) {
+            return PlanOperation.FULL_TABLE_SCAN;
+        }
+        // Index Only Scan / Index Scan / Bitmap Index Scan 都落在这一支（后者文本里含 "INDEX SCAN"），
+        // Bitmap Heap Scan 不含 INDEX，单独列出。
+        if (upper.contains("INDEX ONLY SCAN") || upper.contains("INDEX SCAN")
+                || upper.contains("BITMAP HEAP SCAN")) {
+            return PlanOperation.INDEX_RANGE_SCAN;
+        }
+        if (upper.contains("NESTED LOOP")) {
+            return PlanOperation.NESTED_LOOP_JOIN;
+        }
+        if (upper.contains("HASH JOIN")) {
+            return PlanOperation.HASH_JOIN;
+        }
+        if (upper.contains("MERGE JOIN")) {
+            return PlanOperation.OTHER;
+        }
+        if (upper.contains("SORT")) {
+            return PlanOperation.SORT;
+        }
+        return PlanOperation.OTHER;
+    }
+
+    /**
      * PostgreSQL 自 9.1 起 {@code standard_conforming_strings} 默认为 {@code on}，普通字面量里的反斜杠
      * 就是普通字符。显式声明是为了不被当成「未表态」——{@link BackslashInLiteral#UNKNOWN} 会让生成 SQL
      * 文本的调用方把含反斜杠的行直接拒收，而这类值在 PG 上是完全合法的数据。

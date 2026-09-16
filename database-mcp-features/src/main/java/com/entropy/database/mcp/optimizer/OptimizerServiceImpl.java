@@ -18,9 +18,11 @@ package com.entropy.database.mcp.optimizer;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.dialect.DialectResolver;
+import com.entropy.database.mcp.dialect.PlanOperation;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -81,8 +83,46 @@ public class OptimizerServiceImpl implements OptimizerService {
 
     private final DynamicDataSourceManager dataSourceManager;
 
-    public OptimizerServiceImpl(DynamicDataSourceManager dataSourceManager) {
+    /**
+     * Read access to whichever connection a call names.
+     *
+     * <p>Every metadata probe below goes through this rather than through a {@code JdbcTemplate}
+     * borrowed from the connection context, so index lists, candidate columns, row counts and
+     * segment sizes are subject to the same timing, audit and read-only advice as any other query.
+     * The connection registry is still injected, but only for
+     * {@link ByokDataSourceContext#getDialect()} — deciding which SQL to send is this service's job,
+     * issuing it is not.
+     */
+    private final DatabaseReadOperations db;
+
+    /**
+     * 把 {@code interpretPlan} 收到的方言名解析成 {@link DatabaseDialect}。
+     *
+     * <p>这个入参此前从头到尾没被用过：计划文本一律按 Oracle 的词汇解释，所以 PostgreSQL 的
+     * {@code Seq Scan} 匹配不上任何分支，最重要的那条全表扫描告警在 PG 上根本不会触发。
+     */
+    private final DialectResolver dialectResolver;
+
+    /**
+     * {@link PlanOperation} → 行内标注。
+     *
+     * <p>面向用户的文案（emoji、中文标签）留在服务层：方言负责认词汇，不负责措辞。文本与改造前
+     * {@code interpretLine} 逐字一致，包括两个前导空格。
+     */
+    private static final Map<PlanOperation, String> PLAN_LINE_LABELS = Map.of(
+            PlanOperation.FULL_TABLE_SCAN, "  ⚠️ 全表扫描，建议检查索引",
+            PlanOperation.INDEX_RANGE_SCAN, "  ✅ 索引范围扫描",
+            PlanOperation.INDEX_UNIQUE_SCAN, "  ✅ 唯一索引访问",
+            PlanOperation.NESTED_LOOP_JOIN, "  ⚠️ 嵌套循环连接",
+            PlanOperation.HASH_JOIN, "  ℹ️ 哈希连接",
+            PlanOperation.SORT, "  ℹ️ 排序操作");
+
+    public OptimizerServiceImpl(DynamicDataSourceManager dataSourceManager,
+                                DatabaseReadOperations db,
+                                DialectResolver dialectResolver) {
         this.dataSourceManager = dataSourceManager;
+        this.db = db;
+        this.dialectResolver = dialectResolver;
     }
 
     // ─── Query Analysis ────────────────────────────────────────────────────────
@@ -93,12 +133,11 @@ public class OptimizerServiceImpl implements OptimizerService {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
             DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
             String trimmedSql = sql.trim();
             String upperSql = trimmedSql.toUpperCase();
 
             // Run EXPLAIN
-            List<String> planRows = getExplainPlan(ctx, trimmedSql);
+            List<String> planRows = getExplainPlan(connection, trimmedSql);
 
             // Extract table references
             List<String> tables = extractTableNames(trimmedSql);
@@ -107,8 +146,8 @@ public class OptimizerServiceImpl implements OptimizerService {
             long estimatedRows = 0;
             long sizeMb = 0;
             if (!tables.isEmpty()) {
-                estimatedRows = getEstimatedRowCount(jdbc, dialect, tables.get(0));
-                sizeMb = getTableSizeMb(jdbc, dialect, tables.get(0));
+                estimatedRows = getEstimatedRowCount(connection, dialect, tables.get(0));
+                sizeMb = getTableSizeMb(connection, dialect, tables.get(0));
             }
 
             // Analyze for issues
@@ -138,16 +177,15 @@ public class OptimizerServiceImpl implements OptimizerService {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
             DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
             String normalizedTable = dialect.normalizeTableName(tableName);
 
             // 1. Get existing indexes
-            Set<String> indexedColumns = getIndexedColumns(jdbc, dialect, normalizedTable);
+            Set<String> indexedColumns = getIndexedColumns(connection, dialect, normalizedTable);
 
             // 2. Get candidate columns (not yet indexed)
             String candSql = dialect.candidateColumnsForIndexSql(normalizedTable);
             List<Map<String, Object>> candidates = candSql != null
-                    ? jdbc.queryForList(candSql, normalizedTable)
+                    ? db.queryRows(candSql, connection, normalizedTable)
                     : List.of();
 
             List<IndexRecommendation> recs = new ArrayList<>();
@@ -165,7 +203,7 @@ public class OptimizerServiceImpl implements OptimizerService {
             }
 
             // 3. Composite index suggestion: look for WHERE + JOIN pairs in common queries
-            recs.addAll(suggestCompositeIndexes(jdbc, dialect, normalizedTable, indexedColumns));
+            recs.addAll(suggestCompositeIndexes(connection, dialect, normalizedTable, indexedColumns));
 
             return recs;
         } catch (Exception e) {
@@ -275,11 +313,10 @@ public class OptimizerServiceImpl implements OptimizerService {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
             DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
             String normalizedTable = dialect.normalizeTableName(tableName);
 
-            long rows = getEstimatedRowCount(jdbc, dialect, normalizedTable);
-            long sizeMb = getTableSizeMb(jdbc, dialect, normalizedTable);
+            long rows = getEstimatedRowCount(connection, dialect, normalizedTable);
+            long sizeMb = getTableSizeMb(connection, dialect, normalizedTable);
             List<IndexRecommendation> indexRecs = recommendIndexes(tableName, connection);
             List<String> warnings = new ArrayList<>();
 
@@ -307,38 +344,69 @@ public class OptimizerServiceImpl implements OptimizerService {
 
     @Override
     public String interpretPlan(String planText, String dialect) {
+        DatabaseDialect planDialect = resolvePlanDialect(dialect);
         StringBuilder sb = new StringBuilder();
-        String upper = planText.toUpperCase();
+        // 逐行分类的结果，摘要完全由它驱动。原来摘要是对全文 contains，比逐行更粗：
+        // upper.contains("INDEX") 会被表名里的 INDEX 命中，于是一份没有任何索引访问的计划也报
+        // 「✅ 检测到索引访问，符合预期」。
+        Set<PlanOperation> operations = EnumSet.noneOf(PlanOperation.class);
         int lineNum = 1;
 
         for (String line : planText.split("\n")) {
-            String uLine = line.toUpperCase().trim();
+            PlanOperation operation = planDialect.classifyPlanLine(line);
+            operations.add(operation);
             sb.append(String.format("[%d] %s", lineNum++, formatLine(line)));
-            interpretLine(uLine, sb);
+            String label = PLAN_LINE_LABELS.get(operation);
+            if (label != null) {
+                sb.append(label);
+            }
             sb.append("\n");
         }
+        operations.remove(PlanOperation.OTHER);
 
         // Summary
         sb.append("\n── 解读摘要 ──\n");
-        if (upper.contains("TABLE ACCESS") && upper.contains("FULL")) {
+        if (operations.contains(PlanOperation.FULL_TABLE_SCAN)) {
             sb.append("⚠️  检测到全表扫描，考虑添加索引或使用物化视图\n");
         }
-        if (upper.contains("NESTED LOOPS")) {
+        if (operations.contains(PlanOperation.NESTED_LOOP_JOIN)) {
             sb.append("⚠️  嵌套循环连接：大数据量时建议改用 HASH JOIN\n");
         }
-        if (upper.contains("HASH JOIN")) {
+        if (operations.contains(PlanOperation.HASH_JOIN)) {
             sb.append("ℹ️  哈希连接：确保连接列有索引支持\n");
         }
-        if (upper.contains("SORT") && upper.contains("HASH")) {
+        // 「哈希排序」保留原文案，判据改成「同时出现排序与哈希连接」。原判据是全文
+        // contains("SORT") && contains("HASH")，会被 HASH GROUP BY、HASH UNIQUE 甚至名字里带 HASH 的
+        // 表命中；没有为它新增枚举值，因为一行计划只做一件事，「哈希排序」是跨行的组合而不是一个操作。
+        // 这是一处收窄：哈希操作不是连接时不再提示。spill 的成因（工作区内存不足）两者相同，措辞未变。
+        if (operations.contains(PlanOperation.SORT) && operations.contains(PlanOperation.HASH_JOIN)) {
             sb.append("ℹ️  哈希排序：内存不足时会 spill 到磁盘\n");
         }
-        if (upper.contains("INDEX")) {
+        if (operations.contains(PlanOperation.INDEX_RANGE_SCAN)
+                || operations.contains(PlanOperation.INDEX_UNIQUE_SCAN)) {
             sb.append("✅ 检测到索引访问，符合预期\n");
         }
-        if (!upper.contains("TABLE ACCESS") && !upper.contains("INDEX") && !upper.contains("VIEW")) {
+        // 一个已识别操作都没有 = 结构简单。原判据是「全文不含 TABLE ACCESS / INDEX / VIEW」，
+        // 所以一份只提到 VIEW 的计划会静默不给任何结论；现在它会落到这一条。
+        if (operations.isEmpty()) {
             sb.append("ℹ️  执行计划结构简单，未见明显问题\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * 把方言名解析成方言，解析不了就用 {@code GenericDialect}。
+     *
+     * <p>这是个纯文本解读工具，方言名不可靠是常态：{@code OptimizationTools.interpretPlan} 在
+     * {@code dialect} 缺省时会把 <em>连接名</em> 传进来兜底。{@link DialectResolver#resolve} 对未知名字
+     * 打一条 warn 后返回 {@code GenericDialect}，而 {@code GenericDialect} 用的是
+     * {@link DatabaseDialect#classifyPlanLine} 的默认实现（历史上的 Oracle 形状），所以解析失败时的输出
+     * 与改造前完全一致，不需要在这里另加兜底，更不该抛异常。
+     *
+     * <p>{@code dataSource} 传 {@code null}：本方法不连数据库，{@code dialect=auto} 同样退回 generic。
+     */
+    private DatabaseDialect resolvePlanDialect(String dialectName) {
+        return dialectResolver.resolve(dialectName, null);
     }
 
     // ─── Private Helpers ───────────────────────────────────────────────────────
@@ -348,11 +416,12 @@ public class OptimizerServiceImpl implements OptimizerService {
      *
      * <p>不再自己 {@code jdbc.queryForList(dialect.getExplainPlanSql(sql))}：那样在 Oracle 上永远是空的——
      * {@code EXPLAIN PLAN FOR} 不返回结果集，只往会话级临时表 {@code SYS.PLAN_TABLE$} 写行，
-     * 得在同一条物理连接上查回来。两步逻辑只在 {@code ExecutionPlanRepository#explainPlanRows} 里有一份。
+     * 得在同一条物理连接上查回来。两步逻辑只在 {@code ExecutionPlanRepository#explainPlanRows} 里有一份，
+     * 这里经 {@link DatabaseReadOperations#explainPlanRows} 走到它，顺带吃到统一的计时与审计。
      */
-    private List<String> getExplainPlan(ByokDataSourceContext ctx, String sql) {
+    private List<String> getExplainPlan(String connection, String sql) {
         try {
-            List<Map<String, Object>> rows = ctx.getExecutionPlanRepository().explainPlanRows(sql);
+            List<Map<String, Object>> rows = db.explainPlanRows(sql, connection);
             if (rows.isEmpty()) return List.of("执行计划为空：当前方言不支持 EXPLAIN，或计划只在会话输出中");
             return rows.stream()
                     .map(row -> row.values().stream()
@@ -365,14 +434,14 @@ public class OptimizerServiceImpl implements OptimizerService {
         }
     }
 
-    private long getEstimatedRowCount(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
+    private long getEstimatedRowCount(String connection, DatabaseDialect dialect, String tableName) {
         try {
             String queried = dialect.normalizeTableName(tableName);
             // getTableRowCountSql declares no placeholder: the table name is an identifier in the
             // FROM clause, which the dialect quotes into the SQL itself.
             String sql = dialect.getTableRowCountSql(queried);
             if (sql == null) return -1;
-            List<Map<String, Object>> rows = jdbc.queryForList(sql);
+            List<Map<String, Object>> rows = db.queryRows(sql, connection);
             if (!rows.isEmpty() && !rows.get(0).isEmpty()) {
                 Object val = rows.get(0).values().iterator().next();
                 return val instanceof Number n ? n.longValue() : -1;
@@ -383,7 +452,7 @@ public class OptimizerServiceImpl implements OptimizerService {
         return -1;
     }
 
-    private long getTableSizeMb(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
+    private long getTableSizeMb(String connection, DatabaseDialect dialect, String tableName) {
         try {
             String queried = dialect.normalizeTableName(tableName);
             String sql = dialect.estimateTableSizeSql(queried, null);
@@ -391,8 +460,8 @@ public class OptimizerServiceImpl implements OptimizerService {
             // One placeholder per the DatabaseDialect contract; GenericDialect renders a constant row
             // with no placeholder, so only bind when the dialect actually declared one.
             List<Map<String, Object>> rows = sql.contains("?")
-                    ? jdbc.queryForList(sql, queried)
-                    : jdbc.queryForList(sql);
+                    ? db.queryRows(sql, connection, queried)
+                    : db.queryRows(sql, connection);
             if (!rows.isEmpty()) {
                 // Read the column by name: every dialect's size query starts with segment_name, so
                 // taking the first value returned the table name and degraded the size to -1.
@@ -409,7 +478,7 @@ public class OptimizerServiceImpl implements OptimizerService {
      * The {@code size_mb} column the dialect's size query declares, or {@code null} when it is
      * absent or NULL.
      *
-     * <p>{@code JdbcTemplate.queryForList} 返回大小写不敏感的 map，所以一次查找就覆盖了
+     * <p>{@link DatabaseReadOperations#queryRows} 返回大小写不敏感的 map，所以一次查找就覆盖了
      * {@code size_mb} 与 {@code SIZE_MB}。这里不再回退到「第一个数值列」：MySQL 的 size 查询带
      * {@code GROUP BY table_name} 且选了 {@code count(*)}/{@code extents} 这类恒 ≥ 1 的列，兜底会把
      * 「1 MB」当成表大小上报，比诚实返回 -1 更有害——下游用它判断是否超过 1GB 并给出建议。
@@ -435,23 +504,40 @@ public class OptimizerServiceImpl implements OptimizerService {
         return value != null ? String.valueOf(value) : null;
     }
 
+    /**
+     * 计划告警。前四条由 {@link DatabaseDialect#classifyPlanLine(String)} 的逐行分类结果驱动。
+     *
+     * <p>原来是把所有计划行 {@code join(" ")} 成一段全文再 {@code contains}，有两处坏处：词汇只对 Oracle
+     * 正确（PG 的 {@code Seq Scan} 匹配不上 {@code TABLE ACCESS}，最重要的那条全表扫描告警在 PG 上根本
+     * 不触发），而且全文匹配会跨行凑数——一行里的 {@code TABLE ACCESS} 加另一行里的 {@code FULL} 就够
+     * 报一条全表扫描。逐行分类同时解决这两点。
+     *
+     * <p>{@code upperSql} 仍然只用于与计划无关的 SQL 文本判据（{@code ORDER BY} / DISTINCT / UNION）。
+     */
     private List<String> analyzePlan(List<String> planRows, String upperSql, DatabaseDialect dialect) {
         List<String> warnings = new ArrayList<>();
-        String fullPlan = String.join(" ", planRows).toUpperCase();
+        Set<PlanOperation> operations = EnumSet.noneOf(PlanOperation.class);
+        for (String row : planRows) {
+            operations.add(dialect.classifyPlanLine(row));
+        }
 
-        if (fullPlan.contains("TABLE ACCESS") && fullPlan.contains("FULL")) {
+        if (operations.contains(PlanOperation.FULL_TABLE_SCAN)) {
             warnings.add("⚠️  全表扫描 (FULL TABLE SCAN) — 建议为目标表添加合适的索引");
         }
-        if (fullPlan.contains("NESTED LOOPS")) {
+        if (operations.contains(PlanOperation.NESTED_LOOP_JOIN)) {
             warnings.add("⚠️  嵌套循环连接 — 大数据量时改用 HASH JOIN 或确保连接列有索引");
         }
-        if (fullPlan.contains("HASH JOIN")) {
+        if (operations.contains(PlanOperation.HASH_JOIN)) {
             warnings.add("ℹ️  哈希连接 — 确认参与连接的列已建立索引");
         }
-        if (fullPlan.contains("SORT") && upperSql.contains("ORDER BY")) {
+        // 合取的另一半刻意仍对 SQL 文本取：计划里出现排序、且 SQL 真的写了 ORDER BY，才说「加覆盖索引可
+        // 避免文件排序」——排序也可能来自 GROUP BY / DISTINCT，那时这条建议是错的。
+        if (operations.contains(PlanOperation.SORT) && upperSql.contains("ORDER BY")) {
             warnings.add("ℹ️  检测到排序操作 — 添加覆盖索引可避免文件排序");
         }
-        if (fullPlan.contains("INDEX SKIP SCAN")) {
+        // 刻意的例外：INDEX SKIP SCAN 是 Oracle 独有算子，PlanOperation 的取值是跨方言语义，为它加一个
+        // 只有 Oracle 有的枚举值会污染那套语义。所以这一条保留原样的全文 contains，只在 Oracle 词汇下命中。
+        if (String.join(" ", planRows).toUpperCase().contains("INDEX SKIP SCAN")) {
             warnings.add("⚠️  索引跳过扫描 — 高基数列上可能影响性能");
         }
         if (upperSql.contains("DISTINCT") && !upperSql.contains("GROUP BY")) {
@@ -488,12 +574,12 @@ public class OptimizerServiceImpl implements OptimizerService {
         return tables;
     }
 
-    private Set<String> getIndexedColumns(JdbcTemplate jdbc, DatabaseDialect dialect, String tableName) {
+    private Set<String> getIndexedColumns(String connection, DatabaseDialect dialect, String tableName) {
         Set<String> cols = new HashSet<>();
         try {
             String sql = dialect.listTableIndexesSql(tableName);
             if (sql == null) return cols;
-            List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
+            List<Map<String, Object>> rows = db.queryRows(sql, connection, tableName);
             for (Map<String, Object> row : rows) {
                 Object col = row.get("column_name");
                 if (col == null) {
@@ -522,11 +608,10 @@ public class OptimizerServiceImpl implements OptimizerService {
         String normalizedTable = dialect.normalizeTableName(table);
 
         // The index list is a property of the table, not of the column being examined: fetching it
-        // once outside the loop replaces one connection acquisition plus one metadata query per
-        // distinct WHERE column with a single pair, and every one of those queries returned the
-        // same rows anyway.
-        ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-        Set<String> indexedCols = getIndexedColumns(ctx.getJdbcTemplate(), dialect, normalizedTable);
+        // once outside the loop replaces one metadata query per distinct WHERE column with a single
+        // one, and every one of those queries returned the same rows anyway. The facade resolves the
+        // connection itself, so no context has to be acquired here at all.
+        Set<String> indexedCols = getIndexedColumns(connection, dialect, normalizedTable);
 
         // Simple extraction: column = value or column IN (...)
         Matcher m = WHERE_PREDICATE_COLUMN.matcher(whereClause);
@@ -543,7 +628,7 @@ public class OptimizerServiceImpl implements OptimizerService {
         return recs;
     }
 
-    private List<IndexRecommendation> suggestCompositeIndexes(JdbcTemplate jdbc,
+    private List<IndexRecommendation> suggestCompositeIndexes(String connection,
                                                               DatabaseDialect dialect,
                                                               String tableName,
                                                               Set<String> indexedColumns) {
@@ -553,7 +638,7 @@ public class OptimizerServiceImpl implements OptimizerService {
             String candSql = dialect.candidateColumnsForIndexSql(tableName);
             if (candSql == null) return recs;
             List<Map<String, Object>> candidates =
-                    jdbc.queryForList(candSql, tableName);
+                    db.queryRows(candSql, connection, tableName);
             if (candidates.size() >= 2) {
                 String col1 = columnNameOf(candidates.get(0));
                 String col2 = columnNameOf(candidates.get(1));
@@ -614,22 +699,6 @@ public class OptimizerServiceImpl implements OptimizerService {
             actions.add("💡 " + rs.reason());
         }
         return actions.isEmpty() ? List.of("✅ 无明显优化项") : actions;
-    }
-
-    private void interpretLine(String upperLine, StringBuilder sb) {
-        if (upperLine.contains("TABLE ACCESS") && upperLine.contains("FULL")) {
-            sb.append("  ⚠️ 全表扫描，建议检查索引");
-        } else if (upperLine.contains("INDEX") && (upperLine.contains("RANGE") || upperLine.contains("SCAN"))) {
-            sb.append("  ✅ 索引范围扫描");
-        } else if (upperLine.contains("INDEX") && upperLine.contains("UNIQUE")) {
-            sb.append("  ✅ 唯一索引访问");
-        } else if (upperLine.contains("NESTED LOOPS")) {
-            sb.append("  ⚠️ 嵌套循环连接");
-        } else if (upperLine.contains("HASH JOIN")) {
-            sb.append("  ℹ️ 哈希连接");
-        } else if (upperLine.contains("SORT")) {
-            sb.append("  ℹ️ 排序操作");
-        }
     }
 
     private String formatLine(String line) {

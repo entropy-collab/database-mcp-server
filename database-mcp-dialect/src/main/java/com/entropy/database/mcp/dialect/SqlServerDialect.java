@@ -194,6 +194,46 @@ public class SqlServerDialect extends AbstractDatabaseDialect {
         return "SELECT 'OK' AS status";
     }
 
+    /**
+     * SQL Server 的 {@code SHOWPLAN_TEXT} 算子词汇。
+     *
+     * <p>{@code Clustered Index Scan} 归 {@link PlanOperation#FULL_TABLE_SCAN}：聚簇索引就是表本身，
+     * 扫它等于扫全表——只看到「Index」两个字就报「✅ 索引访问」是最容易误导人的一种解读。反过来
+     * {@code Index Seek} / {@code Clustered Index Seek} 才是有谓词下推的索引查找。
+     *
+     * <p>刻意不认非聚簇的 {@code Index Scan}（不带 Clustered 前缀）：它是整棵非聚簇索引的扫描，既不是
+     * 全表扫描也不是 seek，归哪一类都会给出误导性的建议，因此留给 {@link PlanOperation#OTHER}。
+     * {@code Merge Join} 同理不表态。
+     */
+    @Override
+    public PlanOperation classifyPlanLine(String planLine) {
+        if (planLine == null) {
+            return PlanOperation.OTHER;
+        }
+        String upper = planLine.toUpperCase(java.util.Locale.ROOT);
+        // Seek 先判：Clustered Index Seek 与 Clustered Index Scan 只差一个词，判错方向就把
+        // 「有谓词的索引查找」说成「扫全表」。
+        if (upper.contains("INDEX SEEK")) {
+            return PlanOperation.INDEX_RANGE_SCAN;
+        }
+        if (upper.contains("TABLE SCAN") || upper.contains("CLUSTERED INDEX SCAN")) {
+            return PlanOperation.FULL_TABLE_SCAN;
+        }
+        if (upper.contains("NESTED LOOPS")) {
+            return PlanOperation.NESTED_LOOP_JOIN;
+        }
+        if (upper.contains("HASH MATCH")) {
+            return PlanOperation.HASH_JOIN;
+        }
+        if (upper.contains("MERGE JOIN")) {
+            return PlanOperation.OTHER;
+        }
+        if (upper.contains("SORT")) {
+            return PlanOperation.SORT;
+        }
+        return PlanOperation.OTHER;
+    }
+
     /** SQL Server 的字符串字面量里反斜杠是普通字符；显式声明以免被当成未表态而拒收含反斜杠的行。 */
     @Override
     public BackslashInLiteral backslashInLiteral() {

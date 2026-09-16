@@ -18,6 +18,7 @@ package com.entropy.database.mcp.tools;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.dialect.PlanOperation;
 import com.entropy.database.mcp.facade.DatabaseAdminOperations;
 import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import org.springframework.ai.mcp.annotation.McpTool;
@@ -25,8 +26,10 @@ import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Query analysis tools for execution plan preview and optimization suggestions.
@@ -166,22 +169,49 @@ public class QueryAnalysisTools extends McpToolBase {
         return planRows;
     }
 
+    /**
+     * 计划告警。前四条由 {@link DatabaseDialect#classifyPlanLine(String)} 的分类结果驱动。
+     *
+     * <p>改造前这里逐行 {@code contains} 一份 Oracle 词汇，有三处错：
+     * <ol>
+     *   <li>词汇只对 Oracle 正确。PG 的 {@code Seq Scan} 里没有 {@code TABLE ACCESS}，最重要的那条全表
+     *       扫描告警在 PG 上根本不触发；{@code dialect} 入参拿到了却没用来分类。</li>
+     *   <li>排序的判据是「同一行计划文本里同时含 {@code SORT} 与 {@code ORDER BY}」。{@code ORDER BY} 是
+     *       SQL 的关键字，计划里一般不出现，只有 Oracle 恰好把算子写成 {@code SORT ORDER BY} 才碰巧成立，
+     *       PG 的 {@code Sort} / MySQL 的 {@code Using filesort} 永不成立。这里拿不到 SQL 文本，所以合取
+     *       项直接去掉：排序命中即告警。</li>
+     *   <li>{@code FILTER} 被贴上「索引跳过扫描」的标签——两者毫无关系，那是个错误结论而不是漏报，已删除
+     *       该 disjunct。{@code FILTER} 目前不单独提示：它在多数计划里是常规的谓词过滤，措辞不准的提示
+     *       比没有提示更有害。</li>
+     * </ol>
+     *
+     * <p>逐行分类先收进 {@link EnumSet} 再产出告警，顺带把重复消掉：改造前是逐行 {@code add}，一份 10 行
+     * 的计划里有 3 行全表扫描就会返回 3 条一模一样的告警。
+     *
+     * <p>{@code INDEX SKIP SCAN} 刻意留成 {@code contains}：它是 Oracle 独有算子，而 {@link PlanOperation}
+     * 的取值是跨方言语义，为它新增枚举值会污染那套语义。
+     */
     private List<String> analyzePlan(List<Map<String, String>> plan, DatabaseDialect dialect) {
-        List<String> warnings = new ArrayList<>();
         if (plan.isEmpty()) return List.of("无法获取执行计划，可能是不支持的方言");
+        Set<PlanOperation> operations = EnumSet.noneOf(PlanOperation.class);
+        boolean indexSkipScan = false;
         for (Map<String, String> row : plan) {
             String planText = String.join(" ", row.values()).toUpperCase();
-            if (planText.contains("TABLE ACCESS") && planText.contains("FULL"))
-                warnings.add("检测到全表扫描 (FULL TABLE SCAN)，建议添加索引或 WHERE 条件");
-            if (planText.contains("NESTED LOOPS"))
-                warnings.add("检测到嵌套循环连接，大数据量时性能较差，建议检查连接条件是否有索引");
-            if (planText.contains("HASH JOIN"))
-                warnings.add("使用哈希连接，确保参与连接的列有索引支持");
-            if (planText.contains("SORT") && planText.contains("ORDER BY"))
-                warnings.add("检测到排序操作，考虑添加索引避免文件排序");
-            if (planText.contains("FILTER") || planText.contains("INDEX SKIP SCAN"))
-                warnings.add("检测到索引跳过扫描，可能影响性能");
+            operations.add(dialect.classifyPlanLine(planText));
+            indexSkipScan = indexSkipScan || planText.contains("INDEX SKIP SCAN");
         }
+
+        List<String> warnings = new ArrayList<>();
+        if (operations.contains(PlanOperation.FULL_TABLE_SCAN))
+            warnings.add("检测到全表扫描 (FULL TABLE SCAN)，建议添加索引或 WHERE 条件");
+        if (operations.contains(PlanOperation.NESTED_LOOP_JOIN))
+            warnings.add("检测到嵌套循环连接，大数据量时性能较差，建议检查连接条件是否有索引");
+        if (operations.contains(PlanOperation.HASH_JOIN))
+            warnings.add("使用哈希连接，确保参与连接的列有索引支持");
+        if (operations.contains(PlanOperation.SORT))
+            warnings.add("检测到排序操作，考虑添加索引避免文件排序");
+        if (indexSkipScan)
+            warnings.add("检测到索引跳过扫描，可能影响性能");
         return warnings.isEmpty() ? List.of("执行计划正常，无明显性能问题") : warnings;
     }
 

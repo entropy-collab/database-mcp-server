@@ -218,6 +218,54 @@ public interface DatabaseDialect {
     }
 
     /**
+     * 把一行执行计划文本归类成一个方言中立的 {@link PlanOperation}。
+     *
+     * <p>为什么这件事属于方言：计划里的操作词汇是数据库品种特有的。同一件「全表扫描」，Oracle 写
+     * {@code TABLE ACCESS FULL}，PostgreSQL 写 {@code Seq Scan}，MySQL 是 {@code type} 列的
+     * {@code ALL}，SQL Server 写 {@code Table Scan}。理由与 {@link #getExplainPlanSql(String)} 完全一致：
+     * <strong>不要在服务层写按 {@link #getDialectName()} 分支的 {@code switch}，也不要靠 contains 猜品种。</strong>
+     * EXPLAIN 怎么发已经收进方言了，读回来怎么解释也必须在这里，否则就会重演
+     * {@code QueryAnalysisTools.buildExplainSql} 那种「一份词汇散在调用方、只对某一个品种正确」的形态——
+     * 具体的坏结果是：PostgreSQL 的 {@code Seq Scan} 匹配不上 Oracle 的词汇，全表扫描告警在 PG 上根本不触发。
+     *
+     * <p><strong>默认实现是历史上的 Oracle 形状</strong>，逐字复刻了
+     * {@code OptimizerServiceImpl.interpretLine} 原来的六个分支及其顺序（顺序有语义：
+     * {@code INDEX} + {@code RANGE|SCAN} 在 {@code INDEX} + {@code UNIQUE} 之前，所以 Oracle 的
+     * {@code INDEX UNIQUE SCAN} 会落到 {@link PlanOperation#INDEX_RANGE_SCAN}）。保留它不是因为它正确，
+     * 而是为了让 Oracle、{@link GenericDialect} 以及方言名解析失败的情况行为与改造前完全一致 —— 未知方言
+     * 不改变行为，胜过给它一份猜出来的词汇：猜错会导出错误的优化建议。方言只有在真的知道自己的计划词汇时
+     * 才应该覆写（Db2 / SQLite / H2 目前刻意不覆写）。
+     *
+     * @param planLine 一行原始计划文本，可以带缩进、树形前缀与成本注释；{@code null} 视为 {@code OTHER}
+     * @return 该行对应的语义操作，认不出时是 {@link PlanOperation#OTHER}
+     */
+    default PlanOperation classifyPlanLine(String planLine) {
+        if (planLine == null) {
+            return PlanOperation.OTHER;
+        }
+        String upper = planLine.toUpperCase(java.util.Locale.ROOT);
+        if (upper.contains("TABLE ACCESS") && upper.contains("FULL")) {
+            return PlanOperation.FULL_TABLE_SCAN;
+        }
+        if (upper.contains("INDEX") && (upper.contains("RANGE") || upper.contains("SCAN"))) {
+            return PlanOperation.INDEX_RANGE_SCAN;
+        }
+        if (upper.contains("INDEX") && upper.contains("UNIQUE")) {
+            return PlanOperation.INDEX_UNIQUE_SCAN;
+        }
+        if (upper.contains("NESTED LOOPS")) {
+            return PlanOperation.NESTED_LOOP_JOIN;
+        }
+        if (upper.contains("HASH JOIN")) {
+            return PlanOperation.HASH_JOIN;
+        }
+        if (upper.contains("SORT")) {
+            return PlanOperation.SORT;
+        }
+        return PlanOperation.OTHER;
+    }
+
+    /**
      * SQL that counts the rows of {@code tableName} <em>exactly</em>.
      *
      * <p>Contract: <strong>no {@code ?} placeholder</strong> - the table name is an identifier in a
@@ -415,7 +463,7 @@ public interface DatabaseDialect {
     /**
      * 把一个字符串值渲染成本方言的 SQL 字面量（含外层单引号）。
      *
-     * <p>转义规则属于方言，不属于拼 SQL 的调用方：{@code DatabaseBackupServiceImpl.formatValue} 原来
+     * <p>转义规则属于方言，不属于拼 SQL 的调用方：{@code BackupScript.formatValue} 原来
      * 只做引号翻倍，在 MySQL/MariaDB（默认未开 {@code NO_BACKSLASH_ESCAPES}）上，一个以反斜杠结尾的
      * 列值会让 {@code '...\'} 的收尾引号被吃掉、字面量不闭合，后续文本被并进字符串，足以改写语句边界。
      *

@@ -15,11 +15,34 @@
  */
 package com.entropy.database.mcp.dialect;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class MySqlDialect extends AbstractDatabaseDialect {
+
+    /**
+     * 计划行分词器：非「字母/数字/下划线」的连续一段都是分隔符。
+     *
+     * <p>下划线必须算词内字符，否则 {@code eq_ref} 会被切成 {@code EQ} 与 {@code REF}，
+     * 唯一索引访问会被降级成范围扫描。
+     */
+    private static final Pattern PLAN_LINE_TOKENS = Pattern.compile("[^A-Za-z0-9_]+");
+
+    /** {@code type=ALL}：不用索引、不限行，即全表扫描。 */
+    private static final Set<String> FULL_SCAN_TYPES = Set.of("ALL");
+
+    /** {@code type} 中代表「最多一行」的取值。 */
+    private static final Set<String> UNIQUE_ACCESS_TYPES = Set.of("EQ_REF", "CONST");
+
+    /** {@code type} 中代表「走索引读若干行」的取值；{@code index} 是整棵索引的顺序扫描。 */
+    private static final Set<String> RANGE_ACCESS_TYPES = Set.of("RANGE", "REF", "INDEX");
 
     /**
      * Quotes an identifier, escaping any embedded backtick by doubling it so that a
@@ -497,6 +520,49 @@ public class MySqlDialect extends AbstractDatabaseDialect {
     private String auditTableName(String schema, String table) {
         String audit = quote(table + "_audit");
         return schema == null || schema.isBlank() ? audit : quote(schema) + "." + audit;
+    }
+
+    /**
+     * MySQL/MariaDB 的 {@code EXPLAIN} 词汇：访问方式在 {@code type} 列，附加动作在 {@code Extra} 列。
+     *
+     * <p><strong>不能用裸的 {@code contains("ALL")}。</strong>计划行里一起出现的还有列类型
+     * （{@code SMALLINT}）、表名（{@code ALLOCATION}）、{@code ALLOW} 之类的词，子串匹配会把它们全判成
+     * 全表扫描，进而给出「加索引」的错误建议。所以这里先按分隔符切词再比对，等价于词边界匹配
+     * （{@code \\bALL\\b}），{@link #PLAN_LINE_TOKENS} 保留下划线以免切坏 {@code eq_ref}。
+     *
+     * <p>分支顺序：全表扫描最值得告警，排在最前；{@code Using join buffer} 排在索引访问之前，因为它说的
+     * 是「这个连接没有可用索引，退化成块嵌套循环」——那是连接方式本身，而不是附加动作。
+     *
+     * <p>已知的粗糙之处：这是词袋匹配，不解析列位置。{@code ref} 列的值本身可能是 {@code const}，于是
+     * {@code type=ref} 的行会被判成 {@link PlanOperation#INDEX_UNIQUE_SCAN}。两者同为索引访问，标注差一级
+     * 但都不产生告警；要更准就得按列位置解析 {@code EXPLAIN} 的输出，而列布局随 MySQL 版本变化，比这更脆。
+     */
+    @Override
+    public PlanOperation classifyPlanLine(String planLine) {
+        if (planLine == null) {
+            return PlanOperation.OTHER;
+        }
+        String upper = planLine.toUpperCase(Locale.ROOT);
+        Set<String> tokens = Arrays.stream(PLAN_LINE_TOKENS.split(upper))
+                .filter(token -> !token.isEmpty())
+                .collect(Collectors.toUnmodifiableSet());
+
+        if (!Collections.disjoint(tokens, FULL_SCAN_TYPES)) {
+            return PlanOperation.FULL_TABLE_SCAN;
+        }
+        if (upper.contains("USING JOIN BUFFER")) {
+            return PlanOperation.NESTED_LOOP_JOIN;
+        }
+        if (!Collections.disjoint(tokens, UNIQUE_ACCESS_TYPES)) {
+            return PlanOperation.INDEX_UNIQUE_SCAN;
+        }
+        if (!Collections.disjoint(tokens, RANGE_ACCESS_TYPES)) {
+            return PlanOperation.INDEX_RANGE_SCAN;
+        }
+        if (upper.contains("USING FILESORT")) {
+            return PlanOperation.SORT;
+        }
+        return PlanOperation.OTHER;
     }
 
     /**
