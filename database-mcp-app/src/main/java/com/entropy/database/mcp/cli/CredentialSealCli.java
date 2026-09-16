@@ -41,12 +41,12 @@ import java.util.Map;
  * 换主类：
  * <pre>
  * # 1. 生成密钥对（私钥写文件给服务端，公钥打在 stdout 留在运维手上）
- * java -cp database-mcp-server-0.5.2.jar \
+ * java -cp database-mcp-server-0.6.0.jar \
  *      -Dloader.main=com.entropy.database.mcp.cli.CredentialSealCli \
  *      org.springframework.boot.loader.launch.PropertiesLauncher keygen --out mcp-credential-private.key
  *
  * # 2. 封装一份凭证（口令从标准输入读，不走命令行参数）
- * java -cp database-mcp-server-0.5.2.jar \
+ * java -cp database-mcp-server-0.6.0.jar \
  *      -Dloader.main=com.entropy.database.mcp.cli.CredentialSealCli \
  *      org.springframework.boot.loader.launch.PropertiesLauncher \
  *      seal --public-key public.key --name orders-prod \

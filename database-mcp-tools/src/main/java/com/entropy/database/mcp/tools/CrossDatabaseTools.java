@@ -348,7 +348,7 @@ public class CrossDatabaseTools extends McpToolBase {
         ValidationUtils.validateIdentifier(dbLinkName, "dbLinkName");
         String dropSql = String.format("DROP DATABASE LINK %s", dbLinkName);
         // 同 createDbLink：jsqlparser 5.3 解析不了这条语句，送进 validateDdl 只会拿到
-        // 「SQL validation error」——这个工具在 0.5.2 之前其实一直是这么坏着的。链路名已过
+        // 「SQL validation error」——这个工具在 0.6.0 之前其实一直是这么坏着的。链路名已过
         // validateIdentifier，语句里没有第二处可注入的位置。
 
         return safeExecute(() -> {

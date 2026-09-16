@@ -94,10 +94,10 @@ mvn clean package -DskipTests
 
 # 启动（0.4.0 起 /mcp 默认要求 HTTP Basic 鉴权，必须给一个非空密码，否则启动失败）
 MCP_SECURITY_ADMIN_PASSWORD='换成你自己的密码' \
-  java -jar database-mcp-app/target/database-mcp-server-0.5.2.jar
+  java -jar database-mcp-app/target/database-mcp-server-0.6.0.jar
 
 # 只在本机跑、确实不想要鉴权时（/mcp 将对任何能连上端口的人开放）
-java -jar database-mcp-app/target/database-mcp-server-0.5.2.jar \
+java -jar database-mcp-app/target/database-mcp-server-0.6.0.jar \
   --entropy.mcp.security.enabled=false
 
 # 验证（health 与 info 始终匿名可达，供探针使用）
@@ -164,13 +164,13 @@ jdbcUrl（`?password=`、`;PWD=`、`user/pw@`）：那样它会同时出现在 `
 # 1. 生成密钥对：私钥写进 --out 指定的文件（权限 600，内容就是一行 MCP_CREDENTIAL_PRIVATE_KEY=...），
 #    stdout 只打公钥。私钥刻意不走 stdout——它会留在 CI 日志与终端回滚缓冲里，那是这套机制的全部安全性。
 #    不给 --out 时默认写当前目录的 mcp-credential-private.key；注入服务端后请删掉该文件。
-java -cp database-mcp-server-0.5.2.jar \
+java -cp database-mcp-server-0.6.0.jar \
      -Dloader.main=com.entropy.database.mcp.cli.CredentialSealCli \
      org.springframework.boot.loader.launch.PropertiesLauncher \
      keygen --out mcp-credential-private.key
 
 # 2. 封装一份凭证；口令从标准输入读，不走命令行参数（ps 可见、会进 shell 历史）
-java -cp database-mcp-server-0.5.2.jar \
+java -cp database-mcp-server-0.6.0.jar \
      -Dloader.main=com.entropy.database.mcp.cli.CredentialSealCli \
      org.springframework.boot.loader.launch.PropertiesLauncher \
      seal --public-key public.key --name orders-prod \
@@ -279,16 +279,28 @@ spring:
   推导，不是写死的文案；启动日志里那段 `MCP HTTP authentication is DISABLED` 横幅也补上了这一条。
 - 关掉这个暴露的唯一开关是 `entropy.mcp.security.enabled=true`（同时要配
   `MCP_SECURITY_ADMIN_PASSWORD`）。打开后 `SecurityConfig` 把 `/api/**` 与页面静态资源
-  （`/`、`/index.html`、`/ui.css`、`/ui.js`）一起收进 `ROLE_ADMIN`，浏览器会弹 Basic 认证框。
+  （`/`、`/index.html`、`/assets/**`）一起收进 `ROLE_ADMIN`，浏览器会弹 Basic 认证框。
+  第三项是通配而不是文件名清单：Vite 的产物带内容 hash（`assets/index-<hash>.js`），
+  写死文件名的话前端每重新构建一次，页面就会在所有开了鉴权的部署上静默 403。
 - 两者始终同一档，不存在「页面能开、表格全是 401」的中间态。反过来，鉴权打开时不带凭证访问
   `/` 得到的是 401，前端也会把 401 原样显示出来，而不是渲染一张空表让人以为「没有数据」。
 
 实现上的几个刻意选择（改动这块前请先读）：
 
-- **没有前端构建链**：纯 HTML + 原生 JS + CSS，三个文件放在
-  `database-mcp-app/src/main/resources/static/`，由 Boot 默认的静态资源处理直接服务。仓库里没有
-  npm / bundler，也不打算引入。
-- **没有任何 CDN 外链**：目标环境是准离网的 K8s 命名空间，外链只会加载失败。需要图形就用内联 SVG。
+- **前端是构建出来的**：Vite + React 19 + [Meta Astryx](https://github.com/facebook/astryx) 设计系统，
+  源码在 `database-mcp-app/src/main/frontend/`，由 `frontend-maven-plugin` 在 `generate-resources`
+  阶段跑 `npm ci && npm run build`，产物落在 `target/classes/static/`，随 fat jar 发布。
+  插件会装自己的 node/npm（不用机器上的），装在 `src/main/frontend/node/` 而不是 `target/` 下，
+  这样 `clean` 之后不必重新联网下载。
+  - 依赖<b>全部钉死到确定版本</b>（没有 `^`、没有 `~`），`package-lock.json` 进版本库：Astryx 是 Beta。
+  - `mvn -o`（离线）与前端构建天然冲突，所以有 `-Dfrontend.skip=true` 这个逃生阀。它<b>不</b>顺带跳过测试：
+    产物缺失时 `WebUiStaticAssetsPresenceTest` 会失败并打印原因，避免静默打出一个 `static/` 为空的 jar。
+    纯 Java 改动的离线构建请<b>不带 clean</b>：`mise exec -- mvn -o install -Dfrontend.skip=true`。
+  - Astryx 0.6.2 的两个坑记在代码注释里：公开文档写的 `@astryxdesign/theme-neutral/css` 在 0.6.2
+    并不存在（真实入口是 `/theme.css`，见 `src/main.jsx`）；主题 CSS 包在
+    `@scope ([data-astryx-theme="neutral"])` 里，`index.html` 的 `<html>` 上必须带这个属性，
+    否则页面渲染成完全没有样式的裸元素且不报错。
+- **没有任何 CDN 外链**：目标环境是准离网的 K8s 命名空间，外链只会加载失败。所有资源都打进产物。
 - **自动刷新默认关闭**：每次刷新连接页都会经过连接注册表的读方法，而 `PerformanceTimingAspect`
   会给这些方法记一条 `recordToolExecution`，固定轮询等于让页面自己去污染性能 tab 里的指标。
 - **JDBC URL 一律是脱敏后的那份**：页面上所有 URL 都来自 `ConnectionMetadata.jdbcUrlMasked` /
@@ -301,7 +313,7 @@ spring:
 验证页面在**打包后的 fat jar 里**也在（这类改动最典型的失败形态是「IDE 里好、jar 里 404」）：
 
 ```bash
-java -jar database-mcp-app/target/database-mcp-server-0.5.2.jar \
+java -jar database-mcp-app/target/database-mcp-server-0.6.0.jar \
   --spring.profiles.active=test --server.port=18700 --entropy.mcp.security.enabled=false
 
 curl -si http://localhost:18700/ | head -1              # 200，text/html

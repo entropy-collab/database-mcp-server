@@ -337,14 +337,14 @@ to recover the password.
 #    The private key deliberately never goes to stdout: stdout survives in CI logs and terminal
 #    scrollback, and that key is the entire security of this mechanism. Without --out it defaults to
 #    ./mcp-credential-private.key. Delete the file once it has been injected into the server.
-java -cp database-mcp-server-0.5.2.jar \
+java -cp database-mcp-server-0.6.0.jar \
      -Dloader.main=com.entropy.database.mcp.cli.CredentialSealCli \
      org.springframework.boot.loader.launch.PropertiesLauncher \
      keygen --out mcp-credential-private.key
 
 # 2. Seal one credential. The password is read from stdin, never from a CLI flag
 #    (flags are visible in `ps` and land in shell history).
-java -cp database-mcp-server-0.5.2.jar \
+java -cp database-mcp-server-0.6.0.jar \
      -Dloader.main=com.entropy.database.mcp.cli.CredentialSealCli \
      org.springframework.boot.loader.launch.PropertiesLauncher \
      seal --public-key public.key --name orders-prod \
@@ -548,17 +548,34 @@ the `/api/audit/logs` path" into "visible on opening the root URL", and in pract
   `MCP HTTP authentication is DISABLED` banner now names the UI too.
 - The only switch that closes this is `entropy.mcp.security.enabled=true` (which also requires
   `MCP_SECURITY_ADMIN_PASSWORD`). With it on, `SecurityConfig` puts `/api/**` and the page's static
-  resources (`/`, `/index.html`, `/ui.css`, `/ui.js`) in the same `ROLE_ADMIN` bucket, and the
-  browser prompts for Basic credentials.
+  resources (`/`, `/index.html`, `/assets/**`) in the same `ROLE_ADMIN` bucket, and the
+  browser prompts for Basic credentials. The third entry is a wildcard rather than a file list
+  because Vite emits content-hashed assets (`assets/index-<hash>.js`): an exact list silently
+  403s the whole page on every authenticated deployment after each frontend rebuild.
 - They are always the same bucket: there is no "page loads but every table is 401" middle state.
   Conversely, with authentication on and no credentials, `/` is a 401 and the frontend renders that
   401 verbatim instead of an empty table that reads like "no data".
 
 Deliberate implementation choices — read these before changing this area:
 
-- **No frontend build chain.** Plain HTML + vanilla JS + CSS, three files under
-  `database-mcp-app/src/main/resources/static/`, served by Boot's default static resource handling.
-  There is no npm or bundler in this repository and none is planned.
+- **The frontend is built.** Vite + React 19 + the [Meta Astryx](https://github.com/facebook/astryx)
+  design system. Sources live in `database-mcp-app/src/main/frontend/`; `frontend-maven-plugin` runs
+  `npm ci && npm run build` during `generate-resources` and the output lands in
+  `target/classes/static/`, shipped inside the fat jar. The plugin installs its own node/npm (never
+  the machine's) under `src/main/frontend/node/` rather than `target/`, so a `clean` does not force
+  another download.
+  - Every dependency is pinned to an exact version (no `^`, no `~`) and `package-lock.json` is
+    committed: Astryx is Beta.
+  - `mvn -o` (offline) inherently conflicts with a frontend build, hence the `-Dfrontend.skip=true`
+    escape hatch. It deliberately does **not** also skip tests: when the output is missing,
+    `WebUiStaticAssetsPresenceTest` fails and explains why, so a jar with an empty `static/` cannot
+    ship silently. For an offline Java-only build, omit `clean`:
+    `mise exec -- mvn -o install -Dfrontend.skip=true`.
+  - Two Astryx 0.6.2 traps are recorded in code comments: the published docs' import
+    `@astryxdesign/theme-neutral/css` does not exist in 0.6.2 (the real entry is `/theme.css`, see
+    `src/main.jsx`), and the theme CSS is wrapped in `@scope ([data-astryx-theme="neutral"])`, so
+    `index.html` must carry that attribute on `<html>` or the page renders completely unstyled
+    without raising an error.
 - **No CDN links.** The target runs in an air-gapped-ish Kubernetes namespace where anything fetched
   from the internet simply fails. Use inline SVG if a chart is ever needed.
 - **Auto-refresh is off by default.** Every refresh of the connections tab goes through read methods
@@ -579,7 +596,7 @@ Verifying that the page is also present **in the packaged fat jar** (the classic
 this kind of change is "fine in the IDE, 404 in the jar"):
 
 ```bash
-java -jar database-mcp-app/target/database-mcp-server-0.5.2.jar \
+java -jar database-mcp-app/target/database-mcp-server-0.6.0.jar \
   --spring.profiles.active=test --server.port=18700 --entropy.mcp.security.enabled=false
 
 curl -si http://localhost:18700/ | head -1              # 200, text/html
