@@ -109,6 +109,22 @@ public final class ConnectionArgExtractor {
         return "connection".equalsIgnoreCase(param.getName());
     }
 
+    /**
+     * 是否可以把这个字符串当成 SQL 记进审计。
+     *
+     * <p>{@code PerformanceTimingAspect} 原先只判断"第一个参数是不是 String"，于是
+     * {@code isReadonly(String key)}、{@code acquire(String key)}、{@code inTransaction(String connection, ..)}
+     * 这些首参是连接名的方法，把连接名（实测是 {@code "qditp"}）写进了审计的 sql 字段；一旦配上审计库，
+     * 这个值就直接落到 {@code audit_log.sql_text} 列里，让"这条连接名是谁执行的 SQL"这种问题永远查不清。
+     *
+     * <p>判断刻意做成 {@link #isLikelyConnectionName} 的反面而不是另写一套 SQL 识别：两处判断一旦分家，
+     * 就会出现"既被认成连接名、又被认成 SQL"或者两边都不认的裂缝，而这两个方法的调用点（连接名提取与
+     * SQL 提取）恰好在同一个切面的同一次调用里，裂缝会直接表现为审计记错。
+     */
+    public static boolean isLikelySql(String candidate) {
+        return candidate != null && !candidate.isBlank() && !isLikelyConnectionName(candidate);
+    }
+
     private static boolean isLikelyConnectionName(String s) {
         if (s.isBlank() || s.length() > MAX_NAME_LENGTH) {
             return false;

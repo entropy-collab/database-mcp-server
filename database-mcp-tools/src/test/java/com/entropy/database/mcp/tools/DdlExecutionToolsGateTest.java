@@ -19,6 +19,7 @@ import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.properties.DatabaseProperties;
+import com.entropy.database.mcp.security.QueryAuditLogger;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
@@ -49,12 +50,14 @@ class DdlExecutionToolsGateTest {
 
     private final DatabaseOperations routingFacade = mock(DatabaseOperations.class);
     private final SqlValidator sqlValidator = mock(SqlValidator.class);
+    private final QueryAuditLogger auditLogger = mock(QueryAuditLogger.class);
 
     /** gateway.enabled=true，这样远程与批量两条路的拒绝只可能来自 DDL 闸门。 */
     private DdlExecutionTools tools(boolean ddlAllowed) {
         MockEnvironment environment = new MockEnvironment()
                 .withProperty("entropy.mcp.gateway.enabled", "true");
-        return new DdlExecutionTools(routingFacade, sqlValidator, properties(ddlAllowed), environment);
+        return new DdlExecutionTools(routingFacade, sqlValidator, properties(ddlAllowed), environment,
+                auditLogger);
     }
 
     private static DatabaseProperties properties(boolean ddlAllowed) {

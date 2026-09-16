@@ -19,6 +19,7 @@ import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.properties.DatabaseProperties;
+import com.entropy.database.mcp.security.QueryAuditLogger;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
@@ -39,15 +40,18 @@ public class DdlExecutionTools extends McpToolBase {
 
     private final DatabaseOperations routingFacade;
     private final SqlValidator sqlValidator;
+    private final QueryAuditLogger auditLogger;
     private final boolean ddlAllowed;
     private final boolean gatewayEnabled;
 
     public DdlExecutionTools(DatabaseOperations routingFacade,
                              SqlValidator sqlValidator,
                              DatabaseProperties databaseProperties,
-                             org.springframework.core.env.Environment environment) {
+                             org.springframework.core.env.Environment environment,
+                             QueryAuditLogger auditLogger) {
         this.routingFacade = routingFacade;
         this.sqlValidator = sqlValidator;
+        this.auditLogger = auditLogger;
         // 走已绑定的 DatabaseProperties，而不是再 environment.getProperty("...ddl.allowed") 读一遍
         // 字符串：DdlProperties 的 fail-closed 默认值（缺配置 → allowed=false）只在绑定路径上生效，
         // 而字符串读法把键名写错也照样返回兜底 "false"，出错的方式是"永远拒绝"或"永远放行"，都不报错。
@@ -210,15 +214,19 @@ public class DdlExecutionTools extends McpToolBase {
                     boolean allSuccess = true;
 
                     for (String ddl : statements) {
+                        long stmtStart = System.currentTimeMillis();
                         try {
                             sqlValidator.validateDdl(ddl);
-                            long stmtStart = System.currentTimeMillis();
+                            long execStart = System.currentTimeMillis();
                             tx.execute(ddl);
-                            long stmtDuration = System.currentTimeMillis() - stmtStart;
+                            long stmtDuration = System.currentTimeMillis() - execStart;
+                            auditStatement(connection, ddl, stmtDuration, true, null);
                             applied.add(ddl);
                             results.add(Map.of("ddl", ddl, "success", true, "durationMs", stmtDuration));
                         } catch (RuntimeException e) {
                             allSuccess = false;
+                            auditStatement(connection, ddl, System.currentTimeMillis() - stmtStart,
+                                    false, e.getMessage());
                             log.warn("DDL statement failed in batch on connection {}: {}",
                                     connection, ddl, e);
                             results.add(Map.of("ddl", ddl, "success", false,
@@ -243,6 +251,34 @@ public class DdlExecutionTools extends McpToolBase {
                 return success(e.payload());
             }
         });
+    }
+
+    /**
+     * 逐条把批量 DDL 写进审计。
+     *
+     * <p>{@code PerformanceTimingAspect} 是全服务唯一的审计写入点，它只切到
+     * {@code RoutingDatabaseFacade} 这一层，所以本方法批量执行时只有外层那一次 {@code inTransaction}
+     * 会留下痕迹，事务内部的每条 {@code tx.execute(ddl)} 根本不经过切面。实测通过本工具执行 57 条 DDL，
+     * 审计里只有走 {@code executeDdl} 的 2 条有记录，另外 55 条结构变更（2 个序列、10 个索引、
+     * 43 条 COMMENT ON）一条都没有——{@code grep -c executeDdlBatch audit.log} 与
+     * {@code grep -c "COMMENT ON" audit.log} 都是 0。这不是统计口径问题：批量 DDL 可以改光整个库的结构
+     * 而不留任何审计记录，是这五个缺陷里唯一有安全后果的一个。
+     *
+     * <p>因此这里显式补审计，成功与失败的那一条都记：审计的价值恰恰在失败与被拒的尝试上。
+     * connection 用调用方给的真实参数（可能为 null，表示走默认连接，由
+     * {@code QueryAuditLoggerImpl} 归一成 ""），绝不在这里编造连接名。
+     * 行数固定填 0：DDL 的"影响行数"没有意义，与 {@code executeDdl} 的既有口径一致。
+     *
+     * <p>审计失败绝不能把已经执行成功的 DDL 变成失败，所以整段包了异常兜底——与切面里
+     * {@code recordResult} 的处理方式相同。
+     */
+    private void auditStatement(String connection, String ddl, long durationMs,
+                                boolean success, String error) {
+        try {
+            auditLogger.log("executeDdlBatch", ddl, 0, durationMs, success, error, connection);
+        } catch (Exception e) {
+            log.warn("Failed to record audit log for executeDdlBatch statement: {}", ddl, e);
+        }
     }
 
     /**
