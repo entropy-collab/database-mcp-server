@@ -20,6 +20,7 @@ import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.monitor.DatabaseHealthMonitor;
 import com.entropy.database.mcp.properties.StatementTimeouts;
 import com.entropy.database.mcp.repository.DatabaseReadRepository;
+import com.entropy.database.mcp.repository.EtlTemplates;
 import com.entropy.database.mcp.repository.ExecutionPlanRepository;
 import com.entropy.database.mcp.security.QueryAuditLogger;
 import org.slf4j.Logger;
@@ -35,8 +36,12 @@ import java.sql.SQLException;
 /**
  * Context for a single BYOK datasource.
  * Encapsulates all per-datasource dependencies.
+ *
+ * <p>Implements {@link EtlTemplates} so the ETL pipeline in {@code repository} can take a context
+ * without {@code repository} having to import this class — that import would close a
+ * {@code byok} ↔ {@code repository} package cycle (ArchUnit R5).
  */
-public class ByokDataSourceContext {
+public class ByokDataSourceContext implements EtlTemplates {
     private static final Logger log = LoggerFactory.getLogger(ByokDataSourceContext.class);
 
     private final String key;
@@ -97,11 +102,13 @@ public class ByokDataSourceContext {
     }
 
     /** Template for DDL, which can block on metadata locks far longer than a write. */
+    @Override
     public JdbcTemplate getDdlJdbcTemplate() {
         return templates.ddl();
     }
 
     /** Template for bulk transfers: ETL steps, backup extraction and replay. */
+    @Override
     public JdbcTemplate getEtlJdbcTemplate() {
         return templates.etl();
     }

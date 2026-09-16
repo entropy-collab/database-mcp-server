@@ -16,7 +16,7 @@
 package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.entropy.database.mcp.repository.EtlDdlRunner;
 
 import java.util.List;
 
@@ -38,7 +38,6 @@ public class DdlStepHandler implements StepHandler {
     @Override
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
-        JdbcTemplate jdbcTemplate = source.getDdlJdbcTemplate();
         List<String> statements = engine.getListParam(step, "statements", List.of());
 
         // 先全部校验再执行：DDL 多半不在一个事务里，逐条边校验边执行会在第 N 条被拒时
@@ -47,10 +46,8 @@ public class DdlStepHandler implements StepHandler {
             engine.validateDdl(ddl);
         }
 
-        int totalAffected = 0;
-        for (String ddl : statements) {
-            totalAffected += jdbcTemplate.update(ddl);
-        }
-        return totalAffected;
+        // 执行本身是 JDBC 层的事，落在 infra 的 EtlDdlRunner：能力包不再持有 JdbcTemplate。
+        // 不走 ByokWriteRepository.executeDdl——那会对每条语句重复校验一遍，且返回 Map 而非影响行数。
+        return EtlDdlRunner.executeAll(source, statements);
     }
 }

@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.etl;
+package com.entropy.database.mcp.repository;
 
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpQueryException;
@@ -47,7 +47,7 @@ import java.util.Map;
  *
  * <h2>为什么这里自己管连接和事务</h2>
  * <p>批式搬数如果跑在池连接的默认 {@code autoCommit=true} 上，每一批都是一个独立事务：读到第
- * N 批才发现超过行数上限（或某一批写失败）时，前面的批次已经落库，而 {@link JobExecutionEngine}
+ * N 批才发现超过行数上限（或某一批写失败）时，前面的批次已经落库，而 {@code JobExecutionEngine}
  * 只是把这个 step 标成 FAILED，没有任何补偿；重跑 job 会新建 JobExecution、所有步骤回到 PENDING，
  * 「已 COMPLETED 则跳过」的幂等逻辑失效，于是目标表被二次写入、出现重复行。所以一个 step 的全部
  * 批次必须落在同一个事务里，成功才提交，失败整体回滚。
@@ -56,8 +56,19 @@ import java.util.Map;
  * {@link DataSource} 取连接、把写入钉在这条连接上（见 {@link #boundTo}）。顺带解决了连接占用：
  * 源与目标是同一个池时（{@code step.targetConnection() == null}，也是最常见的情况）整个 step 只
  * 占一条连接，不再出现「同池 2 条连接 × 4 个并发 step」在 {@code pool-size} 偏小时自我死锁。
+ *
+ * <h2>为什么住在 infra 而不是 features</h2>
+ * <p>这是基础设施而不是能力：游标流式分批、{@code batchUpdate} 批量写、把模板钉在事务连接上的
+ * {@link SingleConnectionDataSource}——三样都是 JDBC 层的事。它留在 {@code features} 的 etl 包时，
+ * 能力包必须直接 import {@code org.springframework.jdbc..}（ArchUnit R6 禁止的形状），而这种代码
+ * 套一层 facade 也解决不了：{@code queryRows} 会把整个结果集物化，正是这里要避免的东西。先例是
+ * {@code BatchInsertHelper}，它当年因为同样的理由从 {@code tools} 搬进了这个包。
+ *
+ * <p>入口收 {@link EtlTemplates}（{@code ByokDataSourceContext} 实现了它）而不是
+ * {@link JdbcTemplate}：调用方本来就持有 context，「用哪个模板」（ETL 批量模板，不是交互式读模板）
+ * 是这一层的决定，不该由每个 handler 各自记得。
  */
-final class EtlRowStream {
+public final class EtlRowStream {
 
     private static final Logger log = LoggerFactory.getLogger(EtlRowStream.class);
 
@@ -71,11 +82,11 @@ final class EtlRowStream {
     /**
      * 驱动无法流式取数时启用的保守行数上限。
      *
-     * <p>此时结果集整份缓存在客户端，默认的 {@link JobExecutionEngine#DEFAULT_MAX_SOURCE_ROWS}
+     * <p>此时结果集整份缓存在客户端，默认的 {@code JobExecutionEngine.DEFAULT_MAX_SOURCE_ROWS}
      * （一百万行）就不再是内存上界而只是行数上界，所以把上限压到这个值，让内存有一个确定的边界，
      * 并在日志里说明降级原因。
      */
-    static final long NON_STREAMING_MAX_ROWS = 100_000L;
+    public static final long NON_STREAMING_MAX_ROWS = 100_000L;
 
     private EtlRowStream() {
     }
@@ -83,32 +94,50 @@ final class EtlRowStream {
     /**
      * Receives one batch of source rows and writes it, returning the number of rows written.
      *
-     * <p>{@code targetJdbc} 是绑定在本 step 事务连接上的模板，必须用它来写，用别的模板写就落到
-     * 另一条连接、另一个事务上，回滚也就管不到了。
+     * <p>{@code sink} 是绑定在本 step 事务连接上的批量写入口，必须用它来写：用调用方自己持有的
+     * 模板写就落到另一条连接、另一个事务上，回滚也就管不到了。回调只拿到这个窄接口，所以
+     * {@code JdbcTemplate} 不会泄进能力层的签名里（ArchUnit R6）。
      */
     @FunctionalInterface
-    interface BatchWriter {
-        long write(JdbcTemplate targetJdbc, List<String> columns, List<Map<String, Object>> batch);
+    public interface BatchWriter {
+        long write(BatchSink sink, List<Map<String, Object>> batch, List<String> columns);
     }
 
     /**
-     * Read {@code sql} from {@code sourceJdbc} in batches of {@code batchSize}, handing each batch to
+     * 绑在当前事务连接上的批量写入口。
+     *
+     * <p>只暴露「拿一条带 {@code ?} 占位符的语句 + 一批行 + 列顺序，批量写进去」这一件事：占位符
+     * 的绑定顺序、批大小、以及影响行数的求和都由实现负责（见 {@link TransactionalBatchSink}），
+     * 调用方不需要接触 {@code ParameterizedPreparedStatementSetter}。
+     */
+    @FunctionalInterface
+    public interface BatchSink {
+        long batchInsert(String sql, List<Map<String, Object>> batch, List<String> columns);
+    }
+
+    /**
+     * Read {@code sql} from {@code source} in batches of {@code batchSize}, handing each batch to
      * {@code writer} inside a single transaction.
+     *
+     * <p>两侧都取 {@link EtlTemplates#getEtlJdbcTemplate()}：批量搬数走 ETL 的语句超时上限，
+     * 而不是交互式读的上限。
      *
      * @param maxRows hard ceiling on source rows; exceeding it aborts the step with
      *                {@link ErrorCode#QUERY_RESULT_TOO_LARGE} rather than filling the heap, and the
      *                rows written so far are rolled back
      * @return total rows reported written by {@code writer}
      */
-    static long copyInBatches(JdbcTemplate sourceJdbc, JdbcTemplate targetJdbc, String sql,
-                              int batchSize, int maxRows, BatchWriter writer) {
-        return run(sourceJdbc, targetJdbc, sql, batchSize, maxRows, writer);
+    public static long copyInBatches(EtlTemplates source, EtlTemplates target,
+                                     String sql, int batchSize, int maxRows, BatchWriter writer) {
+        return run(source.getEtlJdbcTemplate(), target.getEtlJdbcTemplate(), sql,
+                batchSize, maxRows, writer);
     }
 
     /**
      * Count the rows {@code sql} returns without materialising them, subject to the same ceiling.
      */
-    static long countRows(JdbcTemplate jdbc, String sql, int batchSize, int maxRows) {
+    public static long countRows(EtlTemplates ctx, String sql, int batchSize, int maxRows) {
+        JdbcTemplate jdbc = ctx.getEtlJdbcTemplate();
         return run(jdbc, jdbc, sql, batchSize, maxRows, null);
     }
 
@@ -156,13 +185,13 @@ final class EtlRowStream {
         }
 
         Fetch fetch = Fetch.forSource(source, batchSize, maxRows, sharedConnection);
-        JdbcTemplate boundTarget = boundTo(target, targetJdbc.getQueryTimeout());
+        BatchSink sink = new TransactionalBatchSink(boundTo(target, targetJdbc.getQueryTimeout()));
         long[] writtenSoFar = {0L};
 
         try {
             long written = read(source, sql, fetch, batchSize, sourceJdbc.getQueryTimeout(),
                     (columns, batch) -> {
-                        long rows = writer.write(boundTarget, columns, batch);
+                        long rows = writer.write(sink, batch, columns);
                         long counted = rows < 0 ? batch.size() : rows;
                         writtenSoFar[0] += counted;
                         return counted;
@@ -218,7 +247,7 @@ final class EtlRowStream {
      * Walk {@code sql}'s result set, handing {@code sink} one batch at a time.
      */
     private static long read(Connection connection, String sql, Fetch fetch, int batchSize,
-                             int queryTimeoutSeconds, BatchSink sink) throws SQLException {
+                             int queryTimeoutSeconds, RowSink sink) throws SQLException {
         try (PreparedStatement ps = connection.prepareStatement(
                 sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
             // JdbcTemplate 的 queryTimeout 只作用于它自己创建的语句；这条语句是我们自己建的，
@@ -233,7 +262,7 @@ final class EtlRowStream {
         }
     }
 
-    private static long consume(ResultSet rs, long ceiling, int batchSize, BatchSink sink)
+    private static long consume(ResultSet rs, long ceiling, int batchSize, RowSink sink)
             throws SQLException {
         List<String> columns = columnLabels(rs.getMetaData());
         List<Map<String, Object>> batch = new ArrayList<>(batchSize);
@@ -259,7 +288,7 @@ final class EtlRowStream {
         return written;
     }
 
-    private static long flush(BatchSink sink, List<String> columns, List<Map<String, Object>> batch) {
+    private static long flush(RowSink sink, List<String> columns, List<Map<String, Object>> batch) {
         if (sink == null) {
             return batch.size();
         }
@@ -322,8 +351,24 @@ final class EtlRowStream {
 
     /** Receives one batch, already read; the internal counterpart of {@link BatchWriter}. */
     @FunctionalInterface
-    private interface BatchSink {
+    private interface RowSink {
         long write(List<String> columns, List<Map<String, Object>> batch);
+    }
+
+    /**
+     * The only {@link BatchSink} implementation: batches through a {@link JdbcTemplate} that is
+     * pinned to this step's transaction connection.
+     *
+     * <p>这是原先散落在四个 handler 里的那行代码收敛后的唯一落点。{@link EtlSql#bindColumns} 与
+     * {@link EtlSql#sum} 因此可以保持包私有，{@code ParameterizedPreparedStatementSetter} 不再出现
+     * 在能力层的任何签名里。
+     */
+    private record TransactionalBatchSink(JdbcTemplate txJdbc) implements BatchSink {
+
+        @Override
+        public long batchInsert(String sql, List<Map<String, Object>> batch, List<String> columns) {
+            return EtlSql.sum(txJdbc.batchUpdate(sql, batch, batch.size(), EtlSql.bindColumns(columns)));
+        }
     }
 
     /**

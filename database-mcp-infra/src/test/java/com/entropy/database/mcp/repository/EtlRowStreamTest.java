@@ -13,13 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.entropy.database.mcp.etl;
+package com.entropy.database.mcp.repository;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
+import com.entropy.database.mcp.byok.ByokInfrastructure;
+import com.entropy.database.mcp.byok.StatementTemplates;
 import com.entropy.database.mcp.dialect.H2Dialect;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpQueryException;
-import com.entropy.database.mcp.properties.EtlConfig;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -39,8 +40,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Guards the batched source reader against the ways a "streaming" rewrite can go wrong: losing rows
@@ -49,6 +48,11 @@ import static org.mockito.Mockito.when;
  *
  * <p>Runs against a real H2 database, because batch boundaries, {@code ResultSet} traversal and
  * transaction rollback are exactly what a mocked {@code JdbcTemplate} would paper over.
+ *
+ * <p>入口收 {@link ByokDataSourceContext}，所以这里造的是真的 context（模板由
+ * {@link StatementTemplates#over} 派生，和生产路径一致），而不是一个只会返回模板的 mock。
+ * 两个 ETL step handler 层面的用例（「handler 逐批搬完所有行」「handler 尊重行数上限」）留在
+ * features 的 {@code QueryToTableStepHandlerTest}：handler 住在能力层，infra 看不到它。
  */
 class EtlRowStreamTest {
 
@@ -56,6 +60,7 @@ class EtlRowStreamTest {
 
     private static org.h2.jdbcx.JdbcDataSource dataSource;
     private static JdbcTemplate jdbcTemplate;
+    private static ByokDataSourceContext context;
 
     @BeforeAll
     static void createSchema() {
@@ -64,6 +69,7 @@ class EtlRowStreamTest {
         dataSource.setUser("sa");
         dataSource.setPassword("");
         jdbcTemplate = new JdbcTemplate(dataSource);
+        context = contextOver(dataSource, jdbcTemplate);
         jdbcTemplate.execute("DROP TABLE IF EXISTS SRC");
         jdbcTemplate.execute("CREATE TABLE SRC (ID INT PRIMARY KEY, LABEL VARCHAR(20))");
         for (int i = 1; i <= SOURCE_ROWS; i++) {
@@ -81,9 +87,9 @@ class EtlRowStreamTest {
     void handsEveryRowToTheWriterAcrossBatchBoundaries() {
         List<Map<String, Object>> seen = new ArrayList<>();
 
-        long written = EtlRowStream.copyInBatches(jdbcTemplate, jdbcTemplate,
+        long written = EtlRowStream.copyInBatches(context, context,
                 "SELECT ID, LABEL FROM SRC ORDER BY ID",
-                10, 1000, (targetJdbc, columns, batch) -> {
+                10, 1000, (sink, batch, columns) -> {
                     assertThat(columns).containsExactly("ID", "LABEL");
                     seen.addAll(batch);
                     return batch.size();
@@ -99,8 +105,8 @@ class EtlRowStreamTest {
     void splitsIntoBatchesOfTheRequestedSize() {
         List<Integer> batchSizes = new ArrayList<>();
 
-        EtlRowStream.copyInBatches(jdbcTemplate, jdbcTemplate, "SELECT ID FROM SRC ORDER BY ID", 10, 1000,
-                (targetJdbc, columns, batch) -> {
+        EtlRowStream.copyInBatches(context, context, "SELECT ID FROM SRC ORDER BY ID", 10, 1000,
+                (sink, batch, columns) -> {
                     batchSizes.add(batch.size());
                     return batch.size();
                 });
@@ -110,14 +116,14 @@ class EtlRowStreamTest {
 
     @Test
     void countsWithoutMaterialising() {
-        long rows = EtlRowStream.countRows(jdbcTemplate, "SELECT ID FROM SRC", 10, 1000);
+        long rows = EtlRowStream.countRows(context, "SELECT ID FROM SRC", 10, 1000);
 
         assertThat(rows).isEqualTo(SOURCE_ROWS);
     }
 
     @Test
     void refusesToReadPastTheRowCeiling() {
-        assertThatThrownBy(() -> EtlRowStream.countRows(jdbcTemplate, "SELECT ID FROM SRC", 5, 10))
+        assertThatThrownBy(() -> EtlRowStream.countRows(context, "SELECT ID FROM SRC", 5, 10))
                 .isInstanceOf(McpQueryException.class)
                 .hasMessageContaining("more than 10 rows")
                 .extracting(e -> ((McpQueryException) e).getErrorCode())
@@ -126,50 +132,13 @@ class EtlRowStreamTest {
 
     @Test
     void emptySourceWritesNothing() {
-        long written = EtlRowStream.copyInBatches(jdbcTemplate, jdbcTemplate,
+        long written = EtlRowStream.copyInBatches(context, context,
                 "SELECT ID FROM SRC WHERE ID < 0", 10, 1000,
-                (targetJdbc, columns, batch) -> {
+                (sink, batch, columns) -> {
                     throw new AssertionError("writer must not be called for an empty source");
                 });
 
         assertThat(written).isZero();
-    }
-
-    @Test
-    void queryToTableHandlerCopiesEveryRowInBatches() {
-        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
-        // The bulk template, not the read one: an ETL step is not sized by the interactive ceiling.
-        when(context.getEtlJdbcTemplate()).thenReturn(jdbcTemplate);
-        when(context.getDialect()).thenReturn(new H2Dialect());
-
-        JobExecutionEngine engine = new JobExecutionEngine(
-                mock(com.entropy.database.mcp.byok.DynamicDataSourceManager.class),
-                null, new EtlConfig(1, 4), Runnable::run);
-        Step step = new Step("copy", StepType.QUERY_TO_TABLE, List.of(), "src",
-                "SELECT ID, LABEL FROM SRC ORDER BY ID", "DEST", null, Map.of());
-
-        long rows = new QueryToTableStepHandler().execute(context, context, step, engine);
-
-        assertThat(rows).isEqualTo(SOURCE_ROWS);
-        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM DEST", Integer.class))
-                .isEqualTo(SOURCE_ROWS);
-    }
-
-    @Test
-    void queryToTableHandlerHonoursTheRowCeiling() {
-        ByokDataSourceContext context = mock(ByokDataSourceContext.class);
-        when(context.getEtlJdbcTemplate()).thenReturn(jdbcTemplate);
-        when(context.getDialect()).thenReturn(new H2Dialect());
-
-        JobExecutionEngine engine = new JobExecutionEngine(
-                mock(com.entropy.database.mcp.byok.DynamicDataSourceManager.class),
-                null, new EtlConfig(1, 4), Runnable::run);
-        Step step = new Step("copy", StepType.QUERY_TO_TABLE, List.of(), "src",
-                "SELECT ID, LABEL FROM SRC ORDER BY ID", "DEST", null,
-                Map.of("maxSourceRows", 5));
-
-        assertThatThrownBy(() -> new QueryToTableStepHandler().execute(context, context, step, engine))
-                .isInstanceOf(McpQueryException.class);
     }
 
     // ─── One transaction per step ─────────────────────────────────────────
@@ -215,16 +184,12 @@ class EtlRowStreamTest {
     @DisplayName("a step whose source and target share a pool holds one connection, not two")
     void sourceAndTargetSharingAPoolUseASingleConnection() {
         CountingDataSource counting = new CountingDataSource(dataSource);
-        JdbcTemplate counted = new JdbcTemplate(counting);
+        ByokDataSourceContext counted = contextOver(counting, new JdbcTemplate(counting));
 
         long written = EtlRowStream.copyInBatches(counted, counted,
                 "SELECT ID, LABEL FROM SRC ORDER BY ID", 10, 1000,
-                (targetJdbc, columns, batch) -> EtlSql.sum(targetJdbc.batchUpdate(
-                        "INSERT INTO DEST (ID, LABEL) VALUES (?, ?)", batch, batch.size(),
-                        (ps, row) -> {
-                            ps.setObject(1, row.get("ID"));
-                            ps.setObject(2, row.get("LABEL"));
-                        })));
+                (sink, batch, columns) ->
+                        sink.batchInsert("INSERT INTO DEST (ID, LABEL) VALUES (?, ?)", batch, columns));
 
         assertThat(written).isEqualTo(SOURCE_ROWS);
         assertThat(destCount()).isEqualTo(SOURCE_ROWS);
@@ -235,14 +200,20 @@ class EtlRowStreamTest {
     }
 
     private long copyIntoDest(int batchSize, int maxRows) {
-        return EtlRowStream.copyInBatches(jdbcTemplate, jdbcTemplate,
+        return EtlRowStream.copyInBatches(context, context,
                 "SELECT ID, LABEL FROM SRC ORDER BY ID", batchSize, maxRows,
-                (targetJdbc, columns, batch) -> EtlSql.sum(targetJdbc.batchUpdate(
-                        "INSERT INTO DEST (ID, LABEL) VALUES (?, ?)", batch, batch.size(),
-                        (ps, row) -> {
-                            ps.setObject(1, row.get("ID"));
-                            ps.setObject(2, row.get("LABEL"));
-                        })));
+                (sink, batch, columns) ->
+                        sink.batchInsert("INSERT INTO DEST (ID, LABEL) VALUES (?, ?)", batch, columns));
+    }
+
+    /**
+     * A context over {@code ds} whose templates are derived exactly the way production derives
+     * them, so {@code getEtlJdbcTemplate()} is the bulk template and not the interactive read one.
+     */
+    private static ByokDataSourceContext contextOver(DataSource ds, JdbcTemplate read) {
+        return new ByokDataSourceContext("h2-etlstream", ds, new H2Dialect(),
+                StatementTemplates.over(ds, read, null),
+                new ByokInfrastructure(null, null, null, null, null, null));
     }
 
     private int destCount() {

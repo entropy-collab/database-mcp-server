@@ -16,7 +16,7 @@
 package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.entropy.database.mcp.repository.EtlRowStream;
 
 import java.util.List;
 
@@ -40,7 +40,6 @@ public class UpsertStepHandler implements StepHandler {
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
         var dialect = target.getDialect();
-        JdbcTemplate jdbc = target.getEtlJdbcTemplate();
         List<String> keyColumns = engine.getListParam(step, "keyColumns", List.of());
         // 原先只有 normalizeTableName（大小写归一，不是校验）；同步版 EtlTools.upsertData 走
         // ByokDatabaseFacade.validateIdentifiers，异步版这条路径完全绕开了它。
@@ -53,10 +52,10 @@ public class UpsertStepHandler implements StepHandler {
 
         // Read the source in batches and upsert each batch; the column list is identical for every
         // batch, so the statement is rebuilt from the batch's own columns without drifting.
-        // batchJdbc 是钉在本 step 事务连接上的模板：所有批次同一个事务，失败整体回滚。
-        return EtlRowStream.copyInBatches(source.getEtlJdbcTemplate(), jdbc, step.sourceSql(), batchSize,
+        // sink 是钉在本 step 事务连接上的批量写入口：所有批次同一个事务，失败整体回滚。
+        return EtlRowStream.copyInBatches(source, target, step.sourceSql(), batchSize,
                 engine.maxSourceRows(step),
-                (batchJdbc, columns, batch) -> {
+                (sink, batch, columns) -> {
                     // 列名来自结果集标签，仍然会被 buildUpsertSql 裸拼进 SQL，所以同样过闸。
                     EtlStepGuard.requireIdentifiers(columns, dialect, "source column");
                     String upsertSql = dialect.buildUpsertSql(tableName, columns, keyColumns);
@@ -64,8 +63,7 @@ public class UpsertStepHandler implements StepHandler {
                         throw new UnsupportedOperationException(
                                 "UPSERT not supported for dialect: " + dialect.getClass().getSimpleName());
                     }
-                    return EtlSql.sum(batchJdbc.batchUpdate(upsertSql, batch, batch.size(),
-                            EtlSql.bindColumns(columns)));
+                    return sink.batchInsert(upsertSql, batch, columns);
                 });
     }
 }

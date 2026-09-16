@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
+import com.entropy.database.mcp.repository.EtlRowStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,7 +39,7 @@ public class QueryToJsonStepHandler implements StepHandler {
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
         engine.validateSourceSql(step.sourceSql());
-        long rows = EtlRowStream.countRows(source.getEtlJdbcTemplate(), step.sourceSql(),
+        long rows = EtlRowStream.countRows(source, step.sourceSql(),
                 engine.batchSize(step), engine.maxSourceRows(step));
         log.info("Query to JSON: {} rows", rows);
         return rows;

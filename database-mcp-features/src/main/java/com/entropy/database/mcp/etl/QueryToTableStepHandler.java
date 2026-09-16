@@ -16,7 +16,8 @@
 package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.entropy.database.mcp.repository.EtlRowStream;
+import com.entropy.database.mcp.repository.EtlSql;
 
 /**
  * Handles QUERY_TO_TABLE steps: executes a source SQL and inserts results into a target table.
@@ -35,8 +36,6 @@ public class QueryToTableStepHandler implements StepHandler {
     @Override
     public long execute(ByokDataSourceContext source, ByokDataSourceContext target,
                         Step step, JobExecutionEngine engine) {
-        JdbcTemplate sourceJdbc = source.getEtlJdbcTemplate();
-        JdbcTemplate targetJdbc = target.getEtlJdbcTemplate();
         var dialect = target.getDialect();
 
         engine.validateSourceSql(step.sourceSql());
@@ -46,13 +45,10 @@ public class QueryToTableStepHandler implements StepHandler {
         String targetTable = EtlStepGuard.requireTargetTable(step, dialect);
         int batchSize = engine.batchSize(step);
 
-        return EtlRowStream.copyInBatches(sourceJdbc, targetJdbc, step.sourceSql(), batchSize,
+        return EtlRowStream.copyInBatches(source, target, step.sourceSql(), batchSize,
                 engine.maxSourceRows(step),
-                // batchJdbc 是钉在本 step 事务连接上的模板：所有批次同一个事务，失败整体回滚。
-                (batchJdbc, columns, batch) -> {
-                    String insertSql = EtlSql.insertInto(dialect, targetTable, columns);
-                    return EtlSql.sum(batchJdbc.batchUpdate(insertSql, batch, batch.size(),
-                            EtlSql.bindColumns(columns)));
-                });
+                // sink 是钉在本 step 事务连接上的批量写入口：所有批次同一个事务，失败整体回滚。
+                (sink, batch, columns) ->
+                        sink.batchInsert(EtlSql.insertInto(dialect, targetTable, columns), batch, columns));
     }
 }

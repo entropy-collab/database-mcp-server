@@ -16,7 +16,8 @@
 package com.entropy.database.mcp.etl;
 
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.entropy.database.mcp.repository.EtlRowStream;
+import com.entropy.database.mcp.repository.EtlSql;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -40,7 +41,6 @@ public class TransformStepHandler implements StepHandler {
         List<String> columnMapping = engine.getListParam(step, "columnMapping", List.of());
         String whereClause = engine.getStringParam(step, "whereClause", null);
 
-        JdbcTemplate jdbcTemplate = source.getEtlJdbcTemplate();
         var dialect = source.getDialect();
 
         engine.validateSourceSql(step.sourceSql());
@@ -85,12 +85,9 @@ public class TransformStepHandler implements StepHandler {
         // Column labels come from the SELECT above, which aliases every expression to its target
         // column, so the batch keys are exactly the columns the INSERT names.
         // 读写同一个 context，所以整个 step 只占一条连接、跑在一个事务里（见 EtlRowStream）。
-        return EtlRowStream.copyInBatches(jdbcTemplate, jdbcTemplate, selectSql.toString(), batchSize,
+        return EtlRowStream.copyInBatches(source, source, selectSql.toString(), batchSize,
                 engine.maxSourceRows(step),
-                (batchJdbc, columns, batch) -> {
-                    String insertSql = EtlSql.insertInto(dialect, targetTable, columns);
-                    return EtlSql.sum(batchJdbc.batchUpdate(insertSql, batch, batch.size(),
-                            EtlSql.bindColumns(columns)));
-                });
+                (sink, batch, columns) ->
+                        sink.batchInsert(EtlSql.insertInto(dialect, targetTable, columns), batch, columns));
     }
 }

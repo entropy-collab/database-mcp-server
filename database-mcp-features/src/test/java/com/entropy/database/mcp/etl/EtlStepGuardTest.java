@@ -24,6 +24,7 @@ import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.properties.EtlConfig;
 import com.entropy.database.mcp.properties.StatementTimeouts;
+import com.entropy.database.mcp.repository.EtlSql;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
