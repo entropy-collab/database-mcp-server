@@ -49,6 +49,11 @@ import static org.mockito.Mockito.when;
  * to the order of the placeholders in the SQL — for a {@code HashMap} it is a hash artefact — so
  * the query silently read the wrong rows. Only a real database can show that, hence H2 rather than
  * a mocked template: a mock would happily accept any array.
+ *
+ * <p>这些用例测的都是<b>网关行为</b>（路由到哪个注册项、限行、fan-out 的部分结果与过载失败），所以
+ * 迁移后一个都没搬走：它们只经由网关的公开方法，不碰 {@code RemoteJdbcClient}。远端客户端<b>自身</b>
+ * 的契约（命名绑定、语句超时下达到语句、不暴露任何 spring-jdbc 类型）在
+ * {@code com.entropy.database.mcp.byok.RemoteJdbcClientTest} 里，与实现同模块。
  */
 class FederatedQueryGatewayTest {
 
@@ -142,10 +147,20 @@ class FederatedQueryGatewayTest {
                 .hasMessageContaining("nope");
     }
 
+    /**
+     * 注册必须是全成或全不成：拒掉的注册不能在表里留下一个半初始化的 entry，否则后续查询会拿到一个
+     * 没有模板（也就没有语句超时）的客户端。
+     */
     @Test
     void rejectsRegistrationWithoutAClientId() {
         assertThatThrownBy(() -> gateway.registerClient("  ", dataSource))
                 .isInstanceOf(McpFederatedException.class);
+        assertThatThrownBy(() -> gateway.registerClient("nulls", null))
+                .isInstanceOf(McpFederatedException.class);
+
+        // 只剩 @BeforeEach 注册的那一个，两次被拒的注册都没留下痕迹。
+        assertThat(gateway.getClientCount()).isEqualTo(1);
+        assertThat(gateway.getDatabaseInfo("nulls")).containsEntry("status", "not_found");
     }
 
     @Test

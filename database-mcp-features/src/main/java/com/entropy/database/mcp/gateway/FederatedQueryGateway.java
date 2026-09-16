@@ -20,6 +20,7 @@ import com.entropy.database.mcp.dialect.DialectResolver;
 import com.entropy.database.mcp.exception.McpFederatedException;
 import com.entropy.database.mcp.exception.McpValidationException;
 import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.byok.RemoteJdbcClient;
 import com.entropy.database.mcp.security.SqlValidator;
 import com.entropy.database.mcp.properties.QueryConfig;
 import com.entropy.database.mcp.properties.ThreadPoolProperties;
@@ -27,8 +28,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
@@ -50,17 +49,17 @@ import java.util.function.Consumer;
  * <p><b>有界队列 + 有超时的等待</b>：这两点是一起的。之前的池是
  * {@code Executors.newFixedThreadPool}，自带无界 {@code LinkedBlockingQueue}，而 fan-out 用
  * {@code join()} 无限等——于是过载时任务只排队不拒绝，MCP 请求线程挂在 {@code join()} 上直到最慢的库
- * 返回。{@code RegisteredClient} 的 statement 级 {@code queryTimeout} 管不到这里：驱动可能在建连、
+ * 返回。{@link RemoteJdbcClient} 的 statement 级 {@code queryTimeout} 管不到这里：驱动可能在建连、
  * 取结果集阶段卡住，那不是 statement 超时能覆盖的。现在队列显式有界 + {@code AbortPolicy}（过载立即
  * 失败，把背压交给调用方，而不是攒一队迟早都会超时的任务），等待带超时（超时的库按<b>单库失败</b>
  * 记进结果，与 {@link #collectResult} 的语义一致，而不是整个 fan-out 抛错）。
  *
  * <p><b>注册表有界</b>：{@code databaseClients} 的键全部来自调用方（{@code clientId}），每个 entry
- * 持一个 {@link DataSource} 和两个 {@link JdbcTemplate}，此前只有显式 {@code unregisterClient} 才移除。
- * 换成有上限 + {@code expireAfterAccess} 的 Caffeine，与 {@code BackupMetadataRepository} /
- * {@code JobExecutionEngine} 一致。这里能静默驱逐是因为注册本身是<b>缓存语义</b>而不是业务注册：被驱逐
- * 的库下次查询报 {@code REMOTE_DATABASE_NOT_FOUND}，重新注册即可恢复；驱逐不关闭 {@link DataSource}，
- * 因为它是调用方传进来的、生命周期不在本类。
+ * 持一个 {@link RemoteJdbcClient}（一个 {@link DataSource} 加它上面的两个 JDBC 模板），此前只有显式
+ * {@code unregisterClient} 才移除。换成有上限 + {@code expireAfterAccess} 的 Caffeine，与
+ * {@code BackupMetadataRepository} / {@code JobExecutionEngine} 一致。这里能静默驱逐是因为注册本身是
+ * <b>缓存语义</b>而不是业务注册：被驱逐的库下次查询报 {@code REMOTE_DATABASE_NOT_FOUND}，重新注册即可
+ * 恢复；驱逐不关闭 {@link DataSource}，因为它是调用方传进来的、生命周期不在本类。
  */
 @Component
 public class FederatedQueryGateway implements DisposableBean {
@@ -69,8 +68,9 @@ public class FederatedQueryGateway implements DisposableBean {
     private static final int SHUTDOWN_TIMEOUT_SECONDS = 30;
 
     /**
-     * 注册表上限与空闲保留期。键来自调用方，每个 entry 持一个 DataSource + 两个 JdbcTemplate，
-     * 所以必须有界；2 小时未被访问的注册视为调用方已经不用了。
+     * 注册表上限与空闲保留期。键来自调用方，每个 entry 持一个 {@link RemoteJdbcClient}
+     * （一个 DataSource 加它上面的两个 JDBC 模板），所以必须有界；2 小时未被访问的注册视为调用方
+     * 已经不用了。
      */
     private static final int MAX_REGISTERED_CLIENTS = 200;
     private static final Duration CLIENT_RETENTION = Duration.ofHours(2);
@@ -95,10 +95,10 @@ public class FederatedQueryGateway implements DisposableBean {
     private final QueryConfig queryConfig;
     private final int fanOutTimeoutSeconds;
 
-    private final ConcurrentMap<String, RegisteredClient> databaseClients = Caffeine.newBuilder()
+    private final ConcurrentMap<String, RemoteJdbcClient> databaseClients = Caffeine.newBuilder()
             .maximumSize(MAX_REGISTERED_CLIENTS)
             .expireAfterAccess(CLIENT_RETENTION)
-            .<String, RegisteredClient>build()
+            .<String, RemoteJdbcClient>build()
             .asMap();
     /**
      * Dialect per registered client. Detection costs a physical connection
@@ -170,7 +170,7 @@ public class FederatedQueryGateway implements DisposableBean {
             throw new McpFederatedException(ErrorCode.CONNECTION_FAILED,
                     "DataSource cannot be null (clientId=" + clientId + ")");
         }
-        databaseClients.put(clientId, RegisteredClient.of(dataSource, queryConfig.queryTimeoutSeconds()));
+        databaseClients.put(clientId, RemoteJdbcClient.over(dataSource, queryConfig.queryTimeoutSeconds()));
         dialectCache.remove(clientId);
         log.info("Registered federated client: {}", clientId);
     }
@@ -188,7 +188,8 @@ public class FederatedQueryGateway implements DisposableBean {
      * Execute a query against a specific database.
      *
      * <p>{@code params} is a <em>named</em> parameter map: the SQL must use {@code :name}
-     * placeholders and binding goes through {@link NamedParameterJdbcTemplate}. It used to be
+     * placeholders and binding goes through
+     * {@link RemoteJdbcClient#queryForList(String, Map)}. It used to be
      * flattened with {@code params.values().toArray()} and bound positionally, which silently
      * mis-bound every query whose map iteration order did not happen to match the order of the
      * {@code ?} placeholders — for a {@code HashMap} that order is a hash artefact. A {@code ?}
@@ -197,7 +198,7 @@ public class FederatedQueryGateway implements DisposableBean {
     public List<Map<String, Object>> executeQuery(String databaseId, String sql,
                                                    Integer maxRows,
                                                    Map<String, Object> params) {
-        RegisteredClient client = databaseClients.get(databaseId);
+        RemoteJdbcClient client = databaseClients.get(databaseId);
         if (client == null) {
             throw new McpFederatedException(ErrorCode.REMOTE_DATABASE_NOT_FOUND, "Unknown database: " + databaseId);
         }
@@ -217,9 +218,9 @@ public class FederatedQueryGateway implements DisposableBean {
         log.debug("Executing query on {}: {}", databaseId, adaptedSql);
 
         if (params == null || params.isEmpty()) {
-            return client.jdbc().queryForList(adaptedSql);
+            return client.queryForList(adaptedSql);
         }
-        return client.named().queryForList(adaptedSql, params);
+        return client.queryForList(adaptedSql, params);
     }
 
     /**
@@ -259,7 +260,7 @@ public class FederatedQueryGateway implements DisposableBean {
      * Get database connection info.
      */
     public Map<String, Object> getDatabaseInfo(String databaseId) {
-        RegisteredClient client = databaseClients.get(databaseId);
+        RemoteJdbcClient client = databaseClients.get(databaseId);
         if (client == null) {
             return Map.of("id", databaseId, "status", "not_found");
         }
@@ -302,7 +303,7 @@ public class FederatedQueryGateway implements DisposableBean {
      * Check if a specific database is available.
      */
     public boolean isDatabaseAvailable(String databaseId) {
-        RegisteredClient client = databaseClients.get(databaseId);
+        RemoteJdbcClient client = databaseClients.get(databaseId);
         if (client == null) return false;
 
         try (var conn = client.dataSource().getConnection()) {
@@ -315,7 +316,7 @@ public class FederatedQueryGateway implements DisposableBean {
     /**
      * Resolve the dialect for a client, detecting it at most once per registration.
      */
-    private DatabaseDialect dialectFor(String databaseId, RegisteredClient client) {
+    private DatabaseDialect dialectFor(String databaseId, RemoteJdbcClient client) {
         DatabaseDialect cached = dialectCache.get(databaseId);
         if (cached != null) {
             return cached;
@@ -400,7 +401,7 @@ public class FederatedQueryGateway implements DisposableBean {
      * {@code status=error} 记录，形状与单库失败完全一致，调用方不需要为超时单开一条分支。
      *
      * <p>{@code cancel(true)} 不会中断已在执行的 JDBC 调用（{@code CompletableFuture} 只是让 future 进入
-     * 取消态），真正的止损靠 {@code RegisteredClient} 的 statement 超时；这里取消的意义是让还在队列里
+     * 取消态），真正的止损靠 {@link RemoteJdbcClient} 的 statement 超时；这里取消的意义是让还在队列里
      * 没起跑的任务不必再跑。
      */
     private void awaitFanOut(List<CompletableFuture<Void>> futures, Map<String, Object> results,
@@ -489,30 +490,5 @@ public class FederatedQueryGateway implements DisposableBean {
     @Override
     public void destroy() {
         shutdown();
-    }
-
-    /**
-     * One registered federated database: the positional and named templates over a single
-     * {@link DataSource}, created once at registration.
-     *
-     * <p>Replaces the previous pair of parallel maps (a {@code JdbcTemplate} map plus a
-     * write-only {@code DataSource} map that nothing ever read), which had to be kept in sync
-     * under a lock to avoid a half-registered client.
-     */
-    private record RegisteredClient(DataSource dataSource, JdbcTemplate jdbc, NamedParameterJdbcTemplate named) {
-
-        /**
-         * @param queryTimeoutSeconds statement ceiling for this client. A federated fan-out waits on
-         *                            every database it targets, so an unbounded remote statement
-         *                            holds a gateway thread — and the request thread joining on it —
-         *                            until the driver gives up.
-         */
-        static RegisteredClient of(DataSource dataSource, int queryTimeoutSeconds) {
-            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
-            if (queryTimeoutSeconds > 0) {
-                jdbc.setQueryTimeout(queryTimeoutSeconds);
-            }
-            return new RegisteredClient(dataSource, jdbc, new NamedParameterJdbcTemplate(jdbc));
-        }
     }
 }
