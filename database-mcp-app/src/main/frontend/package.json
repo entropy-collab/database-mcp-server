@@ -1,0 +1,22 @@
+{
+  "name": "database-mcp-admin-ui",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "description": "只读运维面板前端（Vite + React 19 + Meta Astryx）。产物直接写进 target/classes/static，随 fat jar 发布。",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.2",
+    "@astryxdesign/theme-neutral": "0.6.2",
+    "@stylexjs/stylex": "0.19.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.1.1",
+    "vite": "8.3.0"
+  }
+}

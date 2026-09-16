@@ -49,7 +49,7 @@ import java.util.Set;
  * 的人开放、且每个已注册的 BYOK 连接（含有 DDL 权限的）都能被打穿（无声、要靠读日志才发现）。
  * 默认值应该站在会响的那一侧。本地开发需要免密时显式写 {@code entropy.mcp.security.enabled=false}。
  *
- * <p>并且从 0.5.2 起，{@code production} profile 下把它关掉不再只是一条 {@code log.warn}，而是直接让上下文
+ * <p>并且从 0.6.0 起，{@code production} profile 下把它关掉不再只是一条 {@code log.warn}，而是直接让上下文
  * 启动失败，除非同时显式打开 {@link #allowUnauthenticatedInProduction} 这个逃生阀。
  *
  * <p>{@code proxyBeanMethods = false}：两个 {@code @Bean} 方法之间没有互相调用，不需要
@@ -191,7 +191,8 @@ public class SecurityConfig {
     };
 
     /**
-     * 只读运维页面的静态资源路径（{@code database-mcp-app/src/main/resources/static/}）。
+     * 只读运维页面的静态资源路径。产物由 {@code database-mcp-app/src/main/frontend} 的
+     * Vite 构建生成，落在 {@code target/classes/static/}（进 jar 后是 {@code BOOT-INF/classes/static/}）。
      *
      * <p>为什么必须在这里单独列出来：鉴权打开时下面的规则以 {@code anyRequest().denyAll()} 收尾，
      * 所以这几个路径不写进白名单的话，页面在「鉴权已开」的部署上是 403，连管理员带正确凭证也打不开——
@@ -201,8 +202,22 @@ public class SecurityConfig {
      * 但它唯一的用途就是去读 {@code /api/**}，把两者放在不同档位只会造出「页面能开、表格全是 401」
      * 这种既不安全也不好用的中间态。{@code "/"} 单列是因为欢迎页是 Boot 的
      * {@code WelcomePageHandlerMapping} 转发到 {@code index.html} 的，请求路径就是 {@code "/"}。
+     *
+     * <h2>为什么第三项是通配 {@code /assets/**}，而不是把文件名一个个列出来</h2>
+     * <p>这里原本是 {@code "/ui.css", "/ui.js"} 两个精确路径——那是零构建时代的产物名，固定不变。
+     * 换成 Vite 之后产物名<b>带内容 hash</b>：{@code assets/index-DKIYf9Qg.js}、
+     * {@code assets/index-6_unD-rs.css}，还会按需切出 {@code assets/MenuBottomSheet-<hash>.js}
+     * 这类动态 chunk。hash 每次内容变化都会变，所以精确路径清单的失败形态是：
+     * <b>改一行前端代码、重新打包、部署上去，页面在所有开了鉴权的环境里静默 403</b>——
+     * HTML 能打开（{@code /index.html} 还在清单里），但 JS/CSS 全被拦掉，运维看到一个空白页，
+     * 而日志里只有几条 403，没有任何东西指向"白名单里的文件名过期了"。
+     * 这个坑一旦踩到很难反推，所以这一行必须是通配，并且不要"为了更精确"再改回文件名。
+     *
+     * <p>放通配的代价是可控的：{@code /assets/**} 下只有 Vite 的构建产物，
+     * 这个目录里不会出现任何数据端点；而它的档位仍然是 {@code ROLE_ADMIN}，不是 {@code permitAll}，
+     * 所以未认证的请求拿到的依旧是 401。
      */
-    private static final String[] WEB_UI_RESOURCES = {"/", "/index.html", "/ui.css", "/ui.js"};
+    private static final String[] WEB_UI_RESOURCES = {"/", "/index.html", "/assets/**"};
 
     @Bean
     public SecurityFilterChain securityFilterChain(
@@ -231,7 +246,7 @@ public class SecurityConfig {
                     // 单独留成 401 只会让人以为服务是安全的。真正的收口在 @PostConstruct——production
                     // profile 想走到这个分支必须显式打开逃生阀。
                     //
-                    // 从 0.5.2 起这个分支还多放开了一个只读运维页面（/index.html + /api/ui/**，见
+                    // 从 0.6.0 起这个分支还多放开了一个只读运维页面（/index.html + /api/ui/**，见
                     // WebUiController）。它没有引入任何新权限，但把审计流水从「要知道 /api/audit/logs
                     // 这个路径才读得到」变成了「浏览器打开根路径就看得到」，无鉴权的实际暴露面因此变大。
                     // 页面顶部那条红色横幅就是为这件事准备的，它由 /api/ui/config 的 authEnabled 驱动，

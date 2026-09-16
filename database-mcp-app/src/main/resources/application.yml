@@ -97,13 +97,13 @@ entropy:
     # switch that only tunes SQL-level guardrails (allowed-tables / max-joins /
     # max-subquery-depth) and has no effect on HTTP authentication.
     #
-    # 只读运维页面（0.5.2 加入，见 WebUiController 与 static/index.html）把这个开关的影响面扩大了：
+    # 只读运维页面（0.6.0 加入，见 WebUiController 与 src/main/frontend）把这个开关的影响面扩大了：
     #   enabled=false 时，除了原有的 /mcp，根路径 / 也会直接把审计流水（含 SQL 原文）、慢查询原文、
     #   SQL 模式统计与全部已注册连接（名字、方言、脱敏后的 JDBC URL）渲染成表格，
     #   对任何能访问此端口的人开放——不需要事先知道 /api/audit/logs 这类路径。
     #   这不是新增的权限，但「点开就看到」和「要知道路径才看得到」在实践中就是暴露面的差别。
     #   enabled=true 是关掉这个暴露的唯一开关：SecurityConfig 会把 /api/** 与页面静态资源
-    #   （/、/index.html、/ui.css、/ui.js）一起收进 ROLE_ADMIN，两者始终同一档。
+    #   （/、/index.html、/assets/**）一起收进 ROLE_ADMIN，两者始终同一档。
     #   页面顶部那条不可关闭的红色横幅由 /api/ui/config 的 authEnabled 驱动，也就是由本键驱动，
     #   NEVER 把它改成写死的文案或可关闭的提示。
     security:

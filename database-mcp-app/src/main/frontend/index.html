@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!--
+  只读运维面板的宿主页面。
+
+  data-astryx-theme 必须写在这里，而且必须写在 <html> 上：
+  @astryxdesign/theme-neutral 的 theme.css 全部包在
+  `@scope ([data-astryx-theme="neutral"]) to ([data-astryx-theme])` 里面，
+  没有这个属性时组件的 class 都在，但所有 design token（--color-*、--text-*、--space-*）
+  一个都不会被赋值——页面渲染出来是一堆无样式的裸元素，而不是报错。
+  官方文档里没有这一步，是从 theme.css 的产物里读出来的。
+-->
+<html lang="zh-CN" data-astryx-theme="neutral">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Database MCP Server — 只读运维面板</title>
+</head>
+<body>
+<!--
+  Vite 会把 /src/main.jsx 编译成带内容 hash 的 assets/index-<hash>.js 并改写这个 script 标签。
+  hash 每次内容变化都会变，所以任何「按文件名放行/引用」的地方都必须用通配（见 SecurityConfig）。
+-->
+<div id="root"></div>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

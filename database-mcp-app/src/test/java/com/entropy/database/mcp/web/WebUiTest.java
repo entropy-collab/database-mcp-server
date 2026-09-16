@@ -31,21 +31,31 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 /**
  * 只读运维页面的端到端契约：{@code WebUiController} 的三个端点、限值夹取、审计未落库时的降级路径，
- * 以及<strong>静态页面真的被服务出去</strong>。
+ * 以及<strong>构建出来的前端产物真的被服务出去</strong>。
  *
  * <p>最后一条是这里最值得测的：静态资源在 IDE 里从 {@code target/classes/static} 直接可见，
  * 打成 fat jar 之后走的是另一套 {@code ClassPathResource} 解析，「本地好、jar 里 404」是这类改动
  * 最典型的失败形态。这个测试跑的是完整应用上下文（含 Boot 的
  * {@code WelcomePageHandlerMapping}），所以 {@code GET /} 和 {@code GET /index.html} 两条路径都被钉住。
+ *
+ * <h2>为什么资源名是从 index.html 里解析出来的，而不是写死</h2>
+ * <p>0.6.0 起页面由 Vite 构建，产物带内容 hash（{@code assets/index-DKIYf9Qg.js}）。
+ * 把 hash 写进断言的话，前端每改一行、重新构建，这个测试就红一次——而它红的原因和被测行为无关。
+ * 所以这里的做法是：先取 {@code index.html}，用正则把它自己引用的 {@code /assets/...} 路径抠出来，
+ * 再逐个请求。这样断言的是「HTML 里引用的每一个资源都取得到」这个真正的契约，
+ * 与 hash 是什么无关；顺带还能抓到"HTML 引用了一个不存在的产物"这种更隐蔽的破法。
  *
  * <p>{@code authEnabled} 在两个方向上各钉一次：页面顶部的无鉴权横幅完全由它驱动，报错了就等于横幅
  * 会在错误的部署上出现或消失。
@@ -54,6 +64,23 @@ class WebUiTest {
 
     private static final String ADMIN_PASSWORD = "web-ui-test-password";
     private static final String ADMIN_PASSWORD_PROPERTY = "mcp.security.admin-password";
+
+    /**
+     * Vite 产物引用的匹配式。覆盖 {@code <script src="/assets/x.js">} 与
+     * {@code <link href="/assets/x.css">} 两种写法，因此只认 {@code /assets/} 前缀这一点，
+     * 不去区分标签——标签形式是 Vite 的实现细节，前缀才是和 {@code SecurityConfig} 约定好的东西。
+     */
+    private static final Pattern ASSET_REFERENCE = Pattern.compile("[\"'](/assets/[^\"']+)[\"']");
+
+    /** 从 index.html 正文里抠出它引用的所有 /assets/ 路径。 */
+    static List<String> assetPaths(String indexHtml) {
+        List<String> paths = new ArrayList<>();
+        Matcher matcher = ASSET_REFERENCE.matcher(indexHtml);
+        while (matcher.find()) {
+            paths.add(matcher.group(1));
+        }
+        return paths;
+    }
 
     /** 与 {@code SecurityConfigTest} 同样的理由：surefire 复用 JVM，设了必须清掉。 */
     @BeforeAll
@@ -207,21 +234,54 @@ class WebUiTest {
             assertThat(result.getResponse().getForwardedUrl()).contains("index.html");
         }
 
+        /**
+         * index.html 必须是构建出来的那一个：有 React 的挂载点，也有主题属性。
+         *
+         * <p>{@code data-astryx-theme} 这一条不是凑数的：Astryx 的主题 CSS 全部包在
+         * {@code @scope ([data-astryx-theme="neutral"])} 里，属性掉了页面照样"能打开"，
+         * 但所有 design token 都不会被赋值——渲染出来是一堆无样式的裸元素，而且不报任何错。
+         * 这种坏法在 MockMvc 里唯一能抓到的形式就是断言这个属性还在。
+         */
         @Test
         void indexHtmlIsServedDirectly() throws Exception {
             MvcResult result = mockMvc.perform(get("/index.html"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
                     .andReturn();
             assertThat(result.getResponse().getContentType()).startsWith("text/html");
-            assertThat(result.getResponse().getContentAsString()).contains("auth-banner");
+            String html = result.getResponse().getContentAsString();
+            assertThat(html).contains("id=\"root\"");
+            assertThat(html).contains("data-astryx-theme=\"neutral\"");
         }
 
+        /**
+         * index.html 引用的每一个 hash 化产物都必须取得到。
+         *
+         * <p>不写死 hash，见类注释。至少要有一个 .js 和一个 .css：只有 js 说明样式没打进去，
+         * 页面会是一个无样式的白板；一个都没有说明 index.html 不是 Vite 的产物（很可能是
+         * 前端构建被跳过、而 target/classes/static 里留着别的东西）。
+         */
         @Test
-        void scriptAndStylesheetAreServed() throws Exception {
-            mockMvc.perform(get("/ui.js"))
-                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
-            mockMvc.perform(get("/ui.css"))
-                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
+        void hashedAssetsReferencedByIndexHtmlAreRetrievable() throws Exception {
+            String html = mockMvc.perform(get("/index.html"))
+                    .andReturn().getResponse().getContentAsString();
+            List<String> assets = assetPaths(html);
+
+            assertThat(assets)
+                    .as("index.html 必须引用 Vite 产出的 /assets/ 资源；空清单意味着前端产物没进 classpath")
+                    .isNotEmpty();
+            assertThat(assets).anyMatch(p -> p.endsWith(".js"));
+            assertThat(assets).anyMatch(p -> p.endsWith(".css"));
+
+            for (String asset : assets) {
+                MvcResult assetResult = mockMvc.perform(get(asset))
+                        .andExpect(r -> assertThat(r.getResponse().getStatus())
+                                .as("index.html 引用的资源 %s 必须可取", asset)
+                                .isEqualTo(200))
+                        .andReturn();
+                assertThat(assetResult.getResponse().getContentAsByteArray())
+                        .as("资源 %s 不能是空文件", asset)
+                        .isNotEmpty();
+            }
         }
 
         /** 页面不能把 MCP 协议端点顶掉：/mcp 仍然由 MCP 的 router function 处理。 */
@@ -287,6 +347,13 @@ class WebUiTest {
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
         }
 
+        /**
+         * 页面与它的产物在带凭证时都要能取到。
+         *
+         * <p>这一条是 {@code /assets/**} 那条通配规则的守门人：如果哪天有人"为了更精确"
+         * 把白名单改回具体文件名，构建出的新 hash 会立刻让这里变红，而不是等到部署后
+         * 在生产环境看到一个空白页。
+         */
         @Test
         void thePageIsReachableWithAdminCredentials() throws Exception {
             MvcResult result = mockMvc.perform(get("/index.html")
@@ -295,12 +362,29 @@ class WebUiTest {
                     .andReturn();
             assertThat(result.getResponse().getContentType()).startsWith("text/html");
 
-            mockMvc.perform(get("/ui.js")
+            List<String> assets = assetPaths(result.getResponse().getContentAsString());
+            assertThat(assets).isNotEmpty();
+            for (String asset : assets) {
+                mockMvc.perform(get(asset)
+                                .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD)))
+                        .andExpect(r -> assertThat(r.getResponse().getStatus())
+                                .as("带 admin 凭证时 %s 必须是 200；403 说明它落在了白名单之外", asset)
+                                .isEqualTo(200));
+            }
+        }
+
+        /** 反向：产物也是 ROLE_ADMIN 档，不带凭证时是 401，而不是悄悄放行。 */
+        @Test
+        void assetsRequireCredentialsToo() throws Exception {
+            String html = mockMvc.perform(get("/index.html")
                             .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD)))
-                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
-            mockMvc.perform(get("/ui.css")
-                            .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD)))
-                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
+                    .andReturn().getResponse().getContentAsString();
+            for (String asset : assetPaths(html)) {
+                mockMvc.perform(get(asset))
+                        .andExpect(r -> assertThat(r.getResponse().getStatus())
+                                .as("%s 不带凭证必须是 401", asset)
+                                .isEqualTo(401));
+            }
         }
     }
 

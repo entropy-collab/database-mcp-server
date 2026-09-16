@@ -105,6 +105,19 @@ hs_err_pid*
 replay_pid*
 .attach_pid*
 
+# Frontend（只读运维面板：Vite + React 19 + Meta Astryx）
+# node_modules 约 111MB（@astryxdesign/core 解包后单独就有 20MB），不进版本库。
+# node/ 是 frontend-maven-plugin 自己装的 node+npm 工具链，同理不进。
+# 刻意放在 src/main/frontend/ 下而不是 target/ 下：放 target 的话每次 clean 都要重新联网下 node，
+# 而 `mvn -o` 离线构建就再也过不去了。
+#
+# package-lock.json 刻意「不」忽略：Astryx 是 Beta，锁文件是"钉死版本"这件事的唯一保证。
+# 缺了它 npm ci 直接失败，而退回 npm install 会现场解析出一份没人验证过的依赖树。
+database-mcp-app/src/main/frontend/node_modules/
+database-mcp-app/src/main/frontend/node/
+database-mcp-app/src/main/frontend/dist/
+database-mcp-app/src/main/frontend/.vite/
+
 # Test data
 test-mcp-*.json
 code-smell-report.md
