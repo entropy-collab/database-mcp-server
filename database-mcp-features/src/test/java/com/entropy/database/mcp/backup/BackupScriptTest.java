@@ -23,11 +23,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Statement splitting guards the restore path: a mis-split statement either fails to execute or
  * silently truncates restored data, so the quoting rules are asserted directly.
  */
-class DatabaseBackupServiceImplSplitTest {
+class BackupScriptTest {
 
     @Test
     void splitsOnTopLevelSemicolons() {
-        var statements = DatabaseBackupServiceImpl.splitStatements(
+        var statements = BackupScript.splitStatements(
                 "INSERT INTO T (A) VALUES (1);\nINSERT INTO T (A) VALUES (2);");
 
         assertThat(statements).containsExactly(
@@ -37,17 +37,16 @@ class DatabaseBackupServiceImplSplitTest {
 
     @Test
     void keepsSemicolonInsideStringLiteral() {
-        var statements = DatabaseBackupServiceImpl.splitStatements(
+        var statements = BackupScript.splitStatements(
                 "INSERT INTO T (A) VALUES ('a;b');INSERT INTO T (A) VALUES ('c');");
 
         assertThat(statements).containsExactly(
                 "INSERT INTO T (A) VALUES ('a;b')",
                 "INSERT INTO T (A) VALUES ('c')");
     }
-
     @Test
     void handlesEscapedQuoteFollowedBySemicolon() {
-        var statements = DatabaseBackupServiceImpl.splitStatements(
+        var statements = BackupScript.splitStatements(
                 "INSERT INTO T (A) VALUES ('it''s; fine');INSERT INTO T (A) VALUES (2);");
 
         assertThat(statements).containsExactly(
@@ -57,7 +56,7 @@ class DatabaseBackupServiceImplSplitTest {
 
     @Test
     void keepsSemicolonInsideQuotedIdentifier() {
-        var statements = DatabaseBackupServiceImpl.splitStatements(
+        var statements = BackupScript.splitStatements(
                 "INSERT INTO \"odd;name\" (A) VALUES (1);");
 
         assertThat(statements).containsExactly("INSERT INTO \"odd;name\" (A) VALUES (1)");
@@ -65,7 +64,7 @@ class DatabaseBackupServiceImplSplitTest {
 
     @Test
     void dropsLineComments() {
-        var statements = DatabaseBackupServiceImpl.splitStatements(
+        var statements = BackupScript.splitStatements(
                 "-- a comment; not a statement\nINSERT INTO T (A) VALUES (1);");
 
         assertThat(statements).containsExactly("INSERT INTO T (A) VALUES (1)");
@@ -73,15 +72,15 @@ class DatabaseBackupServiceImplSplitTest {
 
     @Test
     void toleratesMissingTrailingSemicolon() {
-        var statements = DatabaseBackupServiceImpl.splitStatements("INSERT INTO T (A) VALUES (1)");
+        var statements = BackupScript.splitStatements("INSERT INTO T (A) VALUES (1)");
 
         assertThat(statements).containsExactly("INSERT INTO T (A) VALUES (1)");
     }
 
     @Test
     void returnsEmptyForNullOrBlank() {
-        assertThat(DatabaseBackupServiceImpl.splitStatements(null)).isEmpty();
-        assertThat(DatabaseBackupServiceImpl.splitStatements("   \n ")).isEmpty();
-        assertThat(DatabaseBackupServiceImpl.splitStatements(";;;")).isEmpty();
+        assertThat(BackupScript.splitStatements(null)).isEmpty();
+        assertThat(BackupScript.splitStatements("   \n ")).isEmpty();
+        assertThat(BackupScript.splitStatements(";;;")).isEmpty();
     }
 }

@@ -20,9 +20,11 @@ import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpToolException;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.BackupProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -64,12 +66,32 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
     private final BackupMetadataRepository metadataRepository;
     private final BackupProperties backupProperties;
 
+    /**
+     * Read access to whichever connection a call names.
+     *
+     * <p>The metadata probes below (a table's DDL, its column list) go through this rather than
+     * through a {@code JdbcTemplate} borrowed from the connection context, so they are subject to the
+     * same timing, audit and read-only advice as any other query. The connection registry is still
+     * injected: {@link ByokDataSourceContext#getDialect()} decides which SQL to send, and the bulk
+     * row scans keep their own template because they need the ETL statement ceiling rather than the
+     * interactive read one.
+     */
+    private final DatabaseReadOperations db;
+
+    /**
+     * @param db injected lazily because {@code RoutingDatabaseFacade} — the implementation of
+     *           {@link DatabaseReadOperations} — already holds a {@code @Lazy} reference to this
+     *           service, so an eager reference back would make the two service beans constrain each
+     *           other's initialisation order; the proxy breaks that cycle.
+     */
     public DatabaseBackupServiceImpl(DynamicDataSourceManager dataSourceManager,
                                      BackupMetadataRepository metadataRepository,
-                                     BackupProperties backupProperties) {
+                                     BackupProperties backupProperties,
+                                     @Lazy DatabaseReadOperations db) {
         this.dataSourceManager = dataSourceManager;
         this.metadataRepository = metadataRepository;
         this.backupProperties = backupProperties;
+        this.db = db;
     }
 
     // ─── Full Backup ────────────────────────────────────────────────────────
@@ -85,9 +107,11 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
     public Map<String, Object> backupSchema(String tableName, String connection) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
         String sql = dialect.getTableDdlQuery(tableName, null);
-        String ddl = jdbc.queryForObject(sql, new Object[]{tableName, null}, String.class);
+        // 方言的 DDL 提取语句吃 (table, schema) 两个占位符，schema 由调用方留空——参数列表照旧原样传，
+        // 只是改由 facade 发出去。取第一行第一列而不是 queryForObject：facade 只给行，语句没返回行时
+        // ddl 为 null，与「列值本身是 NULL」走同一条路；查询本身失败照旧抛 DataAccessException。
+        String ddl = firstColumnAsString(db.queryRows(sql, connection, tableName, null));
 
         Instant now = Instant.now();
         BackupMetadata meta = BackupMetadata.create(connection, tableName, null,
@@ -134,10 +158,10 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
         // Bulk ceiling: the watermark-filtered SELECT below scans a real table, which is not work
-        // an interactive read timeout should be sized for.
+        // an interactive read timeout should be sized for. 列清单是元数据探查，走 facade。
         JdbcTemplate jdbc = ctx.getEtlJdbcTemplate();
 
-        List<String> columnNames = readColumnNames(jdbc, dialect, tableName, null);
+        List<String> columnNames = readColumnNames(connection, dialect, tableName, null);
         if (columnNames.isEmpty()) {
             return Map.of("error", "Table not found: " + tableName);
         }
@@ -161,7 +185,7 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
 
         // ORDER BY 是正确性要求，不是排版偏好：命中行数上限时，只有按水位排序才能保证被截断掉的是「水位最大
         // 的那一段」，从而算出一个可以续上的水位。无序截断会让任意一批行落到水位之后，永远进不了下一次增量。
-        String selectSql = "SELECT " + quoteAll(dialect, columnNames)
+        String selectSql = "SELECT " + BackupScript.quoteAll(dialect, columnNames)
                 + " FROM " + dialect.quote(tableName)
                 + " WHERE " + dialect.quote(resolvedWatermarkColumn) + " > ?"
                 + " ORDER BY " + dialect.quote(resolvedWatermarkColumn);
@@ -177,7 +201,8 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                             + "type comparable to a timestamp. Cause: " + e.getMessage(), e);
         }
 
-        List<String> insertStatements = generateInsertStatements(tableName, columnNames, rows, dialect);
+        List<String> insertStatements = BackupScript.generateInsertStatements(tableName, columnNames,
+                rows, dialect);
         boolean truncated = rows.size() >= effectiveMaxRows;
         Instant nextWatermark = advanceWatermark(rows, resolvedWatermarkColumn, watermark, truncated);
 
@@ -231,7 +256,7 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
     private Instant advanceWatermark(List<Map<String, Object>> rows, String watermarkColumn,
                                      Instant previousWatermark, boolean truncated) {
         List<Instant> captured = rows.stream()
-                .map(row -> toInstant(caseInsensitive(row).get(watermarkColumn)))
+                .map(row -> toInstant(BackupScript.caseInsensitive(row).get(watermarkColumn)))
                 .filter(Objects::nonNull)
                 .sorted()
                 .toList();
@@ -326,11 +351,12 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
 
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         Instant startedAt = Instant.now();
-        List<String> statements = splitStatements(meta.sqlScript());
+        List<String> statements = BackupScript.splitStatements(meta.sqlScript());
         // 重放前再复校一遍：脚本可能是旧版本、别的方言或别的写入路径留下的，而 splitStatements 按标准 SQL
         // 读引号，MySQL 未开 NO_BACKSLASH_ESCAPES 时读法不同，切出来的"一条语句"未必是服务端看到的那条。
         for (String statement : statements) {
-            assertLiteralBoundariesAgree(statement, ctx.getDialect(), "restore of backup " + backupId);
+            BackupScript.assertLiteralBoundariesAgree(statement, ctx.getDialect(),
+                    "restore of backup " + backupId);
         }
 
         long restoredRows;
@@ -409,7 +435,7 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         String tableName = meta.tableName();
         Instant startedAt = Instant.now();
 
-        List<String> inserts = splitStatements(meta.sqlScript()).stream()
+        List<String> inserts = BackupScript.splitStatements(meta.sqlScript()).stream()
                 .filter(stmt -> stmt.toUpperCase(Locale.ROOT).startsWith("INSERT"))
                 .toList();
         if (inserts.isEmpty()) {
@@ -426,7 +452,8 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
 
         // 重放前复校：quickRestore 用裸 Statement 逐条执行，一条字面量不闭合的语句会把后面的文本并进来。
         for (String statement : inserts) {
-            assertLiteralBoundariesAgree(statement, dialect, "quick restore of backup " + backupId);
+            BackupScript.assertLiteralBoundariesAgree(statement, dialect,
+                    "quick restore of backup " + backupId);
         }
 
         long restoredRows;
@@ -510,92 +537,15 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         }
     }
 
-    /**
-     * Split a SQL script on top-level semicolons.
-     *
-     * <p>Quote- and comment-aware: a {@code ;} inside a string literal, a quoted identifier or a
-     * {@code --} comment does not end a statement. A naive {@code split(";")} truncates any row
-     * whose data contains a semicolon.
-     */
-    static List<String> splitStatements(String script) {
-        if (script == null || script.isBlank()) {
-            return List.of();
-        }
-        List<String> statements = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        boolean inSingleQuote = false;
-        boolean inDoubleQuote = false;
-        boolean inLineComment = false;
-
-        for (int i = 0; i < script.length(); i++) {
-            char c = script.charAt(i);
-
-            if (inLineComment) {
-                if (c == '\n') {
-                    inLineComment = false;
-                    current.append(c);
-                }
-                continue;
-            }
-            if (inSingleQuote) {
-                current.append(c);
-                if (c == '\'') {
-                    // '' is an escaped quote, not a terminator
-                    if (i + 1 < script.length() && script.charAt(i + 1) == '\'') {
-                        current.append(script.charAt(++i));
-                    } else {
-                        inSingleQuote = false;
-                    }
-                }
-                continue;
-            }
-            if (inDoubleQuote) {
-                current.append(c);
-                if (c == '"') {
-                    inDoubleQuote = false;
-                }
-                continue;
-            }
-
-            switch (c) {
-                case '\'' -> { inSingleQuote = true; current.append(c); }
-                case '"' -> { inDoubleQuote = true; current.append(c); }
-                case '-' -> {
-                    if (i + 1 < script.length() && script.charAt(i + 1) == '-') {
-                        inLineComment = true;
-                        i++;
-                    } else {
-                        current.append(c);
-                    }
-                }
-                case ';' -> {
-                    addIfNotBlank(statements, current);
-                    current.setLength(0);
-                }
-                default -> current.append(c);
-            }
-        }
-        addIfNotBlank(statements, current);
-        return statements;
-    }
-
-    private static void addIfNotBlank(List<String> statements, StringBuilder candidate) {
-        String stmt = candidate.toString().strip();
-        if (!stmt.isEmpty()) {
-            statements.add(stmt);
-        }
-    }
-
     // ─── diffSchema (delegate to original logic) ────────────────────────────
 
     @Override
     public Map<String, Object> diffSchema(String sourceTable, String targetTable, String connection) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
         DatabaseDialect dialect = ctx.getDialect();
 
-        var sourceCols = getTableColumns(sourceTable, dialect, jdbc);
-        var targetCols = getTableColumns(targetTable, dialect, jdbc);
+        var sourceCols = getTableColumns(sourceTable, dialect, connection);
+        var targetCols = getTableColumns(targetTable, dialect, connection);
 
         Set<String> sourceNames = sourceCols.keySet();
         Set<String> targetNames = targetCols.keySet();
@@ -632,19 +582,21 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
                                           int maxRows, BackupType type) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
+        // 整表扫描留在 ETL 模板上（理由同增量备份）；列清单是元数据探查，走 facade。
         JdbcTemplate jdbc = ctx.getEtlJdbcTemplate();
 
-        List<String> columnNames = readColumnNames(jdbc, dialect, tableName, schema);
+        List<String> columnNames = readColumnNames(connection, dialect, tableName, schema);
         if (columnNames.isEmpty()) {
             return Map.of("error", "Table not found: " + tableName);
         }
 
         int effectiveMaxRows = resolveMaxRows(maxRows);
-        String selectSql = dialect.applyLimit("SELECT " + quoteAll(dialect, columnNames)
+        String selectSql = dialect.applyLimit("SELECT " + BackupScript.quoteAll(dialect, columnNames)
                 + " FROM " + dialect.quote(tableName), effectiveMaxRows, 0);
 
         List<Map<String, Object>> rows = jdbc.queryForList(selectSql);
-        List<String> insertStatements = generateInsertStatements(tableName, columnNames, rows, dialect);
+        List<String> insertStatements = BackupScript.generateInsertStatements(tableName, columnNames,
+                rows, dialect);
         String sqlScript = String.join("\n", insertStatements);
         boolean truncated = rows.size() >= effectiveMaxRows;
 
@@ -704,16 +656,16 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
      * {@code (owner, table_name)}, every caller here passes {@code schema == null}, so {@code owner} was
      * bound to NULL, no column came back and the backup reported "Table not found".
      */
-    private List<String> readColumnNames(JdbcTemplate jdbc, DatabaseDialect dialect,
+    private List<String> readColumnNames(String connection, DatabaseDialect dialect,
                                           String tableName, String schema) {
         String columnsSql = dialect.columnsQuery(tableName, schema);
-        List<Map<String, Object>> columnInfo = jdbc.queryForList(columnsSql,
+        List<Map<String, Object>> columnInfo = db.queryRows(columnsSql, connection,
                 dialect.normalizeTableName(tableName));
 
         List<String> columnNames = new ArrayList<>();
         for (Map<String, Object> col : columnInfo) {
             // Oracle/H2 报 COLUMN_NAME，MySQL/PG 报 column_name：按大小写不敏感取，否则整表列清单为空。
-            Object name = caseInsensitive(col).get("column_name");
+            Object name = BackupScript.caseInsensitive(col).get("column_name");
             if (name != null) {
                 columnNames.add(String.valueOf(name));
             }
@@ -722,17 +674,22 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
     }
 
     /**
-     * Case-insensitive view of one result row.
+     * 单值查询的结果：第一行第一列，按字符串取。
      *
-     * <p>Column labels come back in whatever case the driver reports — uppercase on Oracle and H2,
-     * lowercase on MySQL and PostgreSQL — so every lookup keyed by a fixed spelling has to be
-     * case-insensitive. Getting this wrong is silent: the value reads as null and the backup happily
-     * writes NULL into the restore script.
+     * <p>facade 的读接口只给行，所以「只取一个标量」这件事在这里落地。没有行、行里没有列、列值是
+     * NULL 三种情况一律返回 {@code null}——调用方（DDL 提取）本来就要处理 NULL 列值，多出来的
+     * 「空结果集」这一支同样按「没拿到」处理，而不是替方言编一个 DDL 出来。
      */
-    private static Map<String, Object> caseInsensitive(Map<String, Object> row) {
-        Map<String, Object> normalized = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        normalized.putAll(row);
-        return normalized;
+    private static String firstColumnAsString(List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return null;
+        }
+        Map<String, Object> first = rows.get(0);
+        if (first == null || first.isEmpty()) {
+            return null;
+        }
+        Object value = first.values().iterator().next();
+        return value != null ? String.valueOf(value) : null;
     }
 
     /**
@@ -756,135 +713,16 @@ public class DatabaseBackupServiceImpl implements DatabaseBackupService {
         };
     }
 
-    private String quoteAll(DatabaseDialect dialect, List<String> columnNames) {
-        return columnNames.stream().map(dialect::quote).reduce((a, b) -> a + ", " + b).orElse("*");
-    }
-
-    private List<String> generateInsertStatements(String tableName, List<String> columnNames,
-                                                   List<Map<String, Object>> rows, DatabaseDialect dialect) {
-        List<String> statements = new ArrayList<>();
-        for (Map<String, Object> row : rows) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("INSERT INTO ").append(dialect.quote(tableName)).append(" (");
-            sb.append(quoteAll(dialect, columnNames));
-            sb.append(") VALUES (");
-            List<String> values = new ArrayList<>();
-            Map<String, Object> lookup = caseInsensitive(row);
-            for (String col : columnNames) {
-                values.add(formatValue(lookup.get(col), dialect));
-            }
-            sb.append(String.join(", ", values)).append(");");
-            String statement = sb.toString();
-            // 生成时就拒掉边界不稳的语句：脚本一旦存进 BackupMetadata，就会被 quickRestore 用裸
-            // Statement 逐条重放，那时已经没有列值、只剩文本，判不出来哪段本该是数据。
-            assertLiteralBoundariesAgree(statement, dialect, "backup of " + tableName);
-            statements.add(statement);
-        }
-        return statements;
-    }
-
-    /**
-     * 把一个列值渲染成脚本里的 SQL 字面量。
-     *
-     * <p>转义规则交给方言（{@link DatabaseDialect#stringLiteral(String)}）：这里原来只做引号翻倍，而
-     * MySQL/MariaDB 默认<b>没开</b> {@code NO_BACKSLASH_ESCAPES}，反斜杠在字面量里是转义符——一个以
-     * 反斜杠结尾的列值会让 {@code '...\'} 的收尾引号被吃掉、字面量不闭合，后面的文本被并进字符串，
-     * 足以改写语句边界。脚本存进 {@link BackupMetadata#sqlScript()} 后由 quickRestore 用裸
-     * {@link Statement} 逐条重放，而行数据本身可以由 insertData 写入，属于二段式利用。
-     *
-     * <p>选的是方案 (b)：保留 SQL 文本，转义下沉到方言，并在生成时与重放前各复校一次
-     * （{@link #assertLiteralBoundariesAgree}）。否决方案 (a)「改存参数化的 (列, 值) 结构」的理由是
-     * {@link BackupMetadata} 只有一个 {@code sqlScript} 字段，backupSchema 存的是 DDL 文本、
-     * restoreBackup/quickRestore/getBackup 以及已经落盘的历史记录全按文本走，换形状要连带改 metadata
-     * 与整条还原链路，超出本次修复范围。
-     */
-    private String formatValue(Object value, DatabaseDialect dialect) {
-        if (value == null) return "NULL";
-        if (value instanceof Number || value instanceof Boolean) return String.valueOf(value);
-        return dialect.stringLiteral(String.valueOf(value));
-    }
-
-    /**
-     * 复校一条待重放语句：它的字符串字面量在「反斜杠是普通字符」和「反斜杠是转义符」两种语义下必须落在
-     * 同一批位置上。
-     *
-     * <p>前提是 MySQL/MariaDB 默认未开 {@code NO_BACKSLASH_ESCAPES}：同一段文本，标准 SQL 侧
-     * （Oracle、PostgreSQL 的 {@code standard_conforming_strings=on}、H2、SQL Server）在某个 {@code '}
-     * 处收尾，MySQL 侧却因为前面那个反斜杠把它吃掉而继续往后吞。两侧不一致的语句就是"语句边界会漂移"
-     * 的语句，重放时后续文本会被当成 SQL 的一部分执行，所以在生成与重放两处都拒掉，而不是去赌服务端的
-     * {@code sql_mode}。
-     *
-     * <p>方言明确声明反斜杠是普通字符（{@link DatabaseDialect.BackslashInLiteral#LITERAL}，Oracle 已
-     * 声明）时跳过：那里一个以反斜杠结尾的值是合法数据，拒了就是把好数据判成坏的。声明为
-     * {@code ESCAPE} 的方言由 {@code stringLiteral} 连反斜杠一起翻倍，两侧自然一致，这里也就放行。
-     * MySqlDialect 目前还没表态（本次改动不许动那个文件），所以在 MySQL 上这类值会被拒——宁可拒收，
-     * 也不要生成一条不闭合的语句；后续给 MySqlDialect 补上 {@code ESCAPE} 声明即可放行。
-     */
-    static void assertLiteralBoundariesAgree(String statement, DatabaseDialect dialect, String context) {
-        if (dialect.backslashInLiteral() == DatabaseDialect.BackslashInLiteral.LITERAL) {
-            return;
-        }
-        if (literalSpans(statement, false).equals(literalSpans(statement, true))) {
-            return;
-        }
-        throw new McpToolException(ErrorCode.DATA_VALIDATION_FAILED,
-                "Refusing " + context + ": a value's backslash makes the SQL literal end at different "
-                        + "places depending on the server's NO_BACKSLASH_ESCAPES setting, so replaying "
-                        + "this statement could shift the statement boundary. Dialect "
-                        + dialect.getDialectName() + " has not declared its backslash semantics.");
-    }
-
-    /**
-     * 一条语句里所有单引号字面量的 [起, 止] 位置。
-     *
-     * <p>{@code backslashEscapes=true} 时把 {@code \x} 当成一个整体跳过，这正是 MySQL 未开
-     * {@code NO_BACKSLASH_ESCAPES} 时的读法；{@code false} 时只认 {@code ''}，即标准 SQL 与
-     * {@link #splitStatements(String)} 的读法。两者一致才说明这条语句怎么读都是同一批字面量。
-     *
-     * <p>不处理双引号标识符：备份生成的标识符都经过 {@code dialect.quote}，里面出现单引号的情形
-     * （被引号包住的列名带 {@code '}）在两种语义下同样会被算成字面量起点，因此不影响"两侧是否一致"这个
-     * 判据本身。
-     */
-    private static List<String> literalSpans(String sql, boolean backslashEscapes) {
-        List<String> spans = new ArrayList<>();
-        int i = 0;
-        while (i < sql.length()) {
-            if (sql.charAt(i) != '\'') {
-                i++;
-                continue;
-            }
-            int start = i++;
-            while (i < sql.length()) {
-                char c = sql.charAt(i);
-                if (backslashEscapes && c == '\\' && i + 1 < sql.length()) {
-                    i += 2;
-                    continue;
-                }
-                if (c == '\'') {
-                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
-                        i += 2;
-                        continue;
-                    }
-                    break;
-                }
-                i++;
-            }
-            spans.add(start + ":" + Math.min(i, sql.length()));
-            i++;
-        }
-        return spans;
-    }
-
     private Map<String, Map<String, Object>> getTableColumns(String tableName,
                                                               DatabaseDialect dialect,
-                                                              JdbcTemplate jdbc) {
+                                                              String connection) {
         try {
             String columnsSql = dialect.columnsQuery(tableName, null);
-            List<Map<String, Object>> columns = jdbc.queryForList(columnsSql,
+            List<Map<String, Object>> columns = db.queryRows(columnsSql, connection,
                     dialect.normalizeTableName(tableName));
             Map<String, Map<String, Object>> result = new LinkedHashMap<>();
             for (Map<String, Object> col : columns) {
-                Object name = caseInsensitive(col).get("column_name");
+                Object name = BackupScript.caseInsensitive(col).get("column_name");
                 if (name != null) {
                     result.put(String.valueOf(name), col);
                 }

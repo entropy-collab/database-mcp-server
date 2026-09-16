@@ -19,6 +19,9 @@ import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.ByokInfrastructure;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.StatementTemplates;
+import com.entropy.database.mcp.domain.PaginatedQueryResult;
+import com.entropy.database.mcp.domain.PlanAnalysis;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.StatementTimeouts;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.H2Dialect;
@@ -102,7 +105,45 @@ class DatabaseBackupServiceImplTest {
         DynamicDataSourceManager manager = mock(DynamicDataSourceManager.class);
         when(manager.acquire(anyString())).thenReturn(ctx);
         BackupProperties properties = new BackupProperties(true, true, maxBackupRows, 200, 7);
-        return new DatabaseBackupServiceImpl(manager, repository, properties);
+        return new DatabaseBackupServiceImpl(manager, repository, properties,
+                new DirectReads(jdbcTemplate));
+    }
+
+    /**
+     * Stands in for the facade: routes {@code queryRows} straight at the fixture's template.
+     *
+     * <p>The service's metadata probes reach the database only through
+     * {@link DatabaseReadOperations}, so a test double is all that is needed here — the routing and
+     * advice that the real implementation adds are its own tests' business, not backup's.
+     */
+    private record DirectReads(JdbcTemplate jdbc) implements DatabaseReadOperations {
+
+        @Override
+        public List<Map<String, Object>> queryRows(String sql, String connection, Object... args) {
+            return args.length == 0 ? jdbc.queryForList(sql) : jdbc.queryForList(sql, args);
+        }
+
+        @Override
+        public PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken,
+                                                 String connection) {
+            throw new UnsupportedOperationException("backup never paginates");
+        }
+
+        @Override
+        public List<Map<String, Object>> executeNamedQuery(String sql, Map<String, Object> params,
+                                                           String connection) {
+            throw new UnsupportedOperationException("backup binds positionally");
+        }
+
+        @Override
+        public PlanAnalysis explainPlan(String sql, String connection) {
+            throw new UnsupportedOperationException("backup reads no plans");
+        }
+
+        @Override
+        public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
+            throw new UnsupportedOperationException("backup reads no plans");
+        }
     }
 
     private long rowCount() {
@@ -470,7 +511,7 @@ class DatabaseBackupServiceImplTest {
         assertThat(backup).doesNotContainKey("error");
         String script = repository.get((String) backup.get("backupId")).sqlScript();
         assertThat(script).contains("'trailing\\'");
-        assertThat(DatabaseBackupServiceImpl.splitStatements(script)).hasSize(4);
+        assertThat(BackupScript.splitStatements(script)).hasSize(4);
     }
 
     /** 反斜杠不贴着引号时两种语义读法一致，值照常备份，不能把好数据一起拒掉。 */
@@ -486,7 +527,7 @@ class DatabaseBackupServiceImplTest {
         assertThat(backup.get("rowCount")).isEqualTo(4);
         String script = repository.get((String) backup.get("backupId")).sqlScript();
         assertThat(script).contains("'C:\\path\\to'");
-        assertThat(DatabaseBackupServiceImpl.splitStatements(script)).hasSize(4);
+        assertThat(BackupScript.splitStatements(script)).hasSize(4);
     }
 
     /** 历史脚本（旧版本、别的方言或 insertData 写入的行）在重放前也要复校，而不是直接喂给 Statement。 */
