@@ -149,6 +149,9 @@ public class SecurityConfig {
                 entropy.mcp.security.enabled=false.
                 /mcp accepts unauthenticated requests, which can execute queries,
                 DDL and ETL writes against every registered BYOK connection.
+                The read-only web UI at / is also open: it renders the audit
+                trail (raw SQL), slow queries and the connection list in a
+                browser, so this exposure no longer requires knowing any URL.
                 Only run this way on a host that is not reachable by others.
                 To re-enable: drop that override and provide
                 MCP_SECURITY_ADMIN_PASSWORD.
@@ -187,6 +190,20 @@ public class SecurityConfig {
         "spring.security.oauth2.resourceserver.jwt.public-key-location"
     };
 
+    /**
+     * 只读运维页面的静态资源路径（{@code database-mcp-app/src/main/resources/static/}）。
+     *
+     * <p>为什么必须在这里单独列出来：鉴权打开时下面的规则以 {@code anyRequest().denyAll()} 收尾，
+     * 所以这几个路径不写进白名单的话，页面在「鉴权已开」的部署上是 403，连管理员带正确凭证也打不开——
+     * 那等于这个页面只在裸跑部署上存在，而裸跑正是最不该只有它能用的场景。
+     *
+     * <p>档位与 {@code /api/**} 完全相同（{@code ROLE_ADMIN}），不是 {@code permitAll}：页面本身不含数据，
+     * 但它唯一的用途就是去读 {@code /api/**}，把两者放在不同档位只会造出「页面能开、表格全是 401」
+     * 这种既不安全也不好用的中间态。{@code "/"} 单列是因为欢迎页是 Boot 的
+     * {@code WelcomePageHandlerMapping} 转发到 {@code index.html} 的，请求路径就是 {@code "/"}。
+     */
+    private static final String[] WEB_UI_RESOURCES = {"/", "/index.html", "/ui.css", "/ui.js"};
+
     @Bean
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
@@ -205,6 +222,7 @@ public class SecurityConfig {
                     // Audit history replays raw SQL, which can contain inlined credentials;
                     // keep it and the remaining actuator surface behind an authenticated admin.
                     auth.requestMatchers("/api/**").hasRole("ADMIN")
+                        .requestMatchers(WEB_UI_RESOURCES).hasRole("ADMIN")
                         .requestMatchers("/actuator/**").authenticated()
                         .requestMatchers("/mcp").authenticated()
                         .anyRequest().denyAll();
@@ -212,6 +230,12 @@ public class SecurityConfig {
                     // 这里仍然是 permitAll：关掉鉴权的语义就是「整个服务不设门」，把 /api/** 或 actuator
                     // 单独留成 401 只会让人以为服务是安全的。真正的收口在 @PostConstruct——production
                     // profile 想走到这个分支必须显式打开逃生阀。
+                    //
+                    // 从 0.5.2 起这个分支还多放开了一个只读运维页面（/index.html + /api/ui/**，见
+                    // WebUiController）。它没有引入任何新权限，但把审计流水从「要知道 /api/audit/logs
+                    // 这个路径才读得到」变成了「浏览器打开根路径就看得到」，无鉴权的实际暴露面因此变大。
+                    // 页面顶部那条红色横幅就是为这件事准备的，它由 /api/ui/config 的 authEnabled 驱动，
+                    // 也就是由本开关驱动；打开本开关是关掉这个暴露的唯一方式。
                     auth.requestMatchers("/mcp").permitAll()
                         .anyRequest().permitAll();
                 }

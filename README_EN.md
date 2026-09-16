@@ -521,6 +521,74 @@ Notes:
 Target database connections are not configured here — they are registered at runtime via
 `createNamedConnection`.
 
+### Read-Only Web UI
+
+The server serves a small read-only operations page at the root path: open
+`http://<host>:8686/` in a browser. Four tabs:
+
+| Tab | Backing endpoint | Notes |
+| --- | --- | --- |
+| Audit trail (in-memory) | `GET /api/audit/logs?limit=&operation=` | In-process ring buffer, last 100 entries, cleared on restart |
+| Audit history (persisted) | `GET /api/audit/history?limit=&tool=&connectionKey=&startTime=&endTime=` | **Requires the audit persistence from the previous section.** Without `spring.datasource.url` the endpoint answers 503 and this tab is permanently empty |
+| Connections & pools | `GET /api/ui/connections` | Registered connections (name, dialect, masked JDBC URL, lease expiry) plus live HikariCP metrics and health per pool |
+| Performance | `GET /api/ui/performance?limit=` | Slow queries, SQL pattern aggregation, micrometer metrics snapshot |
+
+`GET /api/ui/config` returns `{authEnabled, auditPersistence, maxLimit}`; the page drives both the
+banner and the "audit history unavailable" state from it rather than hardcoding either.
+
+**⚠️ This page widens the unauthenticated surface.** With `entropy.mcp.security.enabled=false` the
+page and every endpoint it calls are open to anyone who can reach the port — including the raw SQL in
+the audit trail, the raw SQL of slow queries, and the full list of registered connections. These are
+not new permissions (`/api/audit/**` was always at this level), but it turns "readable if you know
+the `/api/audit/logs` path" into "visible on opening the root URL", and in practice that difference
+*is* the exposure. So:
+
+- Running unauthenticated, the page shows a **non-dismissible** red banner saying exactly that. Its
+  content is derived from `authEnabled` in `/api/ui/config`, not hardcoded. The startup
+  `MCP HTTP authentication is DISABLED` banner now names the UI too.
+- The only switch that closes this is `entropy.mcp.security.enabled=true` (which also requires
+  `MCP_SECURITY_ADMIN_PASSWORD`). With it on, `SecurityConfig` puts `/api/**` and the page's static
+  resources (`/`, `/index.html`, `/ui.css`, `/ui.js`) in the same `ROLE_ADMIN` bucket, and the
+  browser prompts for Basic credentials.
+- They are always the same bucket: there is no "page loads but every table is 401" middle state.
+  Conversely, with authentication on and no credentials, `/` is a 401 and the frontend renders that
+  401 verbatim instead of an empty table that reads like "no data".
+
+Deliberate implementation choices — read these before changing this area:
+
+- **No frontend build chain.** Plain HTML + vanilla JS + CSS, three files under
+  `database-mcp-app/src/main/resources/static/`, served by Boot's default static resource handling.
+  There is no npm or bundler in this repository and none is planned.
+- **No CDN links.** The target runs in an air-gapped-ish Kubernetes namespace where anything fetched
+  from the internet simply fails. Use inline SVG if a chart is ever needed.
+- **Auto-refresh is off by default.** Every refresh of the connections tab goes through read methods
+  on the connection registry, and `PerformanceTimingAspect` feeds those into
+  `recordToolExecution` — a fixed poll would have the page polluting the very metrics on its own
+  performance tab.
+- **JDBC URLs are always the masked copy.** Every URL on the page comes from
+  `ConnectionMetadata.jdbcUrlMasked` / `HikariPoolStats.jdbcUrlMasked`, both produced through
+  `JdbcUrlMasker` when the pool is built. `DatabaseHealthMonitor.getHealthStatus()` is deliberately
+  **not** exposed: it puts an unmasked `DatabaseMetaData.getURL()` into its result, and it describes
+  the default datasource (the audit database) rather than the BYOK connections this page is about.
+  Connection health is expressed through `isPoolHealthy` / `healthWarnings` / `degradedPools` from
+  the pool statistics instead.
+- **`/` does not shadow `/mcp` or `/actuator/**`.** The static resource handler has the lowest
+  precedence; the MCP protocol endpoint is still `/mcp`.
+
+Verifying that the page is also present **in the packaged fat jar** (the classic failure mode for
+this kind of change is "fine in the IDE, 404 in the jar"):
+
+```bash
+java -jar database-mcp-app/target/database-mcp-server-0.5.2.jar \
+  --spring.profiles.active=test --server.port=18700 --entropy.mcp.security.enabled=false
+
+curl -si http://localhost:18700/ | head -1              # 200, text/html
+curl -s  http://localhost:18700/api/ui/config           # {"authEnabled":false,"auditPersistence":false,...}
+curl -s  http://localhost:18700/api/ui/connections
+curl -s  http://localhost:18700/api/ui/performance?limit=5
+curl -si http://localhost:18700/api/audit/history | head -1   # 503, audit not persisted
+```
+
 ## API Reference
 
 ### Health Check

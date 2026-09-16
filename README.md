@@ -256,6 +256,61 @@ spring:
 - 已有 `audit_log` 表的旧部署升级时注意列改名（`sql`→`sql_text`、`rows`→`row_count`、
   `timestamp`→`event_time`），详见 `AuditLogRepository` 类注释里的 `ALTER TABLE` 样例。
 
+### 只读运维页面（Web UI）
+
+服务在根路径带一个只读的运维页面，浏览器打开 `http://<host>:8686/` 即可，四个 tab：
+
+| Tab | 数据来源 | 说明 |
+| --- | --- | --- |
+| 审计流水（内存） | `GET /api/audit/logs?limit=&operation=` | 进程内环形缓冲，最近 100 条，重启即清空 |
+| 审计历史（落库） | `GET /api/audit/history?limit=&tool=&connectionKey=&startTime=&endTime=` | **需要上一节的审计持久化**；没配 `spring.datasource.url` 时接口返回 503，这一页永远是空的 |
+| 连接与连接池 | `GET /api/ui/connections` | 已注册连接（名字、方言、脱敏后的 JDBC URL、租约到期）+ 各池的 HikariCP 实时指标与健康判定 |
+| 性能 | `GET /api/ui/performance?limit=` | 慢查询、SQL 模式聚合统计、micrometer 指标快照 |
+
+另有 `GET /api/ui/config` 返回 `{authEnabled, auditPersistence, maxLimit}`，页面用它决定顶部横幅
+与「审计历史不可用」两个状态——两者都不写死在前端。
+
+**⚠️ 这个页面扩大了无鉴权部署的暴露面。** `entropy.mcp.security.enabled=false` 时，页面本身与它调用的
+全部接口对任何能访问这个端口的人开放，其中包括审计流水里的 SQL 原文、慢查询原文、以及全部已注册
+连接的清单。这不是新增的权限（`/api/audit/**` 一直是这个档位），但它把「要知道 `/api/audit/logs`
+这个路径才读得到」变成了「浏览器打开根路径就看到」，实践中这就是暴露面的差别。因此：
+
+- 裸跑时页面顶部会有一条**不可关闭**的红色横幅说明这件事，内容由 `/api/ui/config` 的 `authEnabled`
+  推导，不是写死的文案；启动日志里那段 `MCP HTTP authentication is DISABLED` 横幅也补上了这一条。
+- 关掉这个暴露的唯一开关是 `entropy.mcp.security.enabled=true`（同时要配
+  `MCP_SECURITY_ADMIN_PASSWORD`）。打开后 `SecurityConfig` 把 `/api/**` 与页面静态资源
+  （`/`、`/index.html`、`/ui.css`、`/ui.js`）一起收进 `ROLE_ADMIN`，浏览器会弹 Basic 认证框。
+- 两者始终同一档，不存在「页面能开、表格全是 401」的中间态。反过来，鉴权打开时不带凭证访问
+  `/` 得到的是 401，前端也会把 401 原样显示出来，而不是渲染一张空表让人以为「没有数据」。
+
+实现上的几个刻意选择（改动这块前请先读）：
+
+- **没有前端构建链**：纯 HTML + 原生 JS + CSS，三个文件放在
+  `database-mcp-app/src/main/resources/static/`，由 Boot 默认的静态资源处理直接服务。仓库里没有
+  npm / bundler，也不打算引入。
+- **没有任何 CDN 外链**：目标环境是准离网的 K8s 命名空间，外链只会加载失败。需要图形就用内联 SVG。
+- **自动刷新默认关闭**：每次刷新连接页都会经过连接注册表的读方法，而 `PerformanceTimingAspect`
+  会给这些方法记一条 `recordToolExecution`，固定轮询等于让页面自己去污染性能 tab 里的指标。
+- **JDBC URL 一律是脱敏后的那份**：页面上所有 URL 都来自 `ConnectionMetadata.jdbcUrlMasked` /
+  `HikariPoolStats.jdbcUrlMasked`（建池时经过 `JdbcUrlMasker`）。刻意<b>没有</b>暴露
+  `DatabaseHealthMonitor.getHealthStatus()`——它把 `DatabaseMetaData.getURL()` 未脱敏地放进返回值，
+  而且描述的是默认数据源（审计库）而不是页面关心的 BYOK 连接。连接健康度改由池统计里的
+  `isPoolHealthy` / `healthWarnings` / `degradedPools` 表达。
+- **`/` 不会遮挡 `/mcp` 与 `/actuator/**`**：静态资源处理器的优先级最低，MCP 协议端点仍然是 `/mcp`。
+
+验证页面在**打包后的 fat jar 里**也在（这类改动最典型的失败形态是「IDE 里好、jar 里 404」）：
+
+```bash
+java -jar database-mcp-app/target/database-mcp-server-0.5.2.jar \
+  --spring.profiles.active=test --server.port=18700 --entropy.mcp.security.enabled=false
+
+curl -si http://localhost:18700/ | head -1              # 200，text/html
+curl -s  http://localhost:18700/api/ui/config           # {"authEnabled":false,"auditPersistence":false,...}
+curl -s  http://localhost:18700/api/ui/connections
+curl -s  http://localhost:18700/api/ui/performance?limit=5
+curl -si http://localhost:18700/api/audit/history | head -1   # 503，审计未落库
+```
+
 ### Docker 部署
 
 ```bash
