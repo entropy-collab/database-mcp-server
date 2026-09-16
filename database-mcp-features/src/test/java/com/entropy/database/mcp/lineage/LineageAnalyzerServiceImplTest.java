@@ -20,6 +20,9 @@ import com.entropy.database.mcp.byok.ByokInfrastructure;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.StatementTemplates;
 import com.entropy.database.mcp.dialect.H2Dialect;
+import com.entropy.database.mcp.domain.PaginatedQueryResult;
+import com.entropy.database.mcp.domain.PlanAnalysis;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.LineageProperties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -27,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -135,7 +139,44 @@ class LineageAnalyzerServiceImplTest {
                 new ByokInfrastructure(null, null, null, null, null, null));
         DynamicDataSourceManager manager = mock(DynamicDataSourceManager.class);
         when(manager.acquire(anyString())).thenReturn(ctx);
-        return new LineageAnalyzerServiceImpl(manager, properties);
+        return new LineageAnalyzerServiceImpl(manager, properties, new DirectReads(jdbc));
+    }
+
+    /**
+     * Stands in for the facade: routes {@code queryRows} straight at the fixture's template.
+     *
+     * <p>The service reaches the database only through {@link DatabaseReadOperations}, so a test
+     * double is all that is needed here — the routing and advice that the real implementation adds
+     * are its own tests' business, not lineage's.
+     */
+    private record DirectReads(JdbcTemplate jdbc) implements DatabaseReadOperations {
+
+        @Override
+        public List<Map<String, Object>> queryRows(String sql, String connection, Object... args) {
+            return args.length == 0 ? jdbc.queryForList(sql) : jdbc.queryForList(sql, args);
+        }
+
+        @Override
+        public PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken,
+                                                 String connection) {
+            throw new UnsupportedOperationException("lineage never paginates");
+        }
+
+        @Override
+        public List<Map<String, Object>> executeNamedQuery(String sql, Map<String, Object> params,
+                                                           String connection) {
+            throw new UnsupportedOperationException("lineage binds positionally");
+        }
+
+        @Override
+        public PlanAnalysis explainPlan(String sql, String connection) {
+            throw new UnsupportedOperationException("lineage reads no plans");
+        }
+
+        @Override
+        public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
+            throw new UnsupportedOperationException("lineage reads no plans");
+        }
     }
 
     // ─── Direction ────────────────────────────────────────────────────────

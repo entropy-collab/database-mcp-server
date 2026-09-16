@@ -21,6 +21,8 @@ import com.entropy.database.mcp.dialect.MySqlDialect;
 import com.entropy.database.mcp.dialect.OracleDialect;
 import com.entropy.database.mcp.exception.McpQueryException;
 import com.entropy.database.mcp.exception.McpValidationException;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
+import com.entropy.database.mcp.facade.DatabaseWriteOperations;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -31,7 +33,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 import java.util.Map;
@@ -40,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,21 +52,30 @@ class CdcServiceImplTest {
 
     private static final String CONNECTION = "prod";
 
+    /**
+     * 固定的方言实例：探测 SQL 与位点 SQL 现在都走同一个 {@code queryRows(sql, connection)} 签名，
+     * 需要同时给两者不同答案的用例只能按 SQL 本身区分，所以直接问方言要那两条 SQL，而不是写死字符串。
+     */
+    private static final OracleDialect ORACLE = new OracleDialect();
+
     @Mock
     private DynamicDataSourceManager dataSourceManager;
     @Mock
     private ByokDataSourceContext ctx;
+    /** 读侧替身：服务只通过 facade 能力接口访问数据库，测试就替换这个接口。 */
     @Mock
-    private JdbcTemplate jdbc;
+    private DatabaseReadOperations reads;
+    /** 写侧替身：只有建镜像表那条 DDL 会用到。 */
+    @Mock
+    private DatabaseWriteOperations writes;
 
     private CdcServiceImpl service;
 
     @BeforeEach
     void setUp() {
-        service = new CdcServiceImpl(dataSourceManager);
+        service = new CdcServiceImpl(dataSourceManager, reads, writes);
         when(dataSourceManager.acquire(CONNECTION)).thenReturn(ctx);
-        when(ctx.getDialect()).thenReturn(new OracleDialect());
-        when(ctx.getJdbcTemplate()).thenReturn(jdbc);
+        when(ctx.getDialect()).thenReturn(ORACLE);
     }
 
     // ─── createMirrorTable: DDL injection ─────────────────────────────────
@@ -83,7 +94,7 @@ class CdcServiceImplTest {
                 .isInstanceOf(McpValidationException.class)
                 .hasMessageContaining("targetTable");
 
-        verify(jdbc, never()).execute(anyString());
+        verify(writes, never()).executeDdl(anyString(), anyString());
     }
 
     @ParameterizedTest
@@ -93,7 +104,7 @@ class CdcServiceImplTest {
                 .isInstanceOf(McpValidationException.class)
                 .hasMessageContaining("sourceTable");
 
-        verify(jdbc, never()).execute(anyString());
+        verify(writes, never()).executeDdl(anyString(), anyString());
     }
 
     @ParameterizedTest
@@ -103,22 +114,22 @@ class CdcServiceImplTest {
                 .isInstanceOf(McpValidationException.class)
                 .hasMessageContaining("targetSchema");
 
-        verify(jdbc, never()).execute(anyString());
+        verify(writes, never()).executeDdl(anyString(), anyString());
     }
 
     @Test
     void createMirrorTableQuotesEveryIdentifierForLegitimateNames() {
         service.createMirrorTable(CONNECTION, "HR", "EMPLOYEES", "STAGING", "EMPLOYEES_COPY");
 
-        verify(jdbc).execute("CREATE TABLE \"STAGING\".\"EMPLOYEES_COPY\" AS "
-                + "SELECT * FROM \"HR\".\"EMPLOYEES\"");
+        verify(writes).executeDdl("CREATE TABLE \"STAGING\".\"EMPLOYEES_COPY\" AS "
+                + "SELECT * FROM \"HR\".\"EMPLOYEES\"", CONNECTION);
     }
 
     // ─── readChanges: failure is not "no changes" ──────────────────────────
 
     @Test
     void readChangesPropagatesAFailedQueryInsteadOfReturningAnEmptyList() {
-        when(jdbc.queryForList(anyString(), any(Object[].class)))
+        when(reads.queryRows(anyString(), anyString(), any(Object[].class)))
                 .thenThrow(new DataAccessResourceFailureException("ORA-00942: table or view does not exist"));
 
         assertThatThrownBy(() -> service.readChanges(CONNECTION, "HR", "EMPLOYEES", 100L))
@@ -134,7 +145,7 @@ class CdcServiceImplTest {
 
     @Test
     void readChangesMapsDialectCodesToEventsInsteadOfSkippingThem() {
-        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of(
+        when(reads.queryRows(anyString(), anyString(), any(Object[].class))).thenReturn(List.of(
                 Map.<String, Object>of("change_type", "I", "primary_keys", "1"),
                 Map.<String, Object>of("change_type", "U", "primary_keys", "2"),
                 Map.<String, Object>of("change_type", "SOMETHING_NEW", "primary_keys", "3")));
@@ -158,11 +169,25 @@ class CdcServiceImplTest {
 
     @Test
     void getLastLsnFailsInsteadOfReportingPositionZero() {
-        when(jdbc.queryForMap(anyString()))
+        when(reads.queryRows(anyString(), anyString()))
                 .thenThrow(new DataAccessResourceFailureException("connection reset"));
 
         assertThatThrownBy(() -> service.getLastLsn(CONNECTION))
                 .isInstanceOf(McpQueryException.class);
+    }
+
+    /**
+     * 位点读法从 {@code queryForMap} 换成「取 queryRows 的首行」后，空结果不再由 Spring 抛
+     * {@code EmptyResultDataAccessException}，必须由服务自己判断——否则一个空 map 交给
+     * {@code parseLsn}，报出来的就是「方言解析不了位点」而不是「位点读不到」。
+     */
+    @Test
+    void getLastLsnFailsWhenTheWatermarkQueryReturnsNoRows() {
+        when(reads.queryRows(anyString(), anyString())).thenReturn(List.of());
+
+        assertThatThrownBy(() -> service.getLastLsn(CONNECTION))
+                .isInstanceOf(McpQueryException.class)
+                .hasMessageContaining("watermark");
     }
 
     @Test
@@ -170,7 +195,8 @@ class CdcServiceImplTest {
         when(ctx.getDialect()).thenReturn(new MySqlDialect());
         // MySQL 的 watermark 是 SELECT UNIX_TIMESTAMP() AS current_lsn 的秒值，与审计表
         // event_time > FROM_UNIXTIME(?) 同一单位。
-        when(jdbc.queryForMap(anyString())).thenReturn(Map.<String, Object>of("current_lsn", 1_735_689_600L));
+        when(reads.queryRows(anyString(), anyString()))
+                .thenReturn(List.of(Map.<String, Object>of("current_lsn", 1_735_689_600L)));
 
         assertThat(service.getLastLsn(CONNECTION)).isEqualTo(1_735_689_600L);
     }
@@ -184,7 +210,7 @@ class CdcServiceImplTest {
      */
     @Test
     void cdcSupportSurvivesAProbeThatReturnsMoreThanOneRow() {
-        when(jdbc.queryForList(anyString())).thenReturn(List.of(
+        when(reads.queryRows(anyString(), anyString())).thenReturn(List.of(
                 Map.<String, Object>of("supported", 1),
                 Map.<String, Object>of("supported", 1)));
 
@@ -193,7 +219,8 @@ class CdcServiceImplTest {
 
     @Test
     void cdcSupportIsFalseWhenTheProbeReportsZero() {
-        when(jdbc.queryForList(anyString())).thenReturn(List.of(Map.<String, Object>of("supported", 0)));
+        when(reads.queryRows(anyString(), anyString()))
+                .thenReturn(List.of(Map.<String, Object>of("supported", 0)));
 
         assertThat(service.isCdcSupported(CONNECTION)).isFalse();
     }
@@ -203,13 +230,15 @@ class CdcServiceImplTest {
         when(ctx.getDialect()).thenReturn(new com.entropy.database.mcp.dialect.H2Dialect());
 
         assertThat(service.isCdcSupported(CONNECTION)).isFalse();
-        verify(jdbc, never()).queryForList(anyString());
+        verify(reads, never()).queryRows(anyString(), anyString());
     }
 
     @Test
     void statusReportsAnUnavailableWatermarkRatherThanZero() {
-        when(jdbc.queryForList(anyString())).thenReturn(List.of(Map.<String, Object>of("supported", 1)));
-        when(jdbc.queryForMap(anyString()))
+        // 探测与位点现在共用 queryRows(sql, connection) 这一个签名，所以按方言给出的 SQL 区分两者。
+        when(reads.queryRows(eq(ORACLE.cdcCheckSupportSql()), anyString()))
+                .thenReturn(List.of(Map.<String, Object>of("supported", 1)));
+        when(reads.queryRows(eq(ORACLE.cdcGetLastLsnSql()), anyString()))
                 .thenThrow(new DataAccessResourceFailureException("v$database not readable"));
 
         CdcStatus status = service.getStatus(CONNECTION);
@@ -227,7 +256,7 @@ class CdcServiceImplTest {
     @Test
     void eventCountersStopGrowingOnceTheConnectionBudgetIsReached() {
         when(dataSourceManager.acquire(anyString())).thenReturn(ctx);
-        when(jdbc.queryForList(anyString(), any(Object[].class)))
+        when(reads.queryRows(anyString(), anyString(), any(Object[].class)))
                 .thenReturn(List.of(Map.<String, Object>of("change_type", "I", "primary_keys", "1")));
 
         int connections = CdcServiceImpl.MAX_TRACKED_CONNECTIONS * 2;

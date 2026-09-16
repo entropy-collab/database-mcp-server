@@ -18,11 +18,11 @@ package com.entropy.database.mcp.catalog;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -70,6 +70,17 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
     private final DynamicDataSourceManager dataSourceManager;
 
     /**
+     * Read access to whichever connection a call names.
+     *
+     * <p>Every metadata probe below goes through this rather than through a {@code JdbcTemplate}
+     * borrowed from the connection context, so the reads are subject to the same timing, audit and
+     * read-only advice as any other query. The connection registry is still injected, but only for
+     * {@link ByokDataSourceContext#getDialect()} — deciding which SQL to send is this service's job,
+     * issuing it is not.
+     */
+    private final DatabaseReadOperations db;
+
+    /**
      * Upper bound on concurrent per-table catalog generation.
      *
      * <p>Every table costs three round trips on a connection borrowed from the BYOK pool, so an
@@ -85,8 +96,10 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
     private final ExecutorService scanPool;
 
     public DataCatalogServiceImpl(DynamicDataSourceManager dataSourceManager,
-                                  ThreadPoolProperties threadPoolProperties) {
+                                  ThreadPoolProperties threadPoolProperties,
+                                  DatabaseReadOperations db) {
         this.dataSourceManager = dataSourceManager;
+        this.db = db;
         this.scanParallelism = (threadPoolProperties != null ? threadPoolProperties
                 : ThreadPoolProperties.defaults()).catalogScanSize();
         this.scanPool = Executors.newFixedThreadPool(scanParallelism, runnable -> {
@@ -128,18 +141,17 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
                                              String connection, String schema,
                                              Map<String, String> tableComments) {
         DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
         String normalizedTable = dialect.normalizeTableName(tableName);
 
         String tableComment = tableComments != null
                 ? tableComments.getOrDefault(normalize(normalizedTable), "")
-                : fetchTableComment(jdbc, dialect, schema, normalizedTable);
+                : fetchTableComment(connection, dialect, schema, normalizedTable);
 
-        ColumnMetadata columnMetadata = fetchColumnComments(jdbc, dialect, schema, normalizedTable);
+        ColumnMetadata columnMetadata = fetchColumnComments(connection, dialect, schema, normalizedTable);
         List<DataElement> columns = columnMetadata.columns();
 
-        long rowCount = estimateRowCount(jdbc, dialect, schema, normalizedTable);
-        long sizeMb = estimateTableSize(jdbc, dialect, schema, normalizedTable);
+        long rowCount = estimateRowCount(connection, dialect, schema, normalizedTable);
+        long sizeMb = estimateTableSize(connection, dialect, schema, normalizedTable);
 
         DataCategory overallCat = inferCategory(columns, tableComment);
         SensitivityLevel maxSens = inferMaxSensitivity(columns);
@@ -156,14 +168,13 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
             DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
             // Per the dialect contract tablesQuery resolves the schema itself and declares no
             // placeholder. Binding one when a schema was given is what made this fail on Oracle -
             // its tablesQuery never had a schema parameter - and the exception was swallowed below,
             // so the whole catalog and every sensitive-column scan came back empty.
             String tablesSql = dialect.tablesQuery(schema);
-            List<Map<String, Object>> tables = jdbc.queryForList(tablesSql);
+            List<Map<String, Object>> tables = db.queryRows(tablesSql, connection);
 
             List<String> tableNames = tables.stream()
                     .map(row -> rowString(row, "table_name", null))
@@ -175,7 +186,7 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
             }
 
             // One query for the whole schema instead of one per table.
-            Map<String, String> tableComments = fetchAllTableComments(jdbc, dialect, schema);
+            Map<String, String> tableComments = fetchAllTableComments(connection, dialect, schema);
 
             return generateCatalogs(ctx, tableNames, connection, schema, tableComments);
         } catch (Exception e) {
@@ -189,16 +200,16 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
             DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
             String searchSql = dialect.searchTableCommentsQuery(keyword);
             List<Map<String, Object>> rows;
             if (searchSql == null) {
                 // Fallback: search via standard table search
-                rows = jdbc.queryForList(dialect.searchTablesQuery(keyword), "%" + keyword + "%");
+                rows = db.queryRows(dialect.searchTablesQuery(keyword), connection,
+                        "%" + keyword + "%");
             } else {
                 String kw = "%" + keyword + "%";
-                rows = jdbc.queryForList(searchSql, kw, kw);
+                rows = db.queryRows(searchSql, connection, kw, kw);
             }
 
             List<String> tableNames = rows.stream()
@@ -209,7 +220,7 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
                 return List.of();
             }
             return generateCatalogs(ctx, tableNames, connection, null,
-                    fetchAllTableComments(jdbc, dialect, null));
+                    fetchAllTableComments(connection, dialect, null));
         } catch (Exception e) {
             log.warn("Asset search failed: {}", e.getMessage(), e);
             return List.of();
@@ -340,7 +351,7 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
      *
      * @return upper-cased table name to comment; empty when the dialect exposes no comment source
      */
-    private Map<String, String> fetchAllTableComments(JdbcTemplate jdbc, DatabaseDialect dialect,
+    private Map<String, String> fetchAllTableComments(String connection, DatabaseDialect dialect,
                                                       String schema) {
         String sql = dialect.tableCommentsQuery(schema);
         if (sql == null) {
@@ -348,7 +359,7 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
         }
         try {
             Map<String, String> comments = new HashMap<>();
-            for (Map<String, Object> row : jdbc.queryForList(sql)) {
+            for (Map<String, Object> row : db.queryRows(sql, connection)) {
                 String name = rowString(row, "table_name", null);
                 if (name != null) {
                     comments.put(normalize(name), rowString(row, "table_comment", ""));
@@ -368,14 +379,14 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
      * but one row: on a thousand-table database, cataloguing one table used to transfer a thousand
      * comments. Per the dialect contract the SQL carries exactly one {@code ?} for the table name.
      */
-    private String fetchTableComment(JdbcTemplate jdbc, DatabaseDialect dialect, String schema,
+    private String fetchTableComment(String connection, DatabaseDialect dialect, String schema,
                                      String tableName) {
         String sql = dialect.tableCommentQuery(schema, tableName);
         if (sql == null) {
             return "";
         }
         try {
-            for (Map<String, Object> row : jdbc.queryForList(sql, tableName)) {
+            for (Map<String, Object> row : db.queryRows(sql, connection, tableName)) {
                 return rowString(row, "table_comment", "");
             }
         } catch (Exception e) {
@@ -392,7 +403,7 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
      * stored upper case). The bind used to be derived by counting placeholders, which silently bound
      * the table name into a schema parameter on the dialects that had two.
      */
-    private ColumnMetadata fetchColumnComments(JdbcTemplate jdbc, DatabaseDialect dialect,
+    private ColumnMetadata fetchColumnComments(String connection, DatabaseDialect dialect,
                                                String schema, String tableName) {
         String sql = dialect.columnCommentsQuery(schema, tableName);
         if (sql == null) {
@@ -400,7 +411,7 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
         }
         List<DataElement> elements = new ArrayList<>();
         try {
-            List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
+            List<Map<String, Object>> rows = db.queryRows(sql, connection, tableName);
             for (Map<String, Object> row : rows) {
                 String colName = rowString(row, "column_name", null);
                 if (colName == null) {
@@ -432,14 +443,14 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
      * view, and only falls back to an exact {@code COUNT(*)} when the dialect has no estimate or has
      * never had statistics gathered. A schema scan would otherwise scan every table in the schema.
      */
-    private long estimateRowCount(JdbcTemplate jdbc, DatabaseDialect dialect, String schema,
+    private long estimateRowCount(String connection, DatabaseDialect dialect, String schema,
                                   String tableName) {
-        long estimate = queryRowCount(jdbc,
+        long estimate = queryRowCount(connection,
                 dialect.getTableRowCountEstimateSql(schema, tableName), tableName);
         if (estimate >= 0) {
             return estimate;
         }
-        return queryRowCount(jdbc, dialect.getTableRowCountSql(schema, tableName), null);
+        return queryRowCount(connection, dialect.getTableRowCountSql(schema, tableName), null);
     }
 
     /**
@@ -447,14 +458,14 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
      *                     declares none (the exact count quotes the table name into the SQL, since a
      *                     {@code FROM} clause cannot take a bind parameter)
      */
-    private long queryRowCount(JdbcTemplate jdbc, String sql, String tableNameArg) {
+    private long queryRowCount(String connection, String sql, String tableNameArg) {
         if (sql == null) {
             return -1;
         }
         try {
             List<Map<String, Object>> rows = tableNameArg == null
-                    ? jdbc.queryForList(sql)
-                    : jdbc.queryForList(sql, tableNameArg);
+                    ? db.queryRows(sql, connection)
+                    : db.queryRows(sql, connection, tableNameArg);
             if (!rows.isEmpty() && !rows.get(0).isEmpty()) {
                 Object val = rows.get(0).values().iterator().next();
                 return val instanceof Number n ? n.longValue() : -1;
@@ -470,12 +481,12 @@ public class DataCatalogServiceImpl implements DataCatalogService, DisposableBea
      * a dialect with no size source returns {@code null} and the size is reported as unknown rather
      * than as a fabricated zero.
      */
-    private long estimateTableSize(JdbcTemplate jdbc, DatabaseDialect dialect, String schema,
+    private long estimateTableSize(String connection, DatabaseDialect dialect, String schema,
                                    String tableName) {
         try {
             String sql = dialect.estimateTableSizeSql(tableName, schema);
             if (sql == null) return -1;
-            List<Map<String, Object>> rows = jdbc.queryForList(sql, tableName);
+            List<Map<String, Object>> rows = db.queryRows(sql, connection, tableName);
             if (!rows.isEmpty() && !rows.get(0).isEmpty()) {
                 Object val = rows.get(0).values().iterator().next();
                 return val instanceof Number n ? n.longValue() : -1;

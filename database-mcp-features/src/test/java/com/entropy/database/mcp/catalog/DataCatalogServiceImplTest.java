@@ -21,6 +21,9 @@ import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.byok.StatementTemplates;
 import com.entropy.database.mcp.dialect.H2Dialect;
 import com.entropy.database.mcp.dialect.OracleDialect;
+import com.entropy.database.mcp.domain.PaginatedQueryResult;
+import com.entropy.database.mcp.domain.PlanAnalysis;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -29,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -101,7 +105,45 @@ class DataCatalogServiceImplTest {
                 new ByokInfrastructure(null, null, null, null, null, null));
         DynamicDataSourceManager manager = mock(DynamicDataSourceManager.class);
         when(manager.acquire(anyString())).thenReturn(ctx);
-        return new DataCatalogServiceImpl(manager, ThreadPoolProperties.defaults());
+        return new DataCatalogServiceImpl(manager, ThreadPoolProperties.defaults(),
+                new DirectReads(jdbcTemplate));
+    }
+
+    /**
+     * Stands in for the facade: routes {@code queryRows} straight at the fixture's template.
+     *
+     * <p>The service reaches the database only through {@link DatabaseReadOperations}, so a test
+     * double is all that is needed here — the routing and advice that the real implementation adds
+     * are its own tests' business, not the catalog's.
+     */
+    private record DirectReads(JdbcTemplate jdbc) implements DatabaseReadOperations {
+
+        @Override
+        public List<Map<String, Object>> queryRows(String sql, String connection, Object... args) {
+            return args.length == 0 ? jdbc.queryForList(sql) : jdbc.queryForList(sql, args);
+        }
+
+        @Override
+        public PaginatedQueryResult executeQuery(String sql, int maxRows, String continuationToken,
+                                                 String connection) {
+            throw new UnsupportedOperationException("the catalog never paginates");
+        }
+
+        @Override
+        public List<Map<String, Object>> executeNamedQuery(String sql, Map<String, Object> params,
+                                                           String connection) {
+            throw new UnsupportedOperationException("the catalog binds positionally");
+        }
+
+        @Override
+        public PlanAnalysis explainPlan(String sql, String connection) {
+            throw new UnsupportedOperationException("the catalog reads no plans");
+        }
+
+        @Override
+        public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
+            throw new UnsupportedOperationException("the catalog reads no plans");
+        }
     }
 
     // ─── Column comments ──────────────────────────────────────────────────

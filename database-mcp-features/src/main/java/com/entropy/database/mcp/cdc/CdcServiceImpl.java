@@ -21,12 +21,13 @@ import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.exception.ErrorCode;
 import com.entropy.database.mcp.exception.McpQueryException;
 import com.entropy.database.mcp.exception.McpValidationException;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
+import com.entropy.database.mcp.facade.DatabaseWriteOperations;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -50,6 +51,12 @@ import java.util.concurrent.ConcurrentMap;
  * <p>Failure semantics: every read either returns the changes it found or throws. Returning an
  * empty list (or {@code 0} for a watermark) on error is not allowed, because the caller cannot tell
  * that apart from "the table did not change".
+ *
+ * <p><b>所有语句都经 facade 能力接口发出</b>：读走 {@link DatabaseReadOperations#queryRows}，建镜像表的
+ * DDL 走 {@link DatabaseWriteOperations#executeDdl}，而不是从连接上下文里借 {@code JdbcTemplate}。这样
+ * CDC 的探测、读变更、读位点和建表与其他任何一条语句一样，受同一套计时、审计、只读/DDL 校验拦截约束
+ * ——绕过 facade 的那条路正是这些约束唯一的漏口。连接注册表仍然注入，但只用于取方言：决定发哪条 SQL
+ * 是本服务的职责，把它发出去不是。
  *
  * <p><b>两类进程内状态，两种边界策略</b>（键都来自调用方，此前三个 map 都是无界无 TTL 的
  * {@code ConcurrentHashMap}，只有显式 unregister 才移除——连接被租约驱逐时，按连接名索引的计数就永远留着）：
@@ -87,6 +94,23 @@ public class CdcServiceImpl implements CdcService {
     static final int MAX_SUBSCRIPTIONS = 200;
 
     private final DynamicDataSourceManager dataSourceManager;
+
+    /**
+     * 读侧唯一入口。
+     *
+     * <p>探测、读变更、读位点都从这里走，而不是从连接上下文里借一个 {@code JdbcTemplate}：这样它们和
+     * 其他查询一样受计时、审计、只读拦截的约束。连接注册表仍然要注入，但只用来取
+     * {@link ByokDataSourceContext#getDialect()}——决定发哪条 SQL 是本服务的事，发出去不是。
+     */
+    private final DatabaseReadOperations db;
+
+    /**
+     * 写侧入口，只用于 {@link #createMirrorTable} 那一条建表 DDL。
+     *
+     * <p>与读侧同理：DDL 也不再绕过 facade 直接打到 {@code JdbcTemplate} 上。
+     */
+    private final DatabaseWriteOperations writeDb;
+
     /** 见类注释：注册表语义，只加上限、不加 TTL，超限明确报错。 */
     private final ConcurrentMap<String, CdcSubscription> subscriptions = new ConcurrentHashMap<>();
     /** 见类注释：诊断计数，有界 + expireAfterAccess，静默驱逐可接受。 */
@@ -96,8 +120,12 @@ public class CdcServiceImpl implements CdcService {
             .build();
     private final ConcurrentMap<String, ConnectionCounters> connectionCounters = counterCache.asMap();
 
-    public CdcServiceImpl(DynamicDataSourceManager dataSourceManager) {
+    public CdcServiceImpl(DynamicDataSourceManager dataSourceManager,
+                          DatabaseReadOperations db,
+                          DatabaseWriteOperations writeDb) {
         this.dataSourceManager = dataSourceManager;
+        this.db = db;
+        this.writeDb = writeDb;
     }
 
     // ─── CDC Support Check ────────────────────────────────────────────────
@@ -112,11 +140,11 @@ public class CdcServiceImpl implements CdcService {
             if (sql == null) {
                 return false;
             }
-            // 用 queryForList + 首行首值，而不是 queryForObject：后者要求结果「恰好一行」，探测 SQL 只要
+            // 用 queryRows + 首行首值，而不是「恰好一行一值」的读法：后者要求结果「恰好一行」，探测 SQL 只要
             // 多返回一行（历史上 Oracle/PostgreSQL 的多段 UNION ALL 在多个分支命中时就是如此）就抛
             // IncorrectResultSizeDataAccessException，被下面的 catch 吞成「不支持」——配置最完整的库反而
             // 被判成不支持。方言侧的契约仍是单行单值，这里只是不再让「恰好一行」成为正确性的前提。
-            List<Map<String, Object>> rows = ctx.getJdbcTemplate().queryForList(sql);
+            List<Map<String, Object>> rows = db.queryRows(sql, connection);
             if (rows.isEmpty()) {
                 return false;
             }
@@ -144,7 +172,6 @@ public class CdcServiceImpl implements CdcService {
     public List<CdcChangeEvent> readChanges(String connection, String schema, String table, long fromLsn) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
         // The read SQL interpolates schema/table, so whitelist them before they reach the driver.
         requireIdentifier(dialect, table, "table");
@@ -161,7 +188,7 @@ public class CdcServiceImpl implements CdcService {
 
         List<Map<String, Object>> rows;
         try {
-            rows = jdbc.queryForList(sql, dialect.cdcLsnParameter(fromLsn));
+            rows = db.queryRows(sql, connection, dialect.cdcLsnParameter(fromLsn));
         } catch (DataAccessException e) {
             // Never degrade a failed read to "no changes": the caller would treat it as an
             // up-to-date table and advance its watermark past changes it never saw.
@@ -211,14 +238,23 @@ public class CdcServiceImpl implements CdcService {
                             .formatted(dialect.getDialectName(), connection));
         }
 
-        Map<String, Object> row;
+        List<Map<String, Object>> rows;
         try {
-            row = ctx.getJdbcTemplate().queryForMap(sql);
+            rows = db.queryRows(sql, connection);
         } catch (DataAccessException e) {
             throw new McpQueryException(ErrorCode.QUERY_EXECUTION_FAILED,
                     "Failed to read the CDC watermark for '%s': %s".formatted(connection, e.getMessage()), e);
         }
-        return dialect.parseLsn(row);
+        // 位点读法从 queryForMap 换成「取首行」后，「一行都没有」这件事必须自己判：queryForMap 遇到空结果
+        // 抛的是 EmptyResultDataAccessException，被上面的 catch 归成读取失败，而 getStatus 正是依赖这个
+        // 异常降级成 LSN_UNAVAILABLE。若这里静默交一个空 map 给 parseLsn，行为就从「位点读不到」变成
+        // 「方言解析不了位点」，两者的诊断含义并不相同。
+        if (rows.isEmpty()) {
+            throw new McpQueryException(ErrorCode.QUERY_EXECUTION_FAILED,
+                    "Failed to read the CDC watermark for '%s': the watermark query returned no rows"
+                            .formatted(connection));
+        }
+        return dialect.parseLsn(rows.getFirst());
     }
 
     // ─── Mirror Table ─────────────────────────────────────────────────────
@@ -228,10 +264,9 @@ public class CdcServiceImpl implements CdcService {
                                   String targetSchema, String targetTable) {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         DatabaseDialect dialect = ctx.getDialect();
-        JdbcTemplate jdbc = ctx.getJdbcTemplate();
 
-        // This DDL runs on the raw JdbcTemplate, i.e. outside SqlValidationAspect, so the
-        // identifiers are whitelisted here before any of them reaches a SQL string.
+        // The identifiers are interpolated into the DDL string, so they are whitelisted here before
+        // any of them reaches SQL — the facade validates the finished statement, not its parts.
         requireIdentifier(dialect, sourceTable, "sourceTable");
         requireIdentifier(dialect, targetSchema, "targetSchema");
         requireIdentifier(dialect, targetTable, "targetTable");
@@ -249,7 +284,7 @@ public class CdcServiceImpl implements CdcService {
             throw new UnsupportedOperationException(
                     "Mirror table creation not supported for dialect: " + dialect.getDialectName());
         }
-        jdbc.execute(sql);
+        writeDb.executeDdl(sql, connection);
         log.info("Created mirror table {}.{} from {}.{}", targetSchema, targetTable, sourceSchema, sourceTable);
     }
 

@@ -18,12 +18,12 @@ package com.entropy.database.mcp.lineage;
 import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
+import com.entropy.database.mcp.facade.DatabaseReadOperations;
 import com.entropy.database.mcp.properties.LineageProperties;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -72,6 +72,17 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
     private final LineageProperties properties;
 
     /**
+     * Read access to whichever connection a call names.
+     *
+     * <p>Every foreign-key probe below goes through this rather than through a {@code JdbcTemplate}
+     * borrowed from the connection context, so the reads are subject to the same timing, audit and
+     * read-only advice as any other query. The connection registry is still injected, but only for
+     * {@link ByokDataSourceContext#getDialect()} — deciding which SQL to send is this service's job,
+     * issuing it is not.
+     */
+    private final DatabaseReadOperations db;
+
+    /**
      * Own Caffeine cache rather than {@code ByokDataSourceContext#getCache()}: that one is the
      * shared query/metadata cache whose TTL is global configuration, and lineage graphs need a
      * much shorter, independently tunable window.
@@ -82,9 +93,11 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
             .build();
 
     public LineageAnalyzerServiceImpl(DynamicDataSourceManager dataSourceManager,
-                                      LineageProperties properties) {
+                                      LineageProperties properties,
+                                      DatabaseReadOperations db) {
         this.dataSourceManager = dataSourceManager;
         this.properties = properties;
+        this.db = db;
     }
 
     // ─── Direct Edges ────────────────────────────────────────────────────────
@@ -332,7 +345,7 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
             if (sql == null) {
                 return null;
             }
-            return toEdges(ctx.getJdbcTemplate().queryForList(sql), null, connection);
+            return toEdges(db.queryRows(sql, connection), null, connection);
         } catch (Exception e) {
             log.warn("Whole-schema foreign-key read failed, falling back to one query per table: {}",
                     e.getMessage(), e);
@@ -398,14 +411,13 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
             DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
             String sql = upstream
                     ? dialect.foreignKeyUpstreamQuery(tableName)
                     : dialect.foreignKeyDownstreamQuery(tableName);
             if (sql == null) return List.of();
 
             String queried = dialect.normalizeTableName(tableName);
-            return toEdges(jdbc.queryForList(sql, queried), queried, connection);
+            return toEdges(db.queryRows(sql, connection, queried), queried, connection);
         } catch (Exception e) {
             log.warn("Failed to fetch edges for {}: {}", tableName, e.getMessage(), e);
             return List.of();
@@ -464,9 +476,8 @@ public class LineageAnalyzerServiceImpl implements LineageAnalyzerService {
         ByokDataSourceContext ctx = dataSourceManager.acquire(connection);
         try {
             DatabaseDialect dialect = ctx.getDialect();
-            JdbcTemplate jdbc = ctx.getJdbcTemplate();
             String sql = dialect.tablesQuery(null);
-            return jdbc.queryForList(sql);
+            return db.queryRows(sql, connection);
         } catch (Exception e) {
             log.warn("Failed to list tables: {}", e.getMessage(), e);
             return List.of();
