@@ -88,6 +88,22 @@ class ArchitectureRulesTest {
     private static final String TOOLS_PACKAGE = BASE_PACKAGE + ".tools..";
     private static final String FACADE_PACKAGE = BASE_PACKAGE + ".facade";
 
+    /**
+     * The capability packages of the {@code features} module — everything except {@code facade}
+     * (contracts only) and {@code routing} (the facade implementation, which is where the seam
+     * bottoms out into {@code repository} and is therefore allowed a {@code JdbcTemplate}).
+     */
+    private static final String[] FEATURE_CAPABILITY_PACKAGES = {
+            BASE_PACKAGE + ".backup..",
+            BASE_PACKAGE + ".catalog..",
+            BASE_PACKAGE + ".cdc..",
+            BASE_PACKAGE + ".etl..",
+            BASE_PACKAGE + ".gateway..",
+            BASE_PACKAGE + ".lineage..",
+            BASE_PACKAGE + ".optimizer..",
+            BASE_PACKAGE + ".quality..",
+            BASE_PACKAGE + ".stream.."};
+
     /** JDBC infrastructure types that MCP tools must reach only through a facade capability interface. */
     private static final Set<String> JDBC_INFRASTRUCTURE_TYPES = Set.of(
             "org.springframework.jdbc.core.JdbcTemplate",
@@ -157,6 +173,32 @@ class ArchitectureRulesTest {
      * depending back on it (1 -> 0).
      */
     private static final int R5_BASELINE = 0;
+    /**
+     * R6 - feature capability packages depending on Spring JDBC. Pinned at 69 when the rule was
+     * written, then lowered to 32 by routing the read probes of {@code catalog}, {@code cdc},
+     * {@code lineage}, {@code optimizer} and {@code backup} through
+     * {@link com.entropy.database.mcp.facade.DatabaseReadOperations#queryRows}, and to 13 by moving
+     * the ETL bulk-transfer pipeline out of {@code features} into {@code infra}: {@code EtlRowStream}
+     * / {@code EtlSql} now live in {@code repository} beside {@code BatchInsertHelper}, the step
+     * handlers hand batches to a {@code BatchSink} instead of a {@code JdbcTemplate}, and the DDL
+     * step executes through {@code EtlDdlRunner}. {@code com.entropy.database.mcp.etl} is at 0.
+     *
+     * <p>13 -> 2 by the same relocation move applied to the federated gateway. Its 11 violations were
+     * all one inner record, {@code RegisteredClient}, which built and held the two templates for each
+     * remote target; it is now {@code byok.RemoteJdbcClient} in {@code infra}, exposing only
+     * {@code queryForList(sql)} / {@code queryForList(sql, params)} plus {@code dataSource()}
+     * ({@code javax.sql.DataSource} is outside this rule's scope), so no template can leak back into
+     * {@code gateway}. A facade seam was never an option there: the gateway pools <em>remote</em>
+     * federated targets that are not BYOK connections, so there is no connection name to route on.
+     *
+     * <p>What is left is deliberately <em>not</em> the anti-pattern this rule was written for:
+     * {@code backup.DatabaseBackupServiceImpl} (2) keeps its two full-table scans on
+     * {@code getEtlJdbcTemplate()}, because {@code queryRows} runs on the interactive read template
+     * and moving them would cut the statement ceiling from 600s to 30s. The remedy for those is
+     * relocation into {@code infra} as well, not a facade seam — until then the baseline holds the
+     * line, and it must only ever be lowered.
+     */
+    private static final int R6_BASELINE = 2;
 
     /**
      * Rejects test code that {@link ImportOption.Predefined#DO_NOT_INCLUDE_TESTS} misses.
@@ -297,6 +339,30 @@ class ArchitectureRulesTest {
                 .as("R5: top-level packages must be free of cycles");
 
         assertWithinBaseline("R5", rule, R5_BASELINE);
+    }
+
+    /**
+     * The {@code features} counterpart of R1. R1 stopped {@code tools} from borrowing a raw
+     * {@code JdbcTemplate}, and {@code facade.DatabaseReadOperations#queryRows} was added as the
+     * seam to replace it — but nothing stopped the capability packages one layer down from doing
+     * exactly what {@code tools} was banned from. {@code QualityCheckService#check} shows the
+     * intended shape: take a {@link com.entropy.database.mcp.facade.DatabaseReadOperations} as a
+     * method parameter and issue probes through it, so timing, audit and read-only advice apply.
+     *
+     * <p>{@code routing} is excluded because it <em>is</em> the facade implementation: the seam has
+     * to bottom out somewhere, and that somewhere is a package whose job is to reach
+     * {@code repository} and the connection registry.
+     */
+    @Test
+    void r6_featureCapabilitiesMustNotDependOnSpringJdbc() {
+        ArchRule rule = noClasses()
+                .that().resideInAnyPackage(FEATURE_CAPABILITY_PACKAGES)
+                .should().dependOnClassesThat().resideInAnyPackage("org.springframework.jdbc..")
+                .as("R6: feature capability packages must reach the database through a facade "
+                        + "capability interface, not a raw JdbcTemplate")
+                .allowEmptyShould(true);
+
+        assertWithinBaseline("R6", rule, R6_BASELINE);
     }
 
     // ---------------------------------------------------------------------------------------------
