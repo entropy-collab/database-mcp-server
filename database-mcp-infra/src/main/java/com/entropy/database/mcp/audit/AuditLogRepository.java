@@ -36,17 +36,22 @@ import java.util.Set;
 /**
  * Audit log repository for persisting query audit entries to database.
  *
- * <p>Registered only when {@code spring.datasource.url} is set. Without that key Boot still
- * auto-configures an anonymous embedded database when a driver like H2 is on the classpath, and
- * this repository used to bind to it — so audit rows landed in a throwaway in-memory schema that
- * disappeared on restart while {@code entropy.mcp.database.audit.enabled: true} reported
- * persistence as working. The condition is on the property rather than on the {@code JdbcTemplate}
- * bean because {@code @ConditionalOnBean} against an auto-configured bean is order-dependent for
- * scanned components, whereas property presence is not.
+ * <p>Registered only when {@code spring.datasource.url} is set — audit persistence stays opt-in.
+ * Without that key Boot still auto-configures an anonymous embedded database when a driver like H2
+ * is on the classpath, and this repository used to bind to it — so audit rows landed in a throwaway
+ * in-memory schema that disappeared on restart while {@code entropy.mcp.database.audit.enabled:
+ * true} reported persistence as working. The condition is on the property rather than on the
+ * {@code JdbcTemplate} bean because {@code @ConditionalOnBean} against an auto-configured bean is
+ * order-dependent for scanned components, whereas property presence is not.
  *
  * <p>When the key is absent this bean is simply missing, and
  * {@code QueryAuditLoggerImpl}/{@code ComplianceReportService} take their documented
  * file-only paths — which is what the code always claimed happened.
+ *
+ * <p>部署方可以把这个键指向一个进程内 H2（{@code jdbc:h2:mem:mcp_audit;DB_CLOSE_DELAY=-1}）来让审计
+ * 查询工具在没有外部库时也能跑，样例见 {@code application.yml}。那是**显式选择**，与上面那个匿名库
+ * 缺陷的区别不在于用了内存库，而在于可见性：URL 写在配置里，而且
+ * {@link AuditLogInitializer#warnIfInMemory(String)} 会在启动时明确告警「历史会丢」。
  *
  * <p><b>方言：SQL 按数据库产品生成，不再假定 H2/PostgreSQL。</b>这个仓储拿到的是
  * {@code spring.datasource.url} 那条连接的 {@link JdbcTemplate}，不是 BYOK 连接，因此拿不到项目里的

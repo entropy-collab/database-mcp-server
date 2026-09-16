@@ -37,24 +37,39 @@ logging:
     org.springframework.ai.tool: INFO
 
 spring:
-  # These two entries used to exclude Boot 3's
-  # org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration /
-  # DataSourceTransactionManagerAutoConfiguration. Boot 4 moved both to
-  # org.springframework.boot.jdbc.autoconfigure, and an exclude naming a class that is not on the
-  # classpath is silently ignored (AutoConfigurationImportSelector only reports invalid excludes
-  # for classes it can load). So the exclusion never took effect: with h2 on the compile classpath
-  # and no spring.datasource.url, Boot kept building an anonymous embedded H2 pool.
+  # 审计库（默认不配，审计只写文件 + 内存环形缓冲）。
   #
-  # They are removed rather than renamed on purpose. Audit persistence is opt-in through
-  # spring.datasource.url (see entropy.mcp.database.audit below) and needs the auto-configuration
-  # to stay active; nothing else in the process uses a default DataSource, so leaving it
-  # auto-configurable costs nothing — Hikari only starts a pool when something asks for a
-  # connection.
+  # 这条 URL 的存在与否是 AuditLogRepository / AuditLogInitializer / ComplianceReportService
+  # 三个 bean 的 @ConditionalOnProperty 条件，也就是「getAuditLogs / getDataAccessReport 等工具
+  # 能不能查到历史」的总开关。刻意保持 opt-in：审计要么明确有个库、要么明确没有，
+  # NEVER 给它一个「看起来在持久化、实际重启就没」的默认值 —— 本项目历史上正是因为
+  # H2 在 classpath 上时 Boot 自动装配匿名内嵌库、审计静默落进去而 audit.enabled=true
+  # 报告一切正常，吃过一次亏（见 AuditLogRepository 类注释）。
   #
+  # 建表不需要手工做：AuditLogRepository 会探测产品族（H2 / PostgreSQL / MySQL / Oracle /
+  # SQL Server 各一份 DDL）按需建 audit_log，但账号要有 DDL 权限。
+  # NEVER 把审计库指向被审计的业务库：归属混淆，且业务库账号通常没有建表权限。
+  #
+  # 选项 1 —— 外部库，可留存，合规留痕场景用这个：
   # datasource:
-  #   url: jdbc:postgresql://audit-db:5432/mcp_audit   # enables audit_log persistence
+  #   url: jdbc:postgresql://audit-db:5432/mcp_audit
   #   username: mcp
   #   password: ${MCP_AUDIT_DB_PASSWORD}
+  #
+  # 选项 2 —— 进程内 H2，零外部依赖，只为让审计查询工具能跑起来（本地调试 / 演示 / 冒烟）：
+  # datasource:
+  #   url: jdbc:h2:mem:mcp_audit;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+  #   username: sa
+  #   password: ""
+  #
+  #   DB_CLOSE_DELAY=-1 是必需的，不是调优：缺了它，Hikari 回收掉最后一个空闲连接的那一刻
+  #   H2 就丢弃整个库，audit_log 连表一起消失，而下一次写入又会重新建表 —— 表现为审计记录
+  #   零星丢失、且没有任何报错。选项 2 的审计历史进程一停就没，也不在多副本间共享，
+  #   所以 AuditLogInitializer 启动时会按 URL 判定内存库并打一条 WARN，
+  #   NEVER 把那条 WARN 降级或删掉。
+  #
+  # 两个选项都可以不改本文件，用 --spring.datasource.url=... 或环境变量
+  # SPRING_DATASOURCE_URL / SPRING_DATASOURCE_USERNAME / SPRING_DATASOURCE_PASSWORD 覆盖。
   ai:
     mcp:
       server:

@@ -14,7 +14,10 @@ services:
       # 起来（服务端会拒绝空白密码并启动失败），用 ${VAR} 的形式让 compose 在变量缺失时
       # 就先给出警告，问题停在编排层而不是等容器反复重启。
       MCP_SECURITY_ADMIN_PASSWORD: ${MCP_SECURITY_ADMIN_PASSWORD}
-      # 可选：审计日志落库时才需要，不配则审计只写文件
+      # 可选：审计落库时才需要，不配则审计只写文件 + 内存缓冲（审计库是 opt-in 的，
+      # 见 application.yml 的 spring.datasource.url 注释：外部库与进程内 H2 两个样例）。
+      # 要落库就连带 SPRING_DATASOURCE_URL / SPRING_DATASOURCE_USERNAME 一起配上，
+      # 本变量供 ${MCP_AUDIT_DB_PASSWORD} 取值。
       MCP_AUDIT_DB_PASSWORD: ${MCP_AUDIT_DB_PASSWORD:-}
       # 可选：密文凭证的 RSA 私钥。空串等同于没配（机制关闭，服务照常起来），
       # 所以这里可以安全地给 :- 默认值，与上面那个必填密码的处理刻意不同。

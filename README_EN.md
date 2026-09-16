@@ -470,6 +470,15 @@ being silently ignored.
 
 ### Audit Persistence (optional)
 
+Auditing lands in three places: the audit log file, an in-memory ring buffer (last 100 entries, for
+SSE/polling), and the `audit_log` table. Only the table is queryable as history by `getAuditLogs` /
+`getDataAccessReport` / `getProtectionReport`.
+
+The first two are always on. The table is **opt-in**: with no `spring.datasource.url` there is no
+`audit_log` at all and auditing stays file-plus-buffer. Two ways to turn it on:
+
+**Option 1 — external database (durable; use this for a compliance-grade trail)**
+
 ```yaml
 spring:
   datasource:
@@ -477,6 +486,37 @@ spring:
     username: mcp
     password: ${MCP_AUDIT_DB_PASSWORD}
 ```
+
+**Option 2 — in-process H2 (no external dependency; just enough to exercise the audit query tools
+locally, in demos, or in smoke tests)**
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:h2:mem:mcp_audit;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password: ""
+```
+
+With option 2 the history **dies with the process and is not shared across replicas**. Startup logs
+a `Audit log is persisted to an IN-MEMORY database (...)` warning saying exactly that.
+
+Either can be set without touching the file, via `--spring.datasource.url=...` or the
+`SPRING_DATASOURCE_URL` / `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD` environment
+variables.
+
+Notes:
+
+- **No manual DDL needed.** `AuditLogRepository` detects the product family (a separate `CREATE
+  TABLE` for H2 / PostgreSQL / MySQL / Oracle / SQL Server) and creates `audit_log` on demand. The
+  account needs DDL privileges; if the table cannot be created, auditing degrades to file-only.
+- **Do not point the audit database at a database being audited.** It muddles ownership, and such
+  accounts usually lack DDL privileges anyway.
+- `DB_CLOSE_DELAY=-1` is required, not a tuning knob: without it H2 drops the whole database when
+  Hikari reclaims the last idle connection, which shows up as audit rows silently going missing.
+- Upgrading a deployment that already has an `audit_log` table: columns were renamed
+  (`sql`→`sql_text`, `rows`→`row_count`, `timestamp`→`event_time`). See the `ALTER TABLE` examples
+  in the `AuditLogRepository` class javadoc.
 
 Target database connections are not configured here — they are registered at runtime via
 `createNamedConnection`.

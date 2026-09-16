@@ -17,10 +17,13 @@ package com.entropy.database.mcp.audit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.util.Locale;
 
 /**
  * Initializes audit log table on startup.
@@ -33,6 +36,12 @@ import org.springframework.context.annotation.Configuration;
  * H2/PostgreSQL 语法的建表语句，于是（一）在 MySQL/Oracle/SQL Server 上启动即失败，只留一条 warn；
  * （二）它和仓储各持一份 DDL，一旦列定义变化，启动时先按旧定义把表建出来，仓储随后只会看到「表已存在」
  * 而按新列名读写，得到的是一张字段对不上的表。
+ *
+ * <p><b>内存库告警</b>：审计库是 opt-in 的（没配 {@code spring.datasource.url} 时这个类整个不装配）。
+ * 部署方可以把它指向一个进程内 H2 来让审计查询工具在没有外部库时也能跑，那是显式选择，但代价是
+ * 进程一停历史全丢。这个代价必须在启动日志里可见 —— 本项目历史上的缺陷正是「审计静默落进**匿名**
+ * 内存库，而 {@code audit.enabled=true} 报告一切正常」（见 {@link AuditLogRepository} 类注释）。
+ * 所以由 {@link #warnIfInMemory(String)} 在启动时明确说出来。**NEVER 把这条 WARN 降级成 info 或删掉。**
  */
 @Configuration
 @ConditionalOnProperty(name = "spring.datasource.url")
@@ -40,9 +49,16 @@ public class AuditLogInitializer {
 
     private static final Logger log = LoggerFactory.getLogger(AuditLogInitializer.class);
 
+    private final String datasourceUrl;
+
+    public AuditLogInitializer(@Value("${spring.datasource.url}") String datasourceUrl) {
+        this.datasourceUrl = datasourceUrl;
+    }
+
     @Bean
     public CommandLineRunner initAuditLogTable(AuditLogRepository auditLogRepository) {
         return args -> {
+            warnIfInMemory(datasourceUrl);
             try {
                 auditLogRepository.ensureTableExists();
             } catch (Exception e) {
@@ -50,5 +66,34 @@ public class AuditLogInitializer {
                 log.warn("Audit table creation failed (insufficient permissions?): {}", e.getMessage(), e);
             }
         };
+    }
+
+    /**
+     * 按 JDBC URL 判定审计库是否只存在于进程内存里，是就告警。
+     *
+     * <p>判据放在 URL 上而不是 {@code DatabaseMetaData}：产品名只能告诉你这是 H2，无法区分
+     * {@code jdbc:h2:mem:...}（进程内、必丢）与 {@code jdbc:h2:file:...}（落盘、可留存），
+     * 而这两者在留痕可靠性上是相反的结论。HSQLDB 与 Derby 的内存形态一并覆盖，它们同样可能
+     * 被部署方换上来。
+     *
+     * <p>包级可见以便直接断言。
+     */
+    static boolean warnIfInMemory(String url) {
+        if (url == null || url.isBlank()) {
+            return false;
+        }
+        String normalized = url.toLowerCase(Locale.ROOT);
+        boolean inMemory = normalized.startsWith("jdbc:h2:mem")
+                || normalized.startsWith("jdbc:hsqldb:mem")
+                || normalized.contains(":memory:")
+                || normalized.startsWith("jdbc:derby:memory");
+        if (inMemory) {
+            log.warn("Audit log is persisted to an IN-MEMORY database ({}): audit history is lost "
+                    + "when this process stops, and it is not shared across replicas. This is the "
+                    + "zero-configuration default, not a compliance-grade audit trail. Point "
+                    + "spring.datasource.url at an external database to keep the trail.",
+                    normalized);
+        }
+        return inMemory;
     }
 }

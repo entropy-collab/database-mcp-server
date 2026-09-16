@@ -212,9 +212,49 @@ entropy:
 这条路不要求密文带有效期（进程重启必须还能用），但绑定照样强制，且解不开一律启动失败——
 即便 `required: false`。
 
-可选：把审计日志持久化到库表时，配置 `spring.datasource.url` / `username` /
-`password`（示例见 `application.yml` 顶部注释，密码走 `MCP_AUDIT_DB_PASSWORD`）。
-不配置时审计只写文件。
+### 审计持久化（可选）
+
+审计有三层落点：审计日志文件、内存环形缓冲（最近 100 条，供 SSE/轮询）、以及 `audit_log` 表。
+只有第三层能被 `getAuditLogs` / `getDataAccessReport` / `getProtectionReport` 查到历史。
+
+前两层一直开着。第三层是 **opt-in**：`spring.datasource.url` 不配就没有 `audit_log`，
+审计只写文件 + 内存缓冲。配上它有两种取向：
+
+**选项 1 —— 外部库（可留存，合规留痕用这个）**
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://audit-db:5432/mcp_audit
+    username: mcp
+    password: ${MCP_AUDIT_DB_PASSWORD}
+```
+
+**选项 2 —— 进程内 H2（零外部依赖，只为让审计查询工具能跑起来：本地调试 / 演示 / 冒烟）**
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:h2:mem:mcp_audit;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password: ""
+```
+
+选项 2 的审计历史**进程一停就没，也不在多副本间共享**，启动时会打一条
+`Audit log is persisted to an IN-MEMORY database (...)` 的 WARN 提示这件事。
+
+两种都可以不改配置文件，用 `--spring.datasource.url=...` 或环境变量 `SPRING_DATASOURCE_URL` /
+`SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD` 覆盖。
+
+几点说明：
+
+- **建表不需要手工做**：`AuditLogRepository` 会探测数据库产品族（H2 / PostgreSQL / MySQL / Oracle /
+  SQL Server 各一份 DDL）并按需建 `audit_log`，但账号要有 DDL 权限；建不出来时审计退化成只写文件。
+- **不要把审计库指向被审计的业务库**：审计数据混进业务库会让归属不清，而业务库账号通常也没有建表权限。
+- `DB_CLOSE_DELAY=-1` 不是调优参数：缺了它，Hikari 回收最后一个空闲连接时 H2 会丢弃整个库，
+  表现为审计记录零星丢失且不报错。
+- 已有 `audit_log` 表的旧部署升级时注意列改名（`sql`→`sql_text`、`rows`→`row_count`、
+  `timestamp`→`event_time`），详见 `AuditLogRepository` 类注释里的 `ALTER TABLE` 样例。
 
 ### Docker 部署
 
