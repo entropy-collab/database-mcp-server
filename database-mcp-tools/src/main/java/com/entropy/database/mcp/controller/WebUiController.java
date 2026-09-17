@@ -42,7 +42,10 @@ import java.util.Map;
 
 /**
  * 只读运维页面（{@code /index.html}）的后端。除了本类，页面还直接用已有的
- * {@link AuditLogController}（{@code /api/audit/logs} 与 {@code /api/audit/history}）。
+ * {@link AuditLogController}（{@code /api/audit/logs} 与 {@code /api/audit/history}），
+ * 以及 {@link WebUiExplorerController}——它承载 schema / 资产 / 血缘 / 作业 / 备份 / CDC /
+ * 质量 / SQL 体检那一批浏览端点，和本类共用 {@code /api/ui} 前缀（Spring 按具体路径匹配）。
+ * 本类留下的是进程内状态（连接、池、审计、指标、服务自述）与 DBA 诊断视图。
  *
  * <h2>这个页面扩大了无鉴权暴露面</h2>
  * <p><b>{@code entropy.mcp.security.enabled=false} 时，本类的每个端点、{@code /api/audit/**} 以及
@@ -59,7 +62,8 @@ import java.util.Map;
  *       不存在「页面能开、接口打不开」或者反过来的组合。</li>
  * </ul>
  *
- * <p><b>{@link #dba} 是这里唯一会真的向业务库发 SQL 的端点</b>，其余端点读的都是进程内状态。
+ * <p><b>{@link #dba} 是本类里唯一会真的向业务库发 SQL 的端点</b>，其余端点读的都是进程内状态
+ * （{@link WebUiExplorerController} 那边大部分端点都会连库，那一批的暴露面在那个类里单独讨论）。
  * 它读的是数据字典与动态性能视图（{@code v$session}、{@code dba_data_files} 之类），因此裸跑时
  * 它把「服务器进程里有什么」扩大到了「被注册的那些库里有什么」。这不是本类新引入的权限——同样的
  * 查询作为 MCP 工具一直可调，且仍受连接注册与账号权限约束——但它是上面那条「暴露面」讨论里
@@ -108,10 +112,16 @@ public class WebUiController {
      * <p>这份清单只在这里出现一次，前端从 {@code /api/ui/dba/views} 取：两边各写一份的话，
      * 后端加了一个 view 而前端选择器没加等于这个 view 不存在，反过来则是一个必然 400 的选项。
      * 顺序即前端渲染顺序，因此用 {@link List} 而不是 Set。
+     *
+     * <p>最后三个（{@code grants}、{@code privileges}、{@code indexStatus}）读的是权限与索引状态，
+     * 和前面九个一样走 {@link DatabaseHealthTools} 的只读方法。它们留在这个类而不是搬进
+     * {@code WebUiExplorerController}，唯一原因就是这份清单与 {@link #dbaViews()}
+     * 只能有一份：分开之后前端就得从两个地方拼出「有哪些视图」。
      */
     static final List<String> DBA_VIEWS = List.of(
             "health", "sessions", "locks", "blocking", "tablespaces",
-            "datafiles", "undo", "invalid", "tableSize");
+            "datafiles", "undo", "invalid", "tableSize",
+            "grants", "privileges", "indexStatus");
 
     private final ConnectionAdminTools connectionAdminTools;
     private final PoolMonitorTools poolMonitorTools;
@@ -442,13 +452,22 @@ public class WebUiController {
     /**
      * DBA 诊断视图，按 {@code view} 分派到 {@link DatabaseHealthTools} 的对应只读方法。
      *
-     * <p>GET /api/ui/dba?view=sessions&amp;connection=&amp;schema=&amp;table=
+     * <p>GET /api/ui/dba?view=sessions&amp;connection=&amp;schema=&amp;table=&amp;userName=
      * → 原样透传对应工具的 {@code {dialect, rows}}。
      *
      * <p>合法 {@code view} 见 {@link #DBA_VIEWS}，也由 {@link #dbaViews()} 暴露给前端。
      * 取值非法（含缺失）时返回 400，响应体里带上合法取值清单——让人从错误消息里就能改对，
      * 而不是去翻源码。{@code invalid} 额外用 {@code schema}，{@code tableSize} 额外用
-     * {@code table}（必填，缺失同样是 400）与 {@code schema}。
+     * {@code table}（必填，缺失同样是 400）与 {@code schema}，{@code grants} 额外用
+     * {@code userName}（必填），{@code indexStatus} 额外用 {@code table}（必填）与 {@code schema}。
+     *
+     * <p>{@code grants} 的 {@code userName} 在 Oracle 数据字典里存的是<b>大写</b>，
+     * 传小写通常查出空 {@code rows}——这是数据字典的口径，不在这里做大小写转换：
+     * 悄悄把它转成大写会让「MySQL 上用户名区分大小写」那类库上的查询变成查不到的另一个用户。
+     *
+     * <p>{@code indexStatus} 的 {@code table} 在工具签名里是<b>可选</b>的（省略即返回整个 Schema
+     * 的索引），这里刻意收紧成必填：页面上那是一次可能返回上万行的请求，而触发它只需要
+     * 选中视图却忘了填表名。要看整个 Schema 的索引仍然可以直接调 MCP 工具。
      *
      * <p><b>这一组会真的连库执行查询，而且失败是常态。</b>底下的 SQL 由方言提供，绝大多数视图
      * 只有 Oracle 实现（{@code v$session}、{@code dba_data_files}、{@code v$undostat} 这类），
@@ -462,7 +481,8 @@ public class WebUiController {
             @RequestParam(name = "view", required = false) @Nullable String view,
             @RequestParam(name = "connection", required = false) @Nullable String connection,
             @RequestParam(name = "schema", required = false) @Nullable String schema,
-            @RequestParam(name = "table", required = false) @Nullable String table) {
+            @RequestParam(name = "table", required = false) @Nullable String table,
+            @RequestParam(name = "userName", required = false) @Nullable String userName) {
         if (view == null || !DBA_VIEWS.contains(view)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "unknown view '" + view + "'; supported views are " + DBA_VIEWS);
@@ -482,6 +502,21 @@ public class WebUiController {
                             "table is required for view 'tableSize'");
                 }
                 yield databaseHealthTools.estimateTableSize(table, schema, connection);
+            }
+            case "grants" -> {
+                if (userName == null || userName.isBlank()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "userName is required for view 'grants'");
+                }
+                yield databaseHealthTools.listGrants(userName, connection);
+            }
+            case "privileges" -> databaseHealthTools.listCurrentPrivileges(connection);
+            case "indexStatus" -> {
+                if (table == null || table.isBlank()) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "table is required for view 'indexStatus'");
+                }
+                yield databaseHealthTools.showIndexStatus(table, schema, connection);
             }
             // DBA_VIEWS 的 contains 已经挡住了其它取值；这一支存在只是为了让「往 DBA_VIEWS 里
             // 加了名字却忘了加分派」表现为一次明确的 500，而不是编译不过或静默返回 null。

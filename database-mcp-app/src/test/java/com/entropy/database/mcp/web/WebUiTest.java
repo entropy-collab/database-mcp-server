@@ -373,8 +373,10 @@ class WebUiTest {
         /**
          * {@code /api/ui/dba/views} 是前端选择器的唯一数据源，空清单等于那个选择器渲染不出来。
          *
-         * <p>不断言清单内容，只断言非空并且和 {@link #dbaRejectsUnknownView} 里那个非法值不沾边：
-         * 把九个 view 名字抄进断言只会让「加一个视图」变成改两处。
+         * <p>不断言清单内容，只断言条数、以及和 {@link #dbaRejectsUnknownView} 里那个非法值不沾边：
+         * 把十二个 view 名字抄进断言只会让「加一个视图」变成改两处。条数<b>要</b>断言——
+         * {@code DBA_VIEWS} 与 {@code dba} 的分派是两处手写的清单，往常量里加了名字却忘了加分派
+         * 只会在有人真的点那个视图时表现为 500，而这条断言让「加了几个」至少是显式的。
          */
         @Test
         @SuppressWarnings("unchecked")
@@ -383,7 +385,117 @@ class WebUiTest {
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
                     .andReturn());
             List<String> views = (List<String>) body.get("views");
-            assertThat(views).isNotEmpty().doesNotContain("nope");
+            assertThat(views).hasSize(12).doesNotContain("nope");
+        }
+
+        /** {@code grants} 缺 {@code userName} 是 400，与 tableSize 缺 table 同一个理由。 */
+        @Test
+        void dbaGrantsRequiresUserName() throws Exception {
+            mockMvc.perform(get("/api/ui/dba?view=grants"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+        }
+
+        /**
+         * {@code indexStatus} 缺 {@code table} 是 400。
+         *
+         * <p>这一条钉的是控制器<b>刻意收紧</b>的语义：{@code showIndexStatus} 的 tableName 在工具
+         * 签名里是可选的（省略即返回整个 Schema 的索引），页面这条路径上不给这个默认，
+         * 因为触发它只需要选中视图却忘了填表名。有人"照工具签名对齐"把这里放开时，这条会变红。
+         */
+        @Test
+        void dbaIndexStatusRequiresTable() throws Exception {
+            mockMvc.perform(get("/api/ui/dba?view=indexStatus"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+        }
+
+        // ─── 浏览端点：纯配置的形状 ────────────────────────────────────
+
+        /**
+         * 六个不连库的端点在 {@code dialect=generic} + 无真实库的环境下必须 200 并带上关键键。
+         *
+         * <p>只测这六个是刻意的：{@code WebUiExplorerController} 的其余端点都会真的对业务库发 SQL，
+         * 在这个上下文里必然失败，测它们等于把「连不上库」写成断言。这六个是页面在<b>什么连接都没有</b>
+         * 时唯一能显示出内容的东西，也是判断「某个模块有没有开」的唯一入口。
+         *
+         * <p>{@code /lineage/config} 的 {@code foreignKeyEnabled} 单独断言：页面必须把它和空血缘图
+         * 一起显示，否则空图无法自解释（库里没外键 / 开关关掉，看起来都像"这张表没有上下游"）。
+         * 这个键从返回里消失时，前端不会报错，只会安静地少显示那一行。
+         */
+        @Test
+        void readOnlyConfigEndpointsAreServedWithoutADatabase() throws Exception {
+            Map<String, Object> catalogConfig = json(mockMvc.perform(get("/api/ui/catalog/config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(catalogConfig).containsKeys("enabled", "maxSearchResults");
+
+            Map<String, Object> lineageConfig = json(mockMvc.perform(get("/api/ui/lineage/config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(lineageConfig)
+                    .as("页面要把 foreignKeyEnabled 和空血缘图一起显示，否则空图无法自解释")
+                    .containsKeys("enabled", "foreignKeyEnabled", "maxTraversalDepth", "maxTablesPerGraph");
+
+            Map<String, Object> backupConfig = json(mockMvc.perform(get("/api/ui/backups/config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(backupConfig).containsKey("enabled");
+
+            Map<String, Object> cdcConfig = json(mockMvc.perform(get("/api/ui/cdc/config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(cdcConfig).containsKey("enabled");
+
+            Map<String, Object> optimizerConfig = json(mockMvc.perform(get("/api/ui/sql/optimizer-config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(optimizerConfig).containsKeys("enabled", "maxSuggestionsPerQuery");
+
+            Map<String, Object> templates = json(mockMvc.perform(get("/api/ui/quality/templates"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(templates.get("templates")).isInstanceOf(List.class);
+        }
+
+        /**
+         * {@code /api/ui/jobs} 在 gateway 关闭时是 200 + {@code enabled=false}，不是 500。
+         *
+         * <p>这条钉住的是 {@code EtlTools} 的可缺失注入：那个 bean 挂在
+         * {@code @ConditionalOnProperty(entropy.mcp.gateway.enabled)} 上且没有 matchIfMissing，
+         * 写成必需依赖时本上下文（gateway 显式关）会在<b>启动阶段</b>就失败——表现是这个类
+         * 全部用例一起红，而根因和作业列表没关系。{@code reason} 一起断言：
+         * 页面要显示「本部署未启用 ETL」这句话，而不是一个空列表。
+         */
+        @Test
+        void jobsReportsDisabledGatewayInsteadOfFailing() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/ui/jobs"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(body.get("enabled")).isEqualTo(false);
+            assertThat(body).containsKeys("reason", "property");
+        }
+
+        /**
+         * 必填参数缺失一律 400，不是 500。
+         *
+         * <p>四条覆盖四种不同的必填形态：路径上唯一的表名（{@code /schema/table}）、
+         * 血缘的分析对象（{@code /lineage}）、SQL 本体（{@code /sql/risk}）、
+         * 以及一个纯内存查找的 id（{@code /backups/detail}）。它们分别落在不同的工具上，
+         * 而这些工具的必填校验都会抛 {@code McpToolException} → 500，
+         * 「调用方少传参数」和「服务器坏了」在页面上的处理不同（前者不该弹重试、不该报警）。
+         *
+         * <p>{@code /backups/detail} 那条尤其值得留着：它<b>不连库</b>，所以如果哪天这里退化成 500，
+         * 那一定是控制器的校验掉了，而不是环境里没有数据库。
+         */
+        @Test
+        void explorerEndpointsRejectMissingRequiredParams() throws Exception {
+            mockMvc.perform(get("/api/ui/schema/table"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+            mockMvc.perform(get("/api/ui/lineage"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+            mockMvc.perform(get("/api/ui/sql/risk"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+            mockMvc.perform(get("/api/ui/backups/detail"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
         }
 
         // ─── 静态页面 ──────────────────────────────────────────────────
@@ -519,6 +631,23 @@ class WebUiTest {
             mockMvc.perform(get("/api/ui/dba?view=nope"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
             mockMvc.perform(get("/api/ui/dba/views"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            // WebUiExplorerController 与本类共用 /api/ui 前缀，靠的是 SecurityConfig 里
+            // /api/** 那条 Ant 多段通配自动收编新路径。这几条覆盖三种情况：纯配置端点、
+            // 必填参数缺失的端点、以及一个会连库的端点——全部必须在 401 上停住，
+            // 不能先走到参数校验的 400（那等于给未鉴权的调用方一个探测接口），
+            // 更不能因为路径没被规则覆盖而 200。
+            mockMvc.perform(get("/api/ui/lineage/config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/catalog/config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/jobs"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/schema/table"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/sql/risk?sql=select%201"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/schema/schemas"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
         }
 
