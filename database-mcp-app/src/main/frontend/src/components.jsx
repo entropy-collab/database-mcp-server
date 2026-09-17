@@ -25,21 +25,28 @@ import {
   Banner,
   Button,
   Card,
+  CheckboxList,
+  CheckboxListItem,
   Divider,
   EmptyState,
   Grid,
   HStack,
   Heading,
+  Popover,
   PowerSearch,
+  RadioList,
+  RadioListItem,
   StackItem,
   StatusDot,
   Table,
   Text,
+  TextInput,
   Timestamp,
   VStack,
   Layout,
   LayoutPanel,
   ResizeHandle,
+  paginateData,
   pixel,
   proportional,
   toSearchFilters,
@@ -48,13 +55,32 @@ import {
   useMediaQuery,
   usePowerSearchConfig,
   useResizable,
-  useTableFilterState,
+  useTableColumnResize,
+  useTableColumnSettings,
+  useTableColumnSettingsState,
   useTableFiltering,
+  useTableGroupedRows,
+  useTablePagination,
   useTableRowStatus,
   useTableSortable,
   useTableSortableState,
   useTheme,
 } from '@astryxdesign/core';
+import { registerSearchHandle } from './searchFocus.js';
+import { tableStorageKey, usePersistentState } from './persist.js';
+import {
+  encodeRowRef,
+  readHashParams,
+  rowKeyForTable,
+  rowRefFromKey,
+  writeHashParams,
+} from './hashState.js';
+import {
+  mergeViews,
+  newUserViewId,
+  readUserViews,
+  writeUserViews,
+} from './savedViews.js';
 
 /*
  * 注意：core 自己也导出一个叫 Section 的组件，本文件<b>没有</b>导入它。
@@ -568,7 +594,7 @@ export function Sparkline({ values, height = 44, label, unit = '' }) {
 // =============================================================================
 
 /**
- * 「复制 SQL」按钮。
+ * 「复制」按钮。SQL 原文、mermaid / dot 图文本都用它。
  *
  * useClipboard 的 copy() 在被拒绝时是<b>静默</b>返回 false 的（见它的 .d.ts：
  * "A clipboard rejection is a silent no-op"）。这一页的部署形态几乎保证会撞上这件事：
@@ -576,23 +602,27 @@ export function Sparkline({ values, height = 44, label, unit = '' }) {
  * 所以在 http 页面里这个按钮点了不会有任何反应。
  *
  * 静默失败是最坏的结果——运维会以为复制成功了，粘贴出来是上一次剪贴板的内容。
- * 所以这里必须自己接住 false，并且给出可执行的回退指引（下面的 SQL 是可选中的纯文本）。
+ * 所以这里必须自己接住 false，并且给出可执行的回退指引（配套显示的文本一律是可选中的纯文本）。
+ *
+ * 这个件原来叫 CopySqlButton、写死了 SQL 的文案，是详情面板的私有实现。血缘页要复制的是
+ * 图文本、SQL 体检页要复制的是 EXPLAIN 语句，三处对「复制失败要说什么」必须给出同一个答案，
+ * 所以把它抽出来导出，文案参数化。不抽的下场是三份各自漂移的失败提示。
  */
-function CopySqlButton({ sql }) {
-  const { copy, isCopied } = useClipboard({ announce: '已复制 SQL' });
+export function CopyTextButton({ text, label = '复制', copiedLabel = '已复制', what = '内容' }) {
+  const { copy, isCopied } = useClipboard({ announce: `已复制${what}` });
   const [hasFailed, setFailed] = useState(false);
 
   const onCopy = useCallback(() => {
     setFailed(false);
-    copy(sql).then((ok) => { if (!ok) { setFailed(true); } });
-  }, [copy, sql]);
+    copy(text).then((ok) => { if (!ok) { setFailed(true); } });
+  }, [copy, text]);
 
   return (
     <VStack gap={1}>
       <Button
-        label={isCopied ? '已复制' : '复制 SQL'}
+        label={isCopied ? copiedLabel : label}
         variant="secondary"
-        isDisabled={!sql}
+        isDisabled={!text}
         onClick={onCopy}
       />
       {hasFailed && (
@@ -602,8 +632,8 @@ function CopySqlButton({ sql }) {
         <HStack gap={2} vAlign="center" wrap="wrap">
           <Badge variant="error" label="复制失败" />
           <Text type="supporting" color="secondary">
-            浏览器拒绝了剪贴板写入（http:// 页面不是 secure context，clipboard API 不可用）。
-            请直接选中下面的 SQL 原文复制。
+            {`浏览器拒绝了剪贴板写入（http:// 页面不是 secure context，clipboard API 不可用）。`
+              + `请直接选中下面的${what}复制。`}
           </Text>
         </HStack>
       )}
@@ -612,12 +642,43 @@ function CopySqlButton({ sql }) {
 }
 
 /**
- * 详情面板的内容：完整 SQL 原文 + 该行所有字段的键值对。
+ * 等宽原文块：SQL 原文、执行计划、mermaid / dot 图文本。
  *
- * SQL 用 <pre> 而不是 core 的 Code：Code 是行内件，自带底色和内边距，长 SQL 套进去
- * 会变成一个撑满的灰块；而且它的 white-space 由组件自己的 class 决定，不能保证保留
- * 换行。这里要的是「原文一个字符都不改」，所以自己控制 white-space: pre-wrap，
+ * 用 <pre> 而不是 core 的 Code / CodeBlock：
+ * - Code 是行内件，自带 muted 底色和内边距，长文本套进去会变成一个撑满的灰块；
+ *   而且它的 white-space 由组件自己的 class 决定，不能保证保留换行。
+ * - CodeBlock 有语法高亮，但它要求一个 language，而这里要显示的东西横跨 SQL、
+ *   mermaid、dot 和「方言原样吐出来的执行计划文本」四种，其中后两种它都不认；
+ *   猜错 language 的结果是把随机的词染成关键字色，比不染更难读。
+ *
+ * 这里要的是「原文一个字符都不改」，所以自己控制 white-space: pre-wrap，
  * 只从 token 里借等宽字体（--font-family-code），不写死字体名。
+ * overflowX auto 而不是 hidden：dot 的一行可以很长，能横向滚总比被裁掉好。
+ */
+export function MonoBlock({ text, emptyText = '（没有内容）', maxHeight = 420 }) {
+  const value = typeof text === 'string' && text !== '' ? text : null;
+  return (
+    <Card padding={3}>
+      <pre
+        style={{
+          margin: 0,
+          fontFamily: 'var(--font-family-code)',
+          fontSize: 'inherit',
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          overflowX: 'auto',
+          maxHeight,
+          overflowY: 'auto',
+        }}
+      >
+        {value ?? emptyText}
+      </pre>
+    </Card>
+  );
+}
+
+/**
+ * 详情面板的内容：完整 SQL 原文 + 该行所有字段的键值对。
  *
  * 键值对列出的是这一行的<b>全部</b>字段，包括表格里没有列的（error 的完整堆栈、
  * connectionKey 之类）。表格是"扫"用的，这里是"查"用的——所以刻意不做筛选，
@@ -643,21 +704,16 @@ function RowDetailBody({ row, sqlKey, columns }) {
         <VStack gap={2}>
           <HStack gap={3} vAlign="center" wrap="wrap">
             <Text type="label" weight="semibold">SQL 原文</Text>
-            <CopySqlButton sql={typeof sql === 'string' ? sql : ''} />
+            <CopyTextButton
+              text={typeof sql === 'string' ? sql : ''}
+              label="复制 SQL"
+              what="SQL"
+            />
           </HStack>
-          <Card padding={3}>
-            <pre
-              style={{
-                margin: 0,
-                fontFamily: 'var(--font-family-code)',
-                fontSize: 'inherit',
-                whiteSpace: 'pre-wrap',
-                overflowWrap: 'anywhere',
-              }}
-            >
-              {typeof sql === 'string' && sql !== '' ? sql : '（这一行没有 SQL 原文）'}
-            </pre>
-          </Card>
+          <MonoBlock
+            text={typeof sql === 'string' ? sql : ''}
+            emptyText="（这一行没有 SQL 原文）"
+          />
         </VStack>
       )}
 
@@ -763,29 +819,18 @@ function DetailSplit({ detail, children }) {
 // =============================================================================
 
 /*
- * 快捷键的注册点在 App（一个地方能看全所有快捷键），但输入框在 InteractiveTable 里，
- * 而且一页可能有多张表（性能页三张）。于是需要一条从 App 指到"当前页第一个搜索框"的路。
+ * 注册表本身搬到了 ./searchFocus.js，这里只是把它再导出一遍给 panel 用。
  *
- * 想过的两个方案，都不如这个：
- * - 每个 InteractiveTable 自己注册 '/'：useHotkeys 是每个实例一个 window 监听器，
- *   三张表就是三个都会响应，最后是最后挂载的那个抢到焦点——顺序还不稳定。
- * - 用 document.querySelector 找 input：搜索框和表头里的过滤输入框长得一样，选不准。
+ * 搬走的理由是懒加载：App.jsx 需要 focusFirstSearch（'/' 快捷键在那里注册），
+ * 而 App 一旦 import 本文件，Vite 就会把整个 components.jsx 连带它依赖的
+ * Table / PowerSearch / Timestamp 那一片 core 拉进入口的静态依赖图，并给
+ * index.html 加上 modulepreload —— 首屏又要下载那 370 KB，视图级懒加载白做。
+ * 详细说明在 ./searchFocus.js 的头注释里。
  *
- * 一个模块级的有序注册表，按挂载顺序取第一个。挂载顺序 = JSX 里的出现顺序 =
- * 页面上从上到下的顺序，所以"第一个"就是运维视觉上的第一个搜索框。
+ * 这里保留 re-export 是为了不动 16 个 panel 的 import：它们要的是「从 components
+ * 拿显示件」这一个来源。
  */
-const searchHandles = new Set();
-
-function registerSearchHandle(handle) {
-  searchHandles.add(handle);
-  return () => { searchHandles.delete(handle); };
-}
-
-/** 聚焦当前页面上第一个搜索框。没有搜索框（连接页/服务信息页）时什么都不做。 */
-export function focusFirstSearch() {
-  const first = searchHandles.values().next().value;
-  first?.current?.focusTypeahead?.();
-}
+export { focusFirstSearch } from './searchFocus.js';
 
 // =============================================================================
 // InteractiveTable
@@ -860,16 +905,47 @@ const ROW_TONE_BACKGROUND = {
   warning: 'var(--color-background-yellow)',
 };
 
-function useRowInteractionPlugin({ getRowKey, selectedKey, onSelect, getRowTone }) {
+/**
+ * 判断一行是不是 useTableGroupedRows 合成出来的<b>组头行</b>。
+ *
+ * ── 为什么需要这个判断 ──
+ * 分组打开后，Table 的 data 里混进了组头行。组头行必须被本文件里两个东西跳过：
+ * - 行点击/选中（点组头应该是折叠这一组，不是打开一个不存在的"行详情"）；
+ * - rowStatus 的 getStatus（组头没有 success 字段，会被算成"失败"标一个红标记）。
+ *
+ * ── 判据是怎么定的（读了 core 的实现，不是猜的）──
+ * dist/Table/plugins/groupedRows/useTableGroupedRows.js 里，组头行是
+ * `new Proxy({[GROUP_HEADER]:true, groupKey, count}, handler)`，其中 GROUP_HEADER 是一个
+ * <b>模块私有的 Symbol</b>——外面拿不到，所以不能直接查那个标记。
+ * 但那个 Proxy 的 get 陷阱写得很明确：只有 GROUP_HEADER / groupKey / count 三个键返回
+ * 真值，<b>其余一切键返回空字符串</b>（注释里说这是为了让排序和过滤插件不读到 undefined）。
+ * 于是「同时有字符串 groupKey 和数字 count」这个组合只有组头行满足。
+ *
+ * 两个条件都要检查，不能只看 count：SQL 模式统计那张表真有一列叫 count（次数），
+ * 只判 count 会把它的每一行都当成组头。而 groupKey 这个键名在本项目所有数据里都不存在。
+ */
+function isGroupHeaderRow(item) {
+  return item !== null
+    && typeof item === 'object'
+    && typeof item.groupKey === 'string'
+    && typeof item.count === 'number';
+}
+
+function useRowInteractionPlugin({ getRowRef, selectedRef, onSelect, getRowTone }) {
   return useMemo(() => {
-    if (!getRowKey) {
+    if (!getRowRef) {
       return undefined;
     }
     return {
       transformBodyRow(props, item) {
-        const key = getRowKey(item);
+        /* 组头行原样放过：它的点击行为（折叠该组）由 grouped 插件自己接，
+           在这里再挂一个 onClick 会把两件事叠在一起。 */
+        if (isGroupHeaderRow(item)) {
+          return props;
+        }
+        const key = getRowRef(item);
         const tone = getRowTone ? getRowTone(item) : null;
-        const isSelected = selectedKey != null && selectedKey === key;
+        const isSelected = selectedRef != null && selectedRef === key;
         return {
           ...props,
           htmlProps: {
@@ -888,11 +964,285 @@ function useRowInteractionPlugin({ getRowKey, selectedKey, onSelect, getRowTone 
         };
       },
     };
-  }, [getRowKey, selectedKey, onSelect, getRowTone]);
+  }, [getRowRef, selectedRef, onSelect, getRowTone]);
+}
+
+/*
+ * 下面这几个空值都是<b>模块级常量</b>，不是随手写的字面量。
+ *
+ * 它们全都进了 useState 的初值或 usePersistentState 的 fallback，而后者又进了
+ * useCallback / useMemo 的依赖。写成内联的 {} / [] / new Set() 的话每次渲染都是新引用，
+ * 依赖比较永远不相等，下游那一串 memo（过滤、排序、分组、插件身份）全部白设。
+ * 这和文件头「columns / searchFields / defaultSort 必须由调用方以模块级常量传入」
+ * 是同一条纪律，只是这几个是本文件自己的。
+ */
+const EMPTY_COLUMN_FILTERS = {};
+const EMPTY_COLUMN_WIDTHS = {};
+const EMPTY_SORT = [];
+const EMPTY_ROWS = [];
+const EMPTY_COLLAPSED = new Set();
+
+/**
+ * 每页显示多少行的默认值与可选档位。
+ *
+ * ⚠️ 这和顶栏的「条数」是<b>两件不同的事</b>，而且是这一项最容易被误读的地方：
+ * - 顶栏「条数」= limit = <b>后端返回多少条</b>（进 URL 查询串，改它会重新发请求）；
+ * - 这里的每页条数 = <b>前端把已经拿到的这些行分几页显示</b>（纯前端切片，不发请求）。
+ * 翻到最后一页 ≠ 看到了全部数据 —— 看到的是"后端给的这 limit 条的最后一页"。
+ * 所以表格下方必须有一句话把这个关系写出来（见 PAGE_RANGE 那段 JSX），
+ * 不写的话一定会有人拿"翻到底了"当成"数据就这么多"。
+ *
+ * 默认 25 而不是 core 的默认 10：这些表是用来"扫"的，一屏 10 行会让翻页变成主要动作。
+ * 25 行大约是一屏能看完又不用滚太多的量。
+ */
+const DEFAULT_PAGE_SIZE = 25;
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
+
+/**
+ * 一行在某个分组字段上的组值。
+ *
+ * 空值折成「（空）」而不是空字符串：空字符串会让组头变成一条只有数字的行，
+ * 而"这一组是连接名为空的记录"本身是个有意义的信息（比如工具调用没带连接名）。
+ */
+function groupValueOf(row, key) {
+  const raw = row?.[key];
+  if (raw === null || raw === undefined || raw === '') {
+    return '（空）';
+  }
+  return String(raw);
 }
 
 /**
- * 带搜索 / 排序 / 过滤 / 行详情 / CSV 导出的表格分区。
+ * 组头的内容。
+ *
+ * core 的默认渲染是 `<groupKey> (<count>)`，够用但是英文括号风格，
+ * 而且条数没有单位。这里给成「<组值> · N 条」，和页面其他地方的中文口径一致。
+ * 条数是这个组头存在的主要理由之一（第 5 项明确要求显示），所以它不是装饰，
+ * 用 Badge 让它和组名在视觉上分开——组名是标签，条数是随筛选变化的读数。
+ */
+function renderGroupHeaderContent(groupKey, count) {
+  return (
+    <HStack gap={2} vAlign="center" wrap="wrap">
+      <Text type="label" weight="semibold">{groupKey}</Text>
+      <Badge variant="neutral" label={`${count} 条`} />
+    </HStack>
+  );
+}
+
+/*
+ * =============================================================================
+ * 表头带上的三个控件：保存的视图 / 分组 / 列显隐
+ * =============================================================================
+ *
+ * 三个都做成 Popover 里的一小块表单，而不是常驻在标题带上：
+ * 标题带已经有「清空筛选」和「导出 CSV」两个按钮，再平铺三组控件会让标题带比表格还高。
+ * Popover 的触发器是一个按钮，点开才占空间——这三件事都是"偶尔调一次"的。
+ *
+ * 都不传 size：那是控件高度不是字号（口径见 ExportCsvButton 的说明）。
+ */
+
+/**
+ * 保存的视图（第 6 项）。
+ *
+ * 列表里预设在前、用户的在后（顺序由 savedViews.mergeViews 决定）。
+ * 删除按钮<b>只</b>出现在用户视图上：预设是模块级常量，压根不在 localStorage 里，
+ * 所以"不可删"不是靠这里的 isBuiltIn 判断挡住的——那个判断只是别画一个点了没用的按钮。
+ */
+function SavedViewsControl({ views, onApply, onSave, onDelete, title }) {
+  const [isOpen, setOpen] = useState(false);
+  const [draftName, setDraftName] = useState('');
+
+  const save = () => {
+    onSave(draftName);
+    setDraftName('');
+    setOpen(false);
+  };
+
+  return (
+    <Popover
+      isOpen={isOpen}
+      onOpenChange={setOpen}
+      label={`${title} 的保存视图`}
+      placement="below"
+      width={340}
+      content={
+        <VStack gap={4} padding={4}>
+          <VStack gap={2}>
+            <Text type="label" weight="semibold">切换到</Text>
+            {views.length === 0
+              ? <Text type="supporting" color="secondary">还没有可用的视图。</Text>
+              : views.map((view) => (
+                <HStack key={view.id} gap={2} vAlign="center" wrap="wrap">
+                  <Button
+                    label={view.name}
+                    variant="ghost"
+                    onClick={() => { onApply(view.snapshot); setOpen(false); }}
+                  />
+                  {view.isBuiltIn
+                    ? <Badge variant="info" label="内置" />
+                    : (
+                      <Button
+                        label="删除"
+                        variant="ghost"
+                        onClick={() => onDelete(view.id)}
+                      />
+                    )}
+                </HStack>
+              ))}
+          </VStack>
+          <Divider />
+          <VStack gap={2}>
+            <Text type="label" weight="semibold">把当前现场存成新视图</Text>
+            <Text type="supporting" color="secondary">
+              会记下当前的筛选条件、排序、分组和列显隐；存在这台浏览器的 localStorage 里，
+              换机器不会带过去。
+            </Text>
+            <TextInput
+              label="视图名"
+              value={draftName}
+              placeholder="例如：昨晚那批失败"
+              onChange={setDraftName}
+            />
+            <HStack gap={2} wrap="wrap">
+              <Button
+                label="保存"
+                variant="primary"
+                isDisabled={draftName.trim() === ''}
+                onClick={save}
+              />
+            </HStack>
+          </VStack>
+        </VStack>
+      }
+    >
+      <Button label="视图" variant="secondary" />
+    </Popover>
+  );
+}
+
+/**
+ * 分组字段选择（第 5 项）。默认「不分组」，它是列表里的第一项而不是一个"关闭"按钮——
+ * 三选一（不分组 / 按工具 / 按连接）用一组单选比"一个开关加一个下拉"少一层状态。
+ *
+ * RadioList 要求 name：一页可能有多张表各带一个分组选择器，name 撞了之后
+ * 原生 radio 的分组语义会把两张表的选项串成一组（点这张表的选项会取消另一张表的）。
+ * 所以 name 里带表名。
+ */
+function GroupByControl({ fields, value, onChange, title }) {
+  const [isOpen, setOpen] = useState(false);
+  const current = value ?? '';
+  const currentLabel = fields.find((f) => f.key === value)?.label;
+
+  return (
+    <Popover
+      isOpen={isOpen}
+      onOpenChange={setOpen}
+      label={`${title} 的分组方式`}
+      placement="below"
+      width={300}
+      content={
+        <VStack gap={3} padding={4}>
+          <RadioList
+            name={`group-by-${title}`}
+            label="按什么分组"
+            value={current}
+            onChange={(next) => { onChange(next === '' ? null : next); setOpen(false); }}
+          >
+            <RadioListItem value="" label="不分组" description="默认。按当前排序平铺。" />
+            {fields.map((f) => (
+              <RadioListItem
+                key={f.key}
+                value={f.key}
+                label={`按${f.label}`}
+                description="组头显示该组条数，点组头折叠。"
+              />
+            ))}
+          </RadioList>
+          <Text type="supporting" color="secondary">
+            分组作用在<b>当前这一页</b>的行上（顺序是：筛选 → 排序 → 按组值重排 → 切页 → 分组），
+            所以每一页各自成组，组头里的条数是本页该组的条数。
+          </Text>
+        </VStack>
+      }
+    >
+      <Button
+        label={currentLabel ? `分组：${currentLabel}` : '分组'}
+        variant="secondary"
+      />
+    </Popover>
+  );
+}
+
+/**
+ * 列显隐（第 4 项）。
+ *
+ * 用 CheckboxList 的 collection 模式（value/onChange 收一个 string[]），
+ * 直接对上 useTableColumnSettingsState.setActiveColumnKeys —— 它的 .d.ts 里明确写了
+ * 这个方法「Useful as an onChange handler for any list-based column picker」，
+ * 而且会强制保留 isAlwaysVisible 的列（所以不需要在这里再挡一次）。
+ *
+ * 「恢复默认」同时清列显隐和列宽：这两件事在用户眼里是一件事（"把这张表恢复原样"），
+ * 分成两个按钮的话，只点一个的人会以为没生效。
+ */
+function ColumnSettingsControl({
+  options,
+  activeKeys,
+  onChange,
+  onShowAll,
+  onReset,
+  hasCustomWidths,
+  title,
+}) {
+  const [isOpen, setOpen] = useState(false);
+  const hiddenCount = options.length - activeKeys.length;
+
+  return (
+    <Popover
+      isOpen={isOpen}
+      onOpenChange={setOpen}
+      label={`${title} 的列设置`}
+      placement="below"
+      width={300}
+      content={
+        <VStack gap={3} padding={4}>
+          <CheckboxList
+            label="显示哪些列"
+            description="第一列锁定，不能隐藏。拖列边可以调宽度。"
+            value={[...activeKeys]}
+            onChange={onChange}
+          >
+            {options.map((opt) => (
+              <CheckboxListItem
+                key={opt.key}
+                value={opt.key}
+                label={opt.label}
+                isDisabled={opt.isAlwaysVisible}
+                description={opt.isAlwaysVisible ? '始终显示' : undefined}
+              />
+            ))}
+          </CheckboxList>
+          <HStack gap={2} wrap="wrap">
+            <Button label="全选" variant="ghost" onClick={onShowAll} />
+            <Button label="恢复默认" variant="ghost" onClick={onReset} />
+          </HStack>
+          <Text type="supporting" color="secondary">
+            {'列显隐与列宽按表分别记在这台浏览器的 localStorage 里'}
+            {hasCustomWidths ? '（当前有自定义列宽）' : ''}
+            {'；「恢复默认」会同时清掉这张表的列显隐与列宽。'}
+          </Text>
+        </VStack>
+      }
+    >
+      <Button
+        label={hiddenCount > 0 ? `列（隐藏 ${hiddenCount}）` : '列'}
+        variant="secondary"
+      />
+    </Popover>
+  );
+}
+
+/**
+ * 带搜索 / 排序 / 过滤 / 分组 / 分页 / 列显隐 / 行详情 / CSV 导出的表格分区。
  *
  * ── 三条过滤链路合并成一条 ──
  * 页面上有两个入口（顶部 PowerSearch 的 token、表头漏斗），但底下只有一个引擎：
@@ -901,9 +1251,12 @@ function useRowInteractionPlugin({ getRowKey, selectedKey, onSelect, getRowTone 
  * 官方文档管这个叫 "define filters once, apply everywhere"——照做的好处很实际：
  * 两个入口对"contains 是不是区分大小写"这类问题不可能给出不同答案。
  *
- * ── 顺序：先过滤再排序 ──
- * 反过来（先排序再过滤）结果一样但白排了一遍被过滤掉的行。数据量小无所谓，
- * 写成正确的顺序是因为 limit 可以调到 500。
+ * ── 数据流的顺序（这一版新增了两步，顺序是有讲究的）──
+ *   全量 → 合成全文字段 → 过滤 → 排序 → 按组值稳定重排 → 切页 → 分组
+ * 「先过滤再排序」：反过来结果一样但白排了一遍被过滤掉的行（limit 可以调到 500）。
+ * 「排序之后才按组值重排」：见 groupOrdered 那段，Array.sort 的稳定性让组内保持用户的排序。
+ * 「切页在分组之前」：useTableGroupedRows 的文档要求的顺序（filter, sort, slice, then group），
+ * 反过来会让组头被切到别的页去。
  *
  * ── 为什么没有 comparators 这个 prop ──
  * 一开始每个 panel 都给数值列写了 `(a,b) => Number(a.x) - Number(b.x)`，读了
@@ -914,8 +1267,14 @@ function useRowInteractionPlugin({ getRowKey, selectedKey, onSelect, getRowTone 
  * 再把这个 prop 加回来，现在没有这种列。
  *
  * ── 必须由调用方以模块级常量传入的 props ──
- * columns / searchFields / defaultSort：它们全都进了 memo 的依赖，
+ * columns / searchFields / defaultSort / groupFields：它们全都进了 memo 的依赖，
  * 在渲染里现造对象等于每次渲染都重算一遍全部过滤和排序。
+ *
+ * ── searchName 兼作表标识 ──
+ * 它本来就每张表唯一（'audit-logs' / 'slow-queries' / 'sql-patterns' …），
+ * 于是列显隐、列宽、保存的视图三处的 localStorage key，以及 hash 里 row 的表前缀，
+ * 全部用它。<b>改一个表的 searchName 等于让那张表的用户设置全部失效</b>（不报错，
+ * 只是回到默认），所以别为了"名字更好看"去改它。
  */
 export function InteractiveTable({
   title,
@@ -935,7 +1294,10 @@ export function InteractiveTable({
   emptyDescription,
   beforeTable,
   extraActions,
+  /** 可分组的字段，形如 [{key:'tool', label:'工具名'}]。不传就没有分组 UI。 */
+  groupFields,
 }) {
+  const tableId = searchName;
   const all = useMemo(() => (Array.isArray(rows) ? rows : []), [rows]);
 
   // ── 搜索配置 ──
@@ -952,8 +1314,33 @@ export function InteractiveTable({
   const searchHandleRef = useRef(null);
   useEffect(() => registerSearchHandle(searchHandleRef), []);
 
-  // ── 表头过滤 ──
-  const { filters: columnFilters, onFilterChange, clearAll } = useTableFilterState();
+  /*
+   * ── 表头过滤 ──
+   *
+   * 刻意<b>不</b>用 core 的 useTableFilterState，改成自己拿 useState。
+   * 理由只有一个而且很硬：useTableFilterState 只暴露 {filters, onFilterChange, clearAll}，
+   * 没有整体 setter（见它的 .d.ts）。而第 6 项「保存的视图」要做的事就是把一整份
+   * filters 恢复回去——用 onFilterChange 逐个键调用能凑出来，但那是 N 次 setState，
+   * 中间态会各触发一次全量过滤，而且删键（value=null）和加键的顺序还得自己排。
+   * useTableFilterState 自己的文档说它是「useState 加一个类型正确的 onFilterChange 的
+   * 便利封装」，所以这里不是绕过什么机制，就是把那层便利自己写一遍、多给一个 setter。
+   */
+  const [columnFilters, setColumnFilters] = useState(EMPTY_COLUMN_FILTERS);
+  const onFilterChange = useCallback((key, value) => {
+    setColumnFilters((prev) => {
+      const next = { ...prev };
+      if (value === null || value === undefined) {
+        /* 删键而不是留一个 null：hasColumnFilter 和快照序列化都按"键存在即有过滤"读，
+           留 null 会让「清掉了这一列」显示成「还有筛选」。 */
+        delete next[key];
+      } else {
+        next[key] = value;
+      }
+      return next;
+    });
+  }, []);
+  const clearAllColumnFilters = useCallback(() => setColumnFilters(EMPTY_COLUMN_FILTERS), []);
+
   const filterPlugin = useTableFiltering({
     filters: columnFilters,
     onFilterChange,
@@ -973,40 +1360,313 @@ export function InteractiveTable({
     ),
     [applyFilters, searchFilters, columnFilters, columns, config, searchable],
   );
+  /*
+   * 排序也改成<b>受控</b>（sort + onSortChange），而不是原来的 defaultSort 非受控模式。
+   * 同样是第 6 项要求的：快照要能把排序存下来再恢复，非受控模式下外面拿不到也改不了它。
+   * defaultSort 现在当受控 state 的初值用——各 panel 传进来的仍是模块级常量，
+   * 所以 useState 的惰性初值只在挂载时取一次，语义没变。
+   */
+  const [sortState, setSortState] = useState(() => defaultSort ?? EMPTY_SORT);
   const { sortedData, sortConfig } = useTableSortableState({
     data: filtered,
-    defaultSort,
+    sort: sortState,
+    onSortChange: setSortState,
   });
   const sortPlugin = useTableSortable(sortConfig);
 
-  // ── 行详情 ──
-  const [selectedKey, setSelectedKey] = useState(null);
+  // ── 分组（第 5 项）──
+  /*
+   * 默认不分组（groupKey = null）。分组是一个"我现在想按工具看"的临时视角，
+   * 默认打开会让第一眼看到的不是最新的记录而是一堆组头。
+   * groupFields 没传（大多数表）时下面这些全是空转，UI 也不出现。
+   */
+  const [groupKey, setGroupKey] = useState(null);
+  const [collapsedGroups, setCollapsedGroups] = useState(EMPTY_COLLAPSED);
+  const onToggleGroup = useCallback((key) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const groupBy = useCallback(
+    (row) => (groupKey ? groupValueOf(row, groupKey) : ''),
+    [groupKey],
+  );
+
+  /*
+   * 分组打开时，先按组值做一次<b>稳定</b>重排。
+   *
+   * useTableGroupedRows 的文档明确写了这个要求：「grouping runs on the rows it is handed,
+   * so the order is filter, sort, slice, then group」，并且要求先按组键排、再按用户的键排
+   * （相当于后端的 ORDER BY group, sort）。不这么做的话，同一个组的行不连续，
+   * 每一页都会撒着好几个组头，翻页时组头还会重复出现。
+   *
+   * 这里没有"先按组再按用户键"地重写比较器，而是在<b>已经排好序</b>的 sortedData 上
+   * 只按组值再排一次 —— Array.prototype.sort 在 ES2019 起保证稳定，
+   * 所以组内顺序就是用户选的排序。少写一个双键比较器，结果一样。
+   */
+  const groupOrdered = useMemo(() => {
+    if (!groupKey) {
+      return sortedData;
+    }
+    const collator = new Intl.Collator(undefined, { numeric: true });
+    return [...sortedData].sort(
+      (a, b) => collator.compare(groupValueOf(a, groupKey), groupValueOf(b, groupKey)),
+    );
+  }, [sortedData, groupKey]);
+
+  // ── 分页（第 3 项）──
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+  const totalItems = groupOrdered.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  /*
+   * 当前页夹到 [1, totalPages]。
+   *
+   * 必须有：在第 8 页上加一个筛选条件把结果砍到 12 行，page 还是 8，
+   * paginateData 会切出一个空数组——页面变成"没有命中任何行"，而实际上有 12 行。
+   * 这是分页最常见的一个 bug，而且它长得和"筛过头了"一模一样。
+   *
+   * 夹取在渲染期算（safePage），回写 state 放在 effect 里：渲染期 setState 会多一次
+   * 渲染，而且 React 会警告。
+   */
+  const safePage = Math.min(Math.max(page, 1), totalPages);
+  useEffect(() => {
+    if (page !== safePage) {
+      setPage(safePage);
+    }
+  }, [page, safePage]);
+
+  const pageRows = useMemo(
+    () => paginateData(groupOrdered, safePage, pageSize),
+    [groupOrdered, safePage, pageSize],
+  );
+
+  const paginationPlugin = useTablePagination({
+    page: safePage,
+    onPageChange: setPage,
+    totalItems,
+    pageSize,
+    onPageSizeChange: (next) => {
+      setPageSize(next);
+      /* 换每页条数就回到第一页：不回的话「第 8 页」在新的条数下指向的是完全不同的数据，
+         用户以为自己只改了密度。 */
+      setPage(1);
+    },
+    pageSizeOptions: PAGE_SIZE_OPTIONS,
+    variant: 'pages',
+    position: 'below',
+    align: 'start',
+    /* label 带上表名：性能页有两张 InteractiveTable，两个 nav landmark 同名的话
+       屏幕阅读器读出来分不清是哪张表的分页。 */
+    label: `${title} 分页`,
+    /* 刻意不传 size：那是控件高度（sm/md）不是字号，口径同 ExportCsvButton 的说明。 */
+  });
+
+  /* 分组之后再交给 Table。不分组时不喂数据给这个 hook（hook 不能有条件地调）。 */
+  const grouped = useTableGroupedRows({
+    data: groupKey ? pageRows : EMPTY_ROWS,
+    groupBy,
+    collapsedGroups,
+    onToggleGroup,
+    getRowKey,
+    renderGroupHeader: renderGroupHeaderContent,
+  });
+
+  // ── 列显隐 + 列宽持久化（第 4 项）──
+  const columnOptions = useMemo(
+    () => columns.map((col, index) => ({
+      key: col.key,
+      label: col.header ?? col.key,
+      /* 第一列锁死不可隐藏：全部列都能关掉的话，用户可以把表变成一张空白，
+         而且下一次打开还是空白（状态是持久化的）——那种状态看不出是自己造成的。
+         第一列在各表都是主键或时间，恰好也是最该留着的那一列。 */
+      isAlwaysVisible: index === 0,
+    })),
+    [columns],
+  );
+  const defaultColumnKeys = useMemo(() => columns.map((col) => col.key), [columns]);
+
+  /*
+   * 列显隐按<b>表</b>持久化，key 里带表标识（dbmcp-ui:cols:<searchName>）。
+   * 全局一份的后果：在审计流水里藏掉 SQL 列，慢查询的 SQL 列也跟着消失——
+   * 两张表的列集合本来就不同，这种串味没有任何合理解释。
+   *
+   * 校验函数把存下来的键和当前列定义对一遍：列被改名/删掉之后，
+   * 一个不存在的 key 塞给 Table 会渲染出一列空白，而且不报错。
+   */
+  const validateColumnKeys = useCallback(
+    (stored) => {
+      if (!Array.isArray(stored)) {
+        return null;
+      }
+      const known = new Set(defaultColumnKeys);
+      const kept = stored.filter((k) => typeof k === 'string' && known.has(k));
+      const always = columnOptions.filter((o) => o.isAlwaysVisible).map((o) => o.key);
+      for (const key of always) {
+        if (!kept.includes(key)) {
+          kept.unshift(key);
+        }
+      }
+      return kept.length > 0 ? kept : null;
+    },
+    [defaultColumnKeys, columnOptions],
+  );
+  const [activeColumnKeys, setActiveColumnKeys, resetColumnKeys] = usePersistentState(
+    tableStorageKey('cols', tableId),
+    defaultColumnKeys,
+    validateColumnKeys,
+  );
+
+  const columnSettingsState = useTableColumnSettingsState({
+    columns: columnOptions,
+    activeColumnKeys,
+    onChangeActiveColumnKeys: setActiveColumnKeys,
+    defaultColumnKeys,
+  });
+  const columnSettingsPlugin = useTableColumnSettings(
+    columnSettingsState.columnSettingsConfig,
+  );
+
+  /** 当前可见的列，按 activeColumnKeys 的顺序。CSV 导出和列宽插件都要它。 */
+  const visibleColumns = useMemo(
+    () => activeColumnKeys
+      .map((key) => columns.find((col) => col.key === key))
+      .filter(Boolean),
+    [activeColumnKeys, columns],
+  );
+
+  /*
+   * 列宽同样按表持久化。
+   *
+   * useTableColumnResize 是受控的：columnWidths 由我们拿着，它只在拖完
+   * （pointerup / Enter）时通过 onColumnResizeEnd 回吐一批更新。那一批里除了被拖的列，
+   * 还包含"为了避免布局跳动被一起固化成像素宽"的邻居列——所以是 merge 而不是覆盖。
+   *
+   * columns 传的是 visibleColumns 而不是全量：这个 prop 是用来推每列的最小宽度、
+   * 并判断哪些列是 proportional 的（最后一个 proportional 列没有拖拽手柄）。
+   * 喂全量的话，被隐藏的列会参与"最后一个 proportional 列是谁"的判断，算出来的是错的。
+   */
+  const validateColumnWidths = useCallback(
+    (stored) => {
+      if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+        return null;
+      }
+      const known = new Set(defaultColumnKeys);
+      const out = {};
+      for (const [key, value] of Object.entries(stored)) {
+        if (known.has(key) && Number.isFinite(value) && value > 0) {
+          out[key] = value;
+        }
+      }
+      return out;
+    },
+    [defaultColumnKeys],
+  );
+  const [columnWidths, setColumnWidths, resetColumnWidths] = usePersistentState(
+    tableStorageKey('colw', tableId),
+    EMPTY_COLUMN_WIDTHS,
+    validateColumnWidths,
+  );
+  const onColumnResizeEnd = useCallback(
+    (updates) => setColumnWidths((prev) => ({ ...prev, ...updates })),
+    [setColumnWidths],
+  );
+  const columnResizePlugin = useTableColumnResize({
+    columnWidths,
+    onColumnResizeEnd,
+    columns: visibleColumns,
+  });
+
+  // ── 行详情 + 深链（第 8 项）──
+  /*
+   * 选中的行用一个<b>短引用</b>（rowRef）标识，而不是 getRowKey 的原始返回值。
+   * 原因和取舍写在 hashState.js 的 rowRefFromKey 上方：审计历史的 key 是 "4213"
+   * （原样进 URL），审计流水/慢查询的 key 里含完整 SQL（折成 h:<摘要>）。
+   *
+   * 初值直接从 hash 里读，这就是"刷新后自动展开对应详情面板"的全部实现——
+   * 不需要等数据回来，因为 selectedRef 是一个纯字符串比较的目标，
+   * 数据到位之后下面的 selectedRow 自然就能查到那一行。
+   */
+  const getRowRef = useCallback(
+    (row) => (getRowKey ? rowRefFromKey(getRowKey(row)) : null),
+    [getRowKey],
+  );
+  const [selectedRef, setSelectedRef] = useState(
+    () => rowKeyForTable(readHashParams().row, tableId),
+  );
+
+  /*
+   * selectedRef → hash。
+   *
+   * ⚠️ 那个 else if 分支不是多余的：一页可能有多张表（性能页两张），
+   * 每张表都会跑这个 effect。如果没选中就无条件写 row:null，
+   * 那么「慢查询表没选中」会把「SQL 模式表刚选中的那一行」从 hash 里抹掉，
+   * 而且两张表会来回抹——刷新后深链永远失效。
+   * 所以只在 hash 里那个 row <b>属于本表</b>时才清它。
+   *
+   * 写入走 hashState.writeHashParams：合并式（不会碰 view / limit）、replaceState
+   * （不触发 hashchange，所以不会反过来触发下面那个监听器）、带相等判断。
+   */
+  useEffect(() => {
+    if (selectedRef) {
+      writeHashParams({ row: encodeRowRef(tableId, selectedRef) });
+    } else if (rowKeyForTable(readHashParams().row, tableId) !== null) {
+      writeHashParams({ row: null });
+    }
+  }, [selectedRef, tableId]);
+
+  /*
+   * hash → selectedRef。手改地址栏、点别人发来的深链（同页内换 row）、前进后退走这条边。
+   * 反方向不会触发它（replaceState 不发 hashchange），所以不会打环。
+   */
+  useEffect(() => {
+    const onHashChange = () => {
+      setSelectedRef(rowKeyForTable(readHashParams().row, tableId));
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, [tableId]);
+
   const selectedRow = useMemo(() => {
-    if (selectedKey == null || !getRowKey) {
+    if (selectedRef == null || !getRowKey) {
       return null;
     }
     /* 在未过滤的全量里回查，而不是在 sortedData 里：面板开着的时候改搜索条件，
-       详情不该跟着消失——运维正在照着它读的那一行，被列表过滤掉不代表他看完了。 */
-    return searchable.find((row) => getRowKey(row) === selectedKey) ?? null;
-  }, [searchable, selectedKey, getRowKey]);
+       详情不该跟着消失——运维正在照着它读的那一行，被列表过滤掉不代表他看完了。
+       分页同理：翻到第 3 页不该把第 1 页打开的那条详情关掉。 */
+    return searchable.find((row) => getRowRef(row) === selectedRef) ?? null;
+  }, [searchable, selectedRef, getRowKey, getRowRef]);
 
   /* Esc 关面板注册在这里而不是 App：一页多张表时，每张表各自关掉自己的面板，
      语义正好是"关掉打开着的详情面板"。放到 App 反而要维护一份"谁开着"的登记。
      allowInInputs 保持默认 false —— 在搜索框里按 Esc 应该由输入框自己处理
      （清空 / 关下拉），而不是顺带把旁边的面板也关了。 */
-  useHotkeys([{ keys: 'escape', onPress: () => setSelectedKey(null) }]);
+  useHotkeys([{ keys: 'escape', onPress: () => setSelectedRef(null) }]);
 
   const rowPlugin = useRowInteractionPlugin({
-    getRowKey,
-    selectedKey,
-    onSelect: setSelectedKey,
+    getRowRef: getRowKey ? getRowRef : null,
+    selectedRef,
+    onSelect: setSelectedRef,
     getRowTone,
   });
 
   /* useTableRowStatus 的 getStatus 要求 useCallback 包一下才有稳定的 plugin 身份。
-     没有 getRowTone 时也得调这个 hook（hook 不能有条件地调），返回 null 让它不画标记。 */
+     没有 getRowTone 时也得调这个 hook（hook 不能有条件地调），返回 null 让它不画标记。
+     组头行一律返回 null：它没有 success 字段，Proxy 会把它读成 ''，
+     那样每个组头都会被标一个"失败"标记（见 isGroupHeaderRow 上方的说明）。 */
   const getStatus = useCallback(
     (item) => {
+      if (isGroupHeaderRow(item)) {
+        return null;
+      }
       const tone = getRowTone ? getRowTone(item) : null;
       if (tone === 'error') {
         return { status: 'error', label: '失败' };
@@ -1022,53 +1682,199 @@ export function InteractiveTable({
 
   const plugins = useMemo(() => {
     /*
-     * 键名不只是标识，core 会按它<b>重排</b>执行顺序。
+     * 键名不只是标识，core 会按它<b>重排</b>执行顺序。这一段每次加插件都要重新核一遍。
      *
-     * useBaseTablePlugins 里有一份写死的 canonical order：
-     * ['columnSettings','sort','tree','selection','pagination']。不在这份名单里的
-     * 键名（我们的 rowStatus / filter / row 都不在）被追加到已知插件之后，
-     * 彼此之间保持这里的插入顺序。
+     * useBaseTablePlugins 里有一份写死的 canonical order（dist/Table/useBaseTablePlugins.js
+     * 的 PLUGIN_ORDER，逐字核对过）：
+     *     ['columnSettings', 'sort', 'tree', 'selection', 'pagination']
+     * 不在这份名单里的键名被<b>追加到已知插件之后</b>，彼此之间保持这里的插入顺序
+     * （它用的是 Array.prototype.sort，稳定，所以未知插件之间的相对顺序 = 插入顺序）。
      *
-     * 也就是说：想靠"我把 rowStatus 写在第一个"来控制它先跑，是<b>无效</b>的——
-     * sort 会被提到它前面。这里不需要那个顺序（只有 rowStatus 会 transformColumns，
-     * 而 BaseTable 是先跑完所有插件的 transformColumns 再处理表头单元格的），
-     * 所以现状是对的；但如果以后加了第二个会插列的插件，得回来看这一段。
+     * 于是这一版新加的四个插件分两类：
+     * - columnSettings / pagination 在名单里 → 无论写在哪，它们的位置由 core 决定；
+     * - columnResize / grouped 不在名单里 → 排在全部已知插件之后，按下面的插入顺序。
      *
-     * 键名也别乱改：写成 'sorting' 而不是 'sort' 就会掉出 canonical order，
-     * 而且不报错。
+     * 「我写在第一个所以先跑」是<b>无效推理</b>：本文件里 rowStatus 写在最前面，
+     * 实际执行时 columnSettings 和 sort 都在它前面。
+     *
+     * 实际生效的顺序（照 PLUGIN_ORDER + 插入顺序推出来）：
+     *     columnSettings → sort → pagination → rowStatus → filter → row → columnResize → grouped
+     * 这个顺序对本文件是<b>正确的</b>，三处依赖它：
+     * 1. columnSettings.transformColumns 先跑，把隐藏的列滤掉；rowStatus 之后才插它那一列，
+     *    所以状态标记列不会被"不在 activeColumnKeys 里"这条规则误杀。反过来就会被杀掉。
+     * 2. columnResize.transformColumns 在 columnSettings 之后跑，它看到的是已经过滤过的列，
+     *    和我们传给它的 visibleColumns 一致——两边不一致会让"最后一个 proportional 列
+     *    没有拖拽手柄"这条规则作用在错的列上。
+     * 3. grouped.transformBodyRow 最后跑，它要把组头行的单元格整体换成一个通栏单元格；
+     *    排在 row 插件之后，才能盖掉 row 插件给行加的东西（我们另外还在 row 插件里
+     *    显式跳过了组头，两道保险）。
+     *
+     * 键名<b>逐字</b>不能错：写成 'sorting' 而不是 'sort'、'colSettings' 而不是
+     * 'columnSettings'，都会静默掉出 canonical order —— 不报错，只是顺序变了。
      */
     const map = {};
+    map.columnSettings = columnSettingsPlugin;
+    map.sort = sortPlugin;
+    map.pagination = paginationPlugin;
     if (getRowTone) {
       map.rowStatus = rowStatusPlugin;
     }
     map.filter = filterPlugin;
-    map.sort = sortPlugin;
     if (rowPlugin) {
       map.row = rowPlugin;
     }
+    map.columnResize = columnResizePlugin;
+    if (groupKey) {
+      map.grouped = grouped.plugin;
+    }
     return map;
-  }, [getRowTone, rowStatusPlugin, filterPlugin, sortPlugin, rowPlugin]);
+  }, [
+    columnSettingsPlugin,
+    sortPlugin,
+    paginationPlugin,
+    getRowTone,
+    rowStatusPlugin,
+    filterPlugin,
+    rowPlugin,
+    columnResizePlugin,
+    groupKey,
+    grouped.plugin,
+  ]);
 
-  const hasColumnFilter = Object.values(columnFilters).some((v) => v != null);
+  const hasColumnFilter = Object.keys(columnFilters).length > 0;
+  const hasAnyFilter = searchFilters.length > 0 || hasColumnFilter;
+
+  const clearFilters = useCallback(() => {
+    setSearchFilters([]);
+    clearAllColumnFilters();
+    setPage(1);
+  }, [clearAllColumnFilters]);
+
+  // ── 保存的视图（第 6 项）──
+  const [userViews, setUserViews] = useState(() => readUserViews(tableId));
+  const availableFieldKeys = useMemo(
+    () => (searchFields ?? []).map((f) => f.key),
+    [searchFields],
+  );
+  const allViews = useMemo(
+    () => mergeViews(userViews, availableFieldKeys),
+    [userViews, availableFieldKeys],
+  );
+
+  /**
+   * 应用一个快照。四个维度里值为 null 的表示「保持当前不变」——
+   * 内置预设只关心过滤条件，点它不该顺带推翻你刚调好的列显隐（见 savedViews.js）。
+   */
+  const applyView = useCallback((snapshot) => {
+    if (Array.isArray(snapshot.searchFilters)) {
+      setSearchFilters(snapshot.searchFilters);
+    }
+    if (snapshot.columnFilters && typeof snapshot.columnFilters === 'object') {
+      setColumnFilters(snapshot.columnFilters);
+    }
+    if (Array.isArray(snapshot.sort)) {
+      setSortState(snapshot.sort);
+    }
+    if (snapshot.groupBy !== null && snapshot.groupBy !== undefined) {
+      setGroupKey(snapshot.groupBy === '' ? null : snapshot.groupBy);
+    }
+    if (Array.isArray(snapshot.activeColumnKeys)) {
+      setActiveColumnKeys(snapshot.activeColumnKeys);
+    }
+    /* 换视图必回第一页：留在第 5 页上换一套筛选条件，看到的是新结果集的第 5 页，
+       而人的预期是"从头看"。 */
+    setPage(1);
+  }, [setActiveColumnKeys]);
+
+  const saveCurrentAsView = useCallback((name) => {
+    const trimmed = name.trim();
+    if (trimmed === '') {
+      return;
+    }
+    const view = {
+      id: newUserViewId(),
+      name: trimmed,
+      /* 用户存的快照四项都有值（照现状全量记下来），和预设的"部分为 null"不同。
+         这样它恢复出来的是一个确定的现场，而不是"我的几条 AND 你当时的状态"。 */
+      snapshot: {
+        searchFilters,
+        columnFilters,
+        sort: sortState,
+        groupBy: groupKey ?? '',
+        activeColumnKeys: [...activeColumnKeys],
+      },
+    };
+    setUserViews((prev) => {
+      const next = [...prev, view];
+      writeUserViews(tableId, next);
+      return next;
+    });
+  }, [searchFilters, columnFilters, sortState, groupKey, activeColumnKeys, tableId]);
+
+  const deleteUserView = useCallback((id) => {
+    setUserViews((prev) => {
+      const next = prev.filter((v) => v.id !== id);
+      writeUserViews(tableId, next);
+      return next;
+    });
+  }, [tableId]);
+
+  /* 「共 N 条由顶栏条数决定」这句话的数据。见 DEFAULT_PAGE_SIZE 上方那段
+     关于「limit 和分页是两件事」的说明——这句话是那段说明在页面上的落点。 */
+  const rangeStart = totalItems === 0 ? 0 : (safePage - 1) * pageSize + 1;
+  const rangeEnd = Math.min(safePage * pageSize, totalItems);
 
   const table = (
     <Section
       title={title}
       source={source}
-      count={sortedData.length}
+      count={totalItems}
       totalCount={all.length}
       actions={
         <>
           {extraActions}
-          {(searchFilters.length > 0 || hasColumnFilter) && (
-            <Button
-              label="清空筛选"
-              variant="ghost"
-              onClick={() => { setSearchFilters([]); clearAll(); }}
+          <SavedViewsControl
+            views={allViews}
+            onApply={applyView}
+            onSave={saveCurrentAsView}
+            onDelete={deleteUserView}
+            title={title}
+          />
+          {groupFields && groupFields.length > 0 && (
+            <GroupByControl
+              fields={groupFields}
+              value={groupKey}
+              onChange={(next) => {
+                setGroupKey(next);
+                /* 换分组字段就把折叠状态清掉：折叠的键是上一个字段的值，
+                   留着的话新分组里会有几组莫名是折叠的。 */
+                setCollapsedGroups(EMPTY_COLLAPSED);
+                setPage(1);
+              }}
+              title={title}
             />
           )}
+          <ColumnSettingsControl
+            options={columnOptions}
+            activeKeys={activeColumnKeys}
+            onChange={columnSettingsState.setActiveColumnKeys}
+            onShowAll={columnSettingsState.showAllColumns}
+            onReset={() => { resetColumnKeys(); resetColumnWidths(); }}
+            hasCustomWidths={Object.keys(columnWidths).length > 0}
+            title={title}
+          />
+          {hasAnyFilter && (
+            <Button label="清空筛选" variant="ghost" onClick={clearFilters} />
+          )}
           {csvBaseName && (
-            <ExportCsvButton columns={columns} rows={sortedData} baseName={csvBaseName} />
+            /* 导出<b>可见列</b> × <b>筛选后的全部行</b>（不是当前这一页）。
+               两个选择各有理由：列跟着页面走，因为导出的语境是"我看到的这些发给你"；
+               行不跟着页面走，因为翻页只是显示密度，没人会认为"导出"只导这 25 行。 */
+            <ExportCsvButton
+              columns={visibleColumns}
+              rows={groupOrdered}
+              baseName={csvBaseName}
+            />
           )}
         </>
       }
@@ -1079,27 +1885,46 @@ export function InteractiveTable({
           filters={searchFilters}
           /* onChange 的后两个参数（changeType、index）这里用不上：过滤是整体重算的，
              不需要知道是哪一个 token 变了。 */
-          onChange={(next) => setSearchFilters([...next])}
+          onChange={(next) => { setSearchFilters([...next]); setPage(1); }}
           label={`搜索${title}`}
           placeholder={searchPlaceholder}
-          resultCount={`${sortedData.length} 行`}
+          resultCount={`${totalItems} 行`}
           handleRef={searchHandleRef}
         />
         {beforeTable}
         <DataTable
           columns={columns}
-          rows={sortedData}
-          idKey={getRowKey}
+          rows={groupKey ? grouped.data : pageRows}
+          /* 分组打开时用 grouped.idKey：它给合成的组头行发 `__group_<键>` 这样的 key，
+             而 getRowKey 对组头行会算出一串空值拼出来的假 key（Proxy 把未知字段读成 ''），
+             多个组头会撞成同一个 React key。 */
+          idKey={groupKey ? grouped.idKey : getRowKey}
           plugins={plugins}
           emptyTitle={
-            sortedData.length === 0 && all.length > 0 ? '当前筛选条件没有命中任何行' : emptyTitle
+            totalItems === 0 && all.length > 0 ? '当前筛选条件没有命中任何行' : emptyTitle
           }
           emptyDescription={
-            sortedData.length === 0 && all.length > 0
+            totalItems === 0 && all.length > 0
               ? '清空筛选可以看到全部 ' + all.length + ' 行。'
               : emptyDescription
           }
         />
+        {/*
+          分页与「条数」的关系说明。位置在表格之后、紧贴分页控件
+          （分页控件由 pagination 插件渲染在 Table 内部的下方）。
+
+          这句话不是可选的补充说明：不写的话，翻到最后一页的人会认为自己看完了
+          全部数据，而实际上他看完的是「后端按顶栏条数返回的这一批」的最后一页。
+          这个误读会直接导致错误结论（"审计里没有这条记录" ≠ "这条记录不存在"）。
+        */}
+        {totalItems > 0 && (
+          <Text type="supporting" color="secondary">
+            {`本页显示第 ${rangeStart}–${rangeEnd} 行，共 ${totalItems} 行`}
+            {hasAnyFilter ? `（已按筛选条件从 ${all.length} 行里筛出）` : ''}
+            {` · 这 ${all.length} 行是后端按顶栏「条数」返回的一批，`}
+            {'翻到最后一页不等于看完了全部数据；要看更多请调大顶栏的条数。'}
+          </Text>
+        )}
       </VStack>
     </Section>
   );
@@ -1120,7 +1945,7 @@ export function InteractiveTable({
                 label="关闭"
                 variant="ghost"
                 tooltip="Esc"
-                onClick={() => setSelectedKey(null)}
+                onClick={() => setSelectedRef(null)}
               />
             </HStack>
             <Divider />

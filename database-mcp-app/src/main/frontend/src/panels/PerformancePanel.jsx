@@ -62,6 +62,18 @@ const SLOW_DEFAULT_SORT = [{ sortKey: 'durationMs', direction: 'descending' }];
 
 const SLOW_ROW_KEY = contentRowKey(['timestamp', 'tool', 'sql', 'durationMs']);
 
+/*
+ * 慢查询表可分组的字段（第 5 项）。
+ *
+ * 只给慢查询表，<b>不给</b> SQL 模式表：模式表的每一行本身就已经是按 SQL 模式归并过的
+ * 汇总行，再分一次组等于每行一个组头；而它也没有 tool / connectionKey 两列
+ * （端点返回的 patterns 块里没有这两个字段），分组选项会是两个筛不出东西的死选项。
+ */
+const SLOW_GROUP_FIELDS = [
+  { key: 'tool', label: '工具名' },
+  { key: 'connectionKey', label: '连接名' },
+];
+
 const PATTERN_COLUMNS = [
   sqlColumn('pattern', 'SQL 模式', { flex: 3, filter: 'pattern' }),
   numberColumn('count', '次数', { px: 80 }),
@@ -196,6 +208,7 @@ export default function PerformancePanel({ limit, refreshToken }) {
         defaultSort={SLOW_DEFAULT_SORT}
         getRowKey={SLOW_ROW_KEY}
         getRowTone={slowTone}
+        groupFields={SLOW_GROUP_FIELDS}
         detailTitle="慢查询详情"
         detailSqlKey="sql"
         csvBaseName="slow-queries"

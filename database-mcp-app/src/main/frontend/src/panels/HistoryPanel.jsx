@@ -61,6 +61,17 @@ const SEARCH_FIELDS = [
 /** id 倒序 = 写入顺序倒序，比 timestamp 倒序更确定（同毫秒的多条记录也能定序）。 */
 const DEFAULT_SORT = [{ sortKey: 'id', direction: 'descending' }];
 
+/*
+ * 可分组的字段（第 5 项）。和审计流水页给的是同两个字段，理由也一样：
+ * 它们是这张表上唯一「同一个值会重复很多行」的列。
+ * 两个 panel 各写一份而不是共享一个常量，和 COLUMNS 不共享是同一个理由
+ * （见文件顶部）：两张表的字段集合本来就不完全相同，共享会掩盖差别。
+ */
+const GROUP_FIELDS = [
+  { key: 'tool', label: '工具名' },
+  { key: 'connectionKey', label: '连接名' },
+];
+
 /** 有主键就用主键。内容拼出来的 key 只是没有主键时的替代品。 */
 const ROW_KEY = (row) => String(row.id);
 
@@ -132,6 +143,7 @@ export default function HistoryPanel({ limit, refreshToken, auditPersistence }) 
           defaultSort={DEFAULT_SORT}
           getRowKey={ROW_KEY}
           getRowTone={rowTone}
+          groupFields={GROUP_FIELDS}
           detailTitle="审计表记录详情"
           detailSqlKey="sql"
           csvBaseName="audit-history"

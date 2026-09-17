@@ -79,6 +79,21 @@ const SEARCH_FIELDS = [
 const DEFAULT_SORT = [{ sortKey: 'timestamp', direction: 'descending' }];
 
 /*
+ * 可分组的字段（第 5 项）。默认不分组，选了才折叠。
+ *
+ * 只给这两个：它们是这张表上唯一「同一个值会重复很多行」的列——按工具分组回答
+ * "是哪个工具在刷"，按连接分组回答"是哪个库在被打"。
+ * 按 SQL 分组没有意义（几乎每行一个值，等于每行一个组头），按耗时更没有。
+ *
+ * 和 COLUMNS / SEARCH_FIELDS 一样必须是模块级常量：它进了 InteractiveTable 的
+ * memo 依赖，在渲染里现造数组会让分组和分页每次渲染都重算。
+ */
+const GROUP_FIELDS = [
+  { key: 'tool', label: '工具名' },
+  { key: 'connectionKey', label: '连接名' },
+];
+
+/*
  * 行标识。必须只依赖内容、不能用下标——详情面板是按这个 key 回查行的，
  * 而下标在排序/过滤之后就变了（排一次序，面板会指向另一行）。
  * 环形缓冲没有 id，所以用「时间 + 工具 + SQL + 耗时」这四个的组合；
@@ -149,6 +164,7 @@ export default function AuditPanel({ limit, refreshToken }) {
         defaultSort={DEFAULT_SORT}
         getRowKey={ROW_KEY}
         getRowTone={rowTone}
+        groupFields={GROUP_FIELDS}
         detailTitle="审计记录详情"
         detailSqlKey="sql"
         csvBaseName="audit-logs"

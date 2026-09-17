@@ -11,11 +11,14 @@
  * 刻意没用模板里的这些东西：
  * - 图标（模板用 @heroicons/react）：没装，而且为了几个装饰性图标引一个图标库不值得。
  *   SideNavItem 的 icon 是可选的，省掉之后就是纯文字导航。
- * - CommandPalette（shell-nav 里的 ⌘K 搜索）：八个视图，1–8 直接切比搜索快。
+ * - CommandPalette（shell-nav 里的 ⌘K 搜索）：视图从 8 个涨到 16 个之后这条重新想过一遍。
+ *   还是不加：16 项分成四组之后，「我要找的东西在哪一组」是扫一眼就能完成的，
+ *   而 CommandPalette 要求先想起视图叫什么再打字。真正的分界线是「组数多到扫不完」，
+ *   四组还差得远。前 9 项另有数字键（见 HOTKEY_VIEW_COUNT）。
  * - 图表（dashboard-alert-rail 的 Sparkline / MetricChart）：那些底下是 recharts，没装。
  *   性能页那条折线是手写 SVG（见 components.jsx 的 Sparkline）。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppShell,
   Banner,
@@ -27,10 +30,13 @@ import {
   LayoutContent,
   LayoutHeader,
   NumberInput,
+  SegmentedControl,
+  SegmentedControlItem,
   SideNav,
   SideNavHeading,
   SideNavItem,
   SideNavSection,
+  Skeleton,
   StatusDot,
   Switch,
   Text,
@@ -40,56 +46,185 @@ import {
   useHotkeys,
 } from '@astryxdesign/core';
 import { FALLBACK_MAX_LIMIT, fetchConfig } from './api.js';
-import { focusFirstSearch } from './components.jsx';
-import AuditPanel from './panels/AuditPanel.jsx';
-import HistoryPanel from './panels/HistoryPanel.jsx';
-import ConnectionsPanel from './panels/ConnectionsPanel.jsx';
-import PerformancePanel from './panels/PerformancePanel.jsx';
-import ReportsPanel from './panels/ReportsPanel.jsx';
-import DbaPanel from './panels/DbaPanel.jsx';
-import ToolsPanel from './panels/ToolsPanel.jsx';
-import InfoPanel from './panels/InfoPanel.jsx';
+/* 刻意从 ./searchFocus.js 而不是 ./components.jsx 取：后者会把 370 KB 的显示件
+   连带一大片 core 拉进入口的静态依赖图（Vite 会给它加 modulepreload），
+   视图级懒加载就白做了。理由写在 searchFocus.js 的头注释里。 */
+import { focusFirstSearch } from './searchFocus.js';
+import { readHashParams, writeHashParams } from './hashState.js';
+import { DiagnosticBundleButton } from './diagnostics.jsx';
+import {
+  COLOR_MODES,
+  applyColorMode,
+  readStoredColorMode,
+  storeColorMode,
+} from './colorMode.js';
 
 /*
- * 侧栏顺序 = 使用频率，不是端点的字母序，也不是它们被实现的顺序。
+ * ── 视图级懒加载 ──
  *
- * 前四项是「值班时反复刷的」：出了事先看流水与性能。中间两项是「查一次就走的」——审计报告
- * 是按窗口出的合规快照，DBA 视图更是要手点才发请求。最后两项（工具清单、服务信息）是
- * 「一套部署上线时确认一次，之后基本不看」的静态事实，放最底下。
+ * 16 个视图静态 import 的结果是一个 983,481 B 的主 chunk：打开「审计流水」的人也要
+ * 先下载 SQL 体检、血缘、DBA、CDC 那几页的代码。这些页彼此没有共用逻辑（共用的部分
+ * 在 components.jsx / api.js，会被提到公共 chunk 里），所以按视图切分是干净的切法。
  *
- * 这个顺序同时也是数字快捷键 1–8 的顺序（见下面的 useHotkeys）：两者必须是同一份数组，
- * 写成两份的话加一个视图就会让快捷键和侧栏错位一格，而且错位不报错。
+ * 用 React.lazy 而不是自己写动态 import + state：lazy 的 promise 结果被它自己缓存，
+ * 切走再切回不会重新发请求，而手写那版要自己维护一份「已加载过哪些」的登记。
+ *
+ * ⚠️ 与 WebUiTest 的关系（重要，别误判）：
+ * WebUiTest.hashedAssetsReferencedByIndexHtmlAreRetrievable 是从 index.html 的正文里
+ * 正则抠 `/assets/...` 再逐个请求。懒加载切出来的 chunk <b>不会</b>被 index.html 引用
+ * （它们由主 chunk 在运行期 import()），所以那个测试不会请求它们 —— 测试仍然过，
+ * 但也意味着它<b>覆盖不到</b>「懒加载 chunk 是否真的可取回」。
+ * SecurityConfig 的白名单是 `/assets/**` 通配，所以取回这件事在鉴权层面是成立的；
+ * 产物是否真的落盘则要在构建后自己数一遍 target/classes/static/assets/。
+ * 不要为此改测试：那个测试断言的契约（index.html 引用的都取得到）本身是对的。
+ */
+const PANELS = {
+  audit: lazy(() => import('./panels/AuditPanel.jsx')),
+  history: lazy(() => import('./panels/HistoryPanel.jsx')),
+  reports: lazy(() => import('./panels/ReportsPanel.jsx')),
+  connections: lazy(() => import('./panels/ConnectionsPanel.jsx')),
+  performance: lazy(() => import('./panels/PerformancePanel.jsx')),
+  info: lazy(() => import('./panels/InfoPanel.jsx')),
+  tools: lazy(() => import('./panels/ToolsPanel.jsx')),
+  schema: lazy(() => import('./panels/SchemaPanel.jsx')),
+  catalog: lazy(() => import('./panels/CatalogPanel.jsx')),
+  lineage: lazy(() => import('./panels/LineagePanel.jsx')),
+  quality: lazy(() => import('./panels/QualityPanel.jsx')),
+  sql: lazy(() => import('./panels/SqlDoctorPanel.jsx')),
+  dba: lazy(() => import('./panels/DbaPanel.jsx')),
+  cdc: lazy(() => import('./panels/CdcPanel.jsx')),
+  backups: lazy(() => import('./panels/BackupsPanel.jsx')),
+  jobs: lazy(() => import('./panels/JobsPanel.jsx')),
+};
+
+/*
+ * 导航数据源。
+ *
+ * ── 为什么从平铺的 8 项改成 4 组 16 项 ──
+ * 视图数翻倍之后，平铺的侧栏是一列 16 个等重的名字，从中找一个要逐行读。分组之后
+ * 「我要找的东西大概在哪一组」这一步用扫的就能完成，只在组内才需要读名字。
+ * 分组用 SideNavSection（它有 title 与 isHeaderHidden），而不是自己画一行标题：
+ * 它会给这一组挂 role="group" + aria-labelledby，屏幕阅读器读得出组名。
+ *
+ * 分组的判据是「什么时候会打开它」，不是端点的字母序也不是它们被实现的顺序：
+ * - 审计：出了事第一时间看的三页；
+ * - 运行状态：进程自己的状态，不连业务库，随时可看；
+ * - 库与资产：对着某个库问"它长什么样"，每一页都会真的读那个库；
+ * - 诊断与运维：拿着一个具体问题（一条慢 SQL、一次备份、一个作业）去查的那些页。
+ *
+ * ── 结构：分组数组 + 从它推导的平铺数组 ──
+ * VIEWS 由 VIEW_GROUPS 摊平得来，而不是两份各自维护。快捷键、hash 校验、当前视图的
+ * 标题查找全部走 VIEWS，侧栏走 VIEW_GROUPS —— 只有一份顺序，加一个视图只改一处。
+ * 写成两份的话，加一个视图就会让快捷键和侧栏错位一格，而且错位不报错。
  *
  * hint 一句话必须同时说清「数据从哪来」和「有什么约束」：导航项被点开之前，这句话是运维
- * 判断「我要找的东西在不在这一页」的唯一依据。只写标题的话，「审计流水」和「审计历史」
- * 从名字上分不出哪个重启后还在。
+ * 判断「我要找的东西在不在这一页」的唯一依据。16 项之后这件事比 8 项时更重要 ——
+ * 「数据资产」和「数据质量」从名字上分不出哪个会扫全库。
  */
-const VIEWS = [
-  { value: 'audit', label: '审计流水', hint: '进程内环形缓冲，重启即清空' },
-  { value: 'history', label: '审计历史', hint: '审计表，需配 spring.datasource.url' },
-  { value: 'connections', label: '连接与连接池', hint: '已注册连接与 HikariCP 池状态' },
-  { value: 'performance', label: '性能', hint: '慢查询原文与 SQL 模式统计' },
+const VIEW_GROUPS = [
   {
-    value: 'reports',
-    label: '审计报告',
-    hint: '按时间窗出的合规报告；审计未落库时两份报告是 skipped 而不是错误',
+    title: '审计',
+    views: [
+      { value: 'audit', label: '审计流水', hint: '进程内环形缓冲，重启即清空' },
+      { value: 'history', label: '审计历史', hint: '审计表，需配 spring.datasource.url' },
+      {
+        value: 'reports',
+        label: '审计报告',
+        hint: '按时间窗出的合规报告；审计未落库时两份报告是 skipped 而不是错误',
+      },
+    ],
   },
   {
-    value: 'dba',
-    label: 'DBA 视图',
-    hint: '唯一会真的连业务库执行查询的一页，默认不自动查，多数视图只有 Oracle 有',
+    title: '运行状态',
+    views: [
+      { value: 'connections', label: '连接与连接池', hint: '已注册连接与 HikariCP 池状态' },
+      { value: 'performance', label: '性能', hint: '慢查询原文与 SQL 模式统计' },
+      {
+        value: 'info',
+        label: '服务信息',
+        hint: '版本、profile、四个生效开关；版本来自打包期的 pom，不是 build-info',
+      },
+      {
+        value: 'tools',
+        label: '工具清单',
+        hint: '已暴露的 MCP 工具目录，只有名字/分组/摘要，没有入参 schema',
+      },
+    ],
   },
   {
-    value: 'tools',
-    label: '工具清单',
-    hint: '已暴露的 MCP 工具目录，只有名字/分组/摘要，没有入参 schema',
+    title: '库与资产',
+    views: [
+      {
+        value: 'schema',
+        label: 'Schema 浏览',
+        hint: '表/视图/序列/索引/表结构，会真的读业务库的数据字典，默认不自动查',
+      },
+      {
+        value: 'catalog',
+        label: '数据资产',
+        hint: '目录扫描与敏感列推断（按命名规则，不看数据）；扫全 Schema 是全站最慢的操作',
+      },
+      {
+        value: 'lineage',
+        label: '血缘',
+        hint: '只从外键现算，没有外键的库永远是空图；空图的三种原因页面上有列',
+      },
+      {
+        value: 'quality',
+        label: '数据质量',
+        hint: '只跑内置检查（空值率+重复行），评分 100 不代表业务规则通过；告警汇总恒为空',
+      },
+    ],
   },
   {
-    value: 'info',
-    label: '服务信息',
-    hint: '版本、profile、四个生效开关；版本来自打包期的 pom，不是 build-info',
+    title: '诊断与运维',
+    views: [
+      {
+        value: 'sql',
+        label: 'SQL 体检',
+        hint: '风险/计划/索引/改写；SQL 走查询串，会进 access log 且有长度上限',
+      },
+      {
+        value: 'dba',
+        label: 'DBA 视图',
+        hint: '会真的连业务库执行查询，默认不自动查，多数视图只有 Oracle 有',
+      },
+      {
+        value: 'cdc',
+        label: 'CDC',
+        hint: '方言支持/状态/订阅/位点；订阅只是进程内存里的登记，重启即清空',
+      },
+      {
+        value: 'backups',
+        label: '备份',
+        hint: '只读清单；备份元数据只在内存里（硬编码），重启即全部丢失',
+      },
+      {
+        value: 'jobs',
+        label: 'ETL 作业',
+        hint: '只读；网关关闭时是 200+enabled=false，有未完成作业时列表端点会 500',
+      },
+    ],
   },
 ];
+
+/** 平铺顺序 = 侧栏从上到下的顺序 = 数字快捷键的顺序。只有这一份。 */
+const VIEWS = VIEW_GROUPS.flatMap((group) => group.views);
+
+/**
+ * 只有前 9 项绑数字键。
+ *
+ * 键盘上就 1–9 能用（0 留着不用：它在"第 10 个"这个位置上没有直觉，而且 Cmd+0 在多数
+ * 浏览器里是重置缩放）。想过的两个替代方案都更差：
+ * - 双位数（按 1 再按 2 到第 12 项）：需要一个组合键状态机和超时判定，为一个内网面板
+ *   的导航加这个不值得；
+ * - g+字母那套（g 然后 s 去 Schema）：得给 16 个视图各起一个不冲突的助记字母，
+ *   而且那套约定本身要学。
+ *
+ * 关键是<b>不能静默失效</b>：第 10 项之后没有快捷键这件事，必须在快捷键说明条里写出来
+ * （见 ShortcutHints），否则按了 1 到 9 都好、按到第 10 个视图时会以为是自己记错了键。
+ */
+const HOTKEY_VIEW_COUNT = 9;
 
 const AUTO_REFRESH_INTERVAL_MS = 10_000;
 const DEFAULT_VIEW = VIEWS[0].value;
@@ -100,7 +235,8 @@ const DEFAULT_LIMIT = 50;
 // =============================================================================
 
 /*
- * 现场（view + 条数）记在 location.hash 里，形如 `#view=audit&limit=100`。
+ * 现场（view + 条数 + 选中行）记在 location.hash 里，
+ * 形如 `#view=audit&limit=100&row=audit-logs:<行标识>`。
  *
  * ── 为什么是 hash 而不是 path，也不引路由库 ──
  * 这个页面是 Spring Boot 静态资源，没有服务端路由；path 形式的 /audit 刷新会 404
@@ -112,17 +248,24 @@ const DEFAULT_LIMIT = 50;
  * 写入用 history.replaceState，它按规范<b>不会</b>触发 hashchange（location.hash = x 会）。
  * 于是「state 变 → 写 hash」这条边不会反过来触发「hashchange → 改 state」。
  * 反方向（手改地址栏 / 前进后退）触发 hashchange → 改 state → 写 hash，此时写入的值和
- * 当前 hash 完全一致，被 writeHash 里的相等判断挡掉。两条边各只走一次。
+ * 当前 hash 完全一致，被 writeHashParams 里的相等判断挡掉。两条边各只走一次。
+ * <b>这套机制不能改坏</b>：第 8 项（行深链）加了第三个键 row，它由 InteractiveTable
+ * 写，仍然走同一个 replaceState + 相等判断，所以两个拥有者不会互相触发。
  *
  * ── 为什么是 replaceState 而不是 pushState ──
  * 条数是个 NumberInput 步进器，点五下 pushState 就是五条历史记录，后退键从此没法用。
  * 代价是浏览器后退不能回到上一个视图——但这个页面的"上一步"概念本来就很弱
- * （八个平级视图，侧栏点一下就到），换掉一个能用的后退键不值得。
+ * （16 个平级视图，侧栏点一下就到），换掉一个能用的后退键不值得。
+ *
+ * ── 为什么读写下沉到 ./hashState.js ──
+ * row 那个键由 InteractiveTable 拥有，而 view / limit 由这里拥有。原来的 writeHash 是
+ * 整串重写（`#view=X&limit=Y`），那样这里每写一次就会把 row 抹掉。合并式写入只能有
+ * 一份实现，所以搬到了共享模块，详见那个文件的头注释。
  */
 function readHash() {
-  const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  const view = params.get('view');
-  const limit = Number.parseInt(params.get('limit') ?? '', 10);
+  const params = readHashParams();
+  const view = params.view;
+  const limit = Number.parseInt(params.limit ?? '', 10);
   return {
     // 未知的 view 直接忽略而不是报错：分享出去的链接可能来自一个还有 / 已经没有
     // 这个视图的版本，那种情况下落到默认视图比显示一个空白页有用。
@@ -136,13 +279,6 @@ function readHash() {
       ? Math.min(Math.max(limit, 1), FALLBACK_MAX_LIMIT)
       : null,
   };
-}
-
-function writeHash(view, limit) {
-  const next = `#view=${view}&limit=${limit}`;
-  if (window.location.hash !== next) {
-    window.history.replaceState(null, '', next);
-  }
 }
 
 /**
@@ -241,14 +377,45 @@ function ShortcutHints({ isEnabled, onToggle }) {
         <Text type="supporting" color="secondary">刷新</Text>
         <Kbd keys="1" />
         <Text type="supporting" color="secondary">–</Text>
-        <Kbd keys="8" />
-        <Text type="supporting" color="secondary">切视图</Text>
+        <Kbd keys="9" />
+        {/*
+          「前 9 项」这句话必须写出来，不能只写 1–9 就完事。
+          侧栏有 16 项而键盘只有 9 个数字键，不说清的话，按到第 10 个视图时用户会以为
+          自己记错了键位或者快捷键坏了 —— 一个静默失效的功能比没有这个功能更糟。
+          带数字前缀的导航项只有前 9 个（见 SideNavItem 的 label），两处口径必须一致。
+        */}
+        <Text type="supporting" color="secondary">
+          {`切视图（只有侧栏前 ${HOTKEY_VIEW_COUNT} 项有数字键，其余 ${VIEWS.length - HOTKEY_VIEW_COUNT} 项点侧栏）`}
+        </Text>
         <Kbd keys="/" />
         <Text type="supporting" color="secondary">聚焦搜索</Text>
         <Kbd keys="escape" />
         <Text type="supporting" color="secondary">关详情面板</Text>
       </HStack>
     </HStack>
+  );
+}
+
+/**
+ * 懒加载期间的占位。
+ *
+ * 用 core 的 Skeleton（props 以 dist/Skeleton/Skeleton.d.ts 为准：width / height /
+ * radius / index，radius 走 token 档位 'none'|0..4|'rounded'，index 只影响脉冲动画的
+ * 错峰起始时间）。刻意不用 Spinner 或一句「加载中…」：
+ * - 面板的内容形状是已知的（一排指标卡 + 一张表），骨架屏能把这个形状先占住，
+ *   chunk 到位后不会整页跳一下；
+ * - 一个居中的转圈在这个位置反而像"整页在重载"。
+ *
+ * 三块的尺寸对着面板的真实结构给：指标行 ≈ 96px 高、标题带 ≈ 56px、表体给 320px。
+ * index 递增让三块的脉冲错开，看起来是一整片在呼吸而不是三块同时闪。
+ */
+function PanelSkeleton() {
+  return (
+    <VStack gap={6} aria-busy="true" aria-live="polite">
+      <Skeleton height={96} radius={2} index={0} />
+      <Skeleton height={56} radius={2} index={1} />
+      <Skeleton height={320} radius={2} index={2} />
+    </VStack>
   );
 }
 
@@ -263,6 +430,8 @@ export default function App() {
   const [isAutoRefresh, setAutoRefresh] = useState(false);
   const [isHotkeyEnabled, setHotkeyEnabled] = useState(true);
   const [updatedAt, setUpdatedAt] = useState(null);
+  /* 惰性初值：读 localStorage 是同步 IO，只在挂载时需要一次。 */
+  const [colorMode, setColorMode] = useState(readStoredColorMode);
 
   // 自举：先读 config，再决定告警条与「审计历史」页要不要发请求。
   useEffect(() => {
@@ -275,7 +444,42 @@ export default function App() {
   }, []);
 
   // state → hash。见 readHash 上方关于"为什么不打环"的说明。
-  useEffect(() => { writeHash(view, limit); }, [view, limit]);
+  useEffect(() => { writeHashParams({ view, limit }); }, [view, limit]);
+
+  /*
+   * 换视图时把 hash 里的 row 清掉。
+   *
+   * row 的值是 `<表标识>:<行标识>`（见 hashState.js），表标识只在某一个视图里存在。
+   * 不清的话，从审计流水（row=audit-logs:…）切到血缘，hash 里会一直挂着一个
+   * 谁都匹配不上的 row —— 不报错，但复制出去的链接带着一段无意义的垃圾。
+   *
+   * ⚠️ isFirstRun 这个 ref 不是防抖，是<b>深链能用的前提</b>：
+   * 挂载时 view 就已经是从 hash 里读出来的了，如果这个 effect 在首次运行时也清 row，
+   * 那么 `#view=audit&limit=100&row=audit-logs:xxx` 这种分享出来的链接，
+   * 打开的瞬间 row 就被自己抹掉了 —— 深链永远打不开，而且看不出是谁抹的。
+   */
+  const isFirstViewRun = useRef(true);
+  useEffect(() => {
+    if (isFirstViewRun.current) {
+      isFirstViewRun.current = false;
+      return;
+    }
+    writeHashParams({ row: null });
+  }, [view]);
+
+  /*
+   * 深色模式：state → DOM + localStorage。
+   *
+   * 写 DOM 放在 effect 里而不是渲染期：渲染期改 document.documentElement 是副作用，
+   * StrictMode 下会跑两遍（这里幂等，但原则上不该这么写）。
+   * 首帧会有一瞬间的"未应用"——对本页无所谓：这是内网面板，不是首屏渲染敏感的落地页，
+   * 而唯一能彻底消掉这一帧的办法是在 index.html 里插一段内联脚本，
+   * 那要动 index.html（硬约束里那条 data-astryx-theme 就在那个文件里，不碰为好）。
+   */
+  useEffect(() => {
+    applyColorMode(colorMode);
+    storeColorMode(colorMode);
+  }, [colorMode]);
 
   // hash → state。手改地址栏、点站内 hash 链接、前进后退都走这条边。
   useEffect(() => {
@@ -328,13 +532,18 @@ export default function App() {
    * Esc 不在这里注册：它要关的是某张表的详情面板，而"哪张表开着面板"这件事只有那张表
    * 自己知道。放在 InteractiveTable 里，每个实例各关自己的（见 components.jsx）。
    *
-   * 数字键用 String(i+1) 从 VIEWS 生成，而不是手写八条：手写的那一版在加第九个视图时
-   * 一定会忘记加快捷键，而且忘了不报错。
+   * 数字键用 String(i+1) 从 VIEWS 生成，而不是手写九条：手写的那一版在加视图时一定会
+   * 忘记加快捷键，而且忘了不报错。
+   *
+   * slice(0, HOTKEY_VIEW_COUNT)：只有前 9 项有键，理由见 HOTKEY_VIEW_COUNT 上方。
+   * 从 16 项里生成 16 条快捷键的写法试过，第 10 条起 keys 是 '10'、'11' —— useHotkeys
+   * 把它们当成"按 1 再按 0"的序列还是一个不存在的键名，取决于它的解析实现，
+   * 而无论哪种都不是"按一下就切"。所以宁可只给前 9 项，并把这件事写在说明条里。
    */
   const hotkeys = useMemo(() => [
     { keys: 'r', onPress: refresh, isDisabled: !isHotkeyEnabled },
     { keys: '/', onPress: focusFirstSearch, isDisabled: !isHotkeyEnabled },
-    ...VIEWS.map((v, i) => ({
+    ...VIEWS.slice(0, HOTKEY_VIEW_COUNT).map((v, i) => ({
       keys: String(i + 1),
       onPress: () => setView(v.value),
       isDisabled: !isHotkeyEnabled,
@@ -345,6 +554,10 @@ export default function App() {
   const maxLimit = config?.maxLimit ?? FALLBACK_MAX_LIMIT;
   const panelProps = { limit, refreshToken };
   const current = VIEWS.find((v) => v.value === view) ?? VIEWS[0];
+  /* PANELS 的键和 VIEWS 的 value 是同一套（readHash 已经挡掉了未知 view），
+     取不到时兜到第一个视图，而不是渲染 undefined —— lazy 组件是 undefined 时
+     React 抛的错读不出哪个视图坏了。 */
+  const CurrentPanel = PANELS[current.value] ?? PANELS[VIEWS[0].value];
 
   return (
     <AppShell
@@ -373,6 +586,28 @@ export default function App() {
                 value={isAutoRefresh}
                 onChange={setAutoRefresh}
               />
+              {/*
+                主题三档。用 SegmentedControl 而不是一个「深色」Switch：
+                「跟随系统」是默认值也是第三种状态，Switch 只有两态，
+                硬塞会变成"开=暗、关=亮"，而那样就没有跟随系统了。
+                label 是 aria-label（不渲染），所以旁边另给一句可见的 Text。
+                刻意不传 size：那是控件高度不是字号，口径同 ExportCsvButton。
+              */}
+              <HStack gap={2} align="center">
+                <Text type="label" color="secondary">主题</Text>
+                <SegmentedControl
+                  value={colorMode}
+                  onChange={setColorMode}
+                  label="配色模式"
+                >
+                  {COLOR_MODES.map((m) => (
+                    <SegmentedControlItem key={m.value} value={m.value} label={m.label} />
+                  ))}
+                </SegmentedControl>
+              </HStack>
+              {/* 诊断包按钮是手点的，理由（会被 CONNECTION_REGISTRY_BOOKKEEPING 记一条）
+                  写在 diagnostics.jsx 的头注释里。 */}
+              <DiagnosticBundleButton limit={limit} />
               <Button label="刷新" variant="primary" onClick={refresh} />
             </HStack>
           }
@@ -384,22 +619,36 @@ export default function App() {
           resizable={{ defaultWidth: 240, minWidth: 200, maxWidth: 340 }}
           header={<SideNavHeading heading="运维视图" />}
         >
-          <SideNavSection title="视图" isHeaderHidden>
-            {VIEWS.map((v, i) => (
-              <SideNavItem
-                key={v.value}
-                label={`${i + 1} · ${v.label}`}
-                href={`#view=${v.value}&limit=${limit}`}
-                isSelected={v.value === view}
-                /*
-                  href 写成真的 hash 而不是 "#"：这样中键 / Cmd+点击能在新标签里打开
-                  同一个视图，右键也能复制链接——分享现场的实际用法。
-                  onClick 仍然 preventDefault 走内部 state，避免多走一次 hashchange。
-                */
-                onClick={(e) => { e.preventDefault(); setView(v.value); }}
-              />
-            ))}
-          </SideNavSection>
+          {/*
+            分组渲染。上一版是一个 isHeaderHidden 的单 Section 包住八项；16 项之后组名
+            必须<b>显示</b>出来（isHeaderHidden 去掉了），否则分组只在代码里存在。
+
+            数字前缀只给前 9 项：给不带快捷键的项也编号会造出「第 12 项按 12」的错觉。
+            序号从 VIEWS 里的全局下标算，而不是组内下标 —— 组内下标会让四组各自从 1 开始，
+            和快捷键完全对不上。
+          */}
+          {VIEW_GROUPS.map((group) => (
+            <SideNavSection key={group.title} title={group.title}>
+              {group.views.map((v) => {
+                const index = VIEWS.findIndex((x) => x.value === v.value);
+                const hasHotkey = index < HOTKEY_VIEW_COUNT;
+                return (
+                  <SideNavItem
+                    key={v.value}
+                    label={hasHotkey ? `${index + 1} · ${v.label}` : v.label}
+                    href={`#view=${v.value}&limit=${limit}`}
+                    isSelected={v.value === view}
+                    /*
+                      href 写成真的 hash 而不是 "#"：这样中键 / Cmd+点击能在新标签里打开
+                      同一个视图，右键也能复制链接——分享现场的实际用法。
+                      onClick 仍然 preventDefault 走内部 state，避免多走一次 hashchange。
+                    */
+                    onClick={(e) => { e.preventDefault(); setView(v.value); }}
+                  />
+                );
+              })}
+            </SideNavSection>
+          ))}
         </SideNav>
       }
     >
@@ -431,16 +680,20 @@ export default function App() {
           <LayoutContent padding={5} isScrollable>
             {isConfigLoaded && (
               <div role="region" aria-label={current.label}>
-                {view === 'audit' && <AuditPanel {...panelProps} />}
-                {view === 'history' && (
-                  <HistoryPanel {...panelProps} auditPersistence={config?.auditPersistence} />
-                )}
-                {view === 'connections' && <ConnectionsPanel {...panelProps} />}
-                {view === 'performance' && <PerformancePanel {...panelProps} />}
-                {view === 'reports' && <ReportsPanel {...panelProps} />}
-                {view === 'dba' && <DbaPanel {...panelProps} />}
-                {view === 'tools' && <ToolsPanel {...panelProps} />}
-                {view === 'info' && <InfoPanel {...panelProps} />}
+                {/*
+                  Suspense 的 key 绑当前视图：切视图时让 Suspense 边界重置，
+                  于是新视图的 chunk 在下载期间显示骨架屏，而不是把上一个视图的
+                  内容留在屏幕上（React 18+ 对已挂载子树的 transition 默认保留旧 UI，
+                  在这里会造成「点了侧栏但内容没变」的错觉）。
+                */}
+                <Suspense key={view} fallback={<PanelSkeleton />}>
+                  <CurrentPanel
+                    {...panelProps}
+                    {...(view === 'history'
+                      ? { auditPersistence: config?.auditPersistence }
+                      : null)}
+                  />
+                </Suspense>
               </div>
             )}
           </LayoutContent>
