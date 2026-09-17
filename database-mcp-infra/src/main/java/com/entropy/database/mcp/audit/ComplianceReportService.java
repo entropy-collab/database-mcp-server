@@ -62,15 +62,7 @@ public class ComplianceReportService {
         try {
             List<AuditLogEntity> logs = auditLogRepository.query(null, null, startTime, endTime, limit);
             List<Map<String, Object>> entries = logs.stream()
-                    .map(e -> Map.<String, Object>of(
-                            "timestamp", e.timestamp().toString(),
-                            "tool", e.tool(),
-                            "connectionKey", e.connectionKey(),
-                            "sql", truncate(e.sql(), 200),
-                            "success", e.success(),
-                            "rows", e.rows(),
-                            "durationMs", e.durationMs()
-                    ))
+                    .map(ComplianceReportService::toReportEntry)
                     .toList();
 
             report.put("status", "completed");
@@ -83,6 +75,26 @@ public class ComplianceReportService {
         }
 
         return report;
+    }
+
+    /**
+     * 报告里的一条明细。
+     *
+     * <p>用 {@link LinkedHashMap} + {@code put} 而不是 {@link Map#of}：{@code Map.of} 拒绝 null value
+     * （{@code ImmutableCollections} 里的 {@code Objects.requireNonNull}），而 {@code connection_key}
+     * 是可空列——审计一落库，区间里只要有一条没带连接名的记录，这里就抛 NPE，被下面的 catch 吞成
+     * {@code status=error}，报告永远出不来。字段顺序照原来的书写顺序保留，键名与键集合不变。
+     */
+    private static Map<String, Object> toReportEntry(AuditLogEntity e) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("timestamp", e.timestamp().toString());
+        entry.put("tool", e.tool());
+        entry.put("connectionKey", e.connectionKey());
+        entry.put("sql", truncate(e.sql(), 200));
+        entry.put("success", e.success());
+        entry.put("rows", e.rows());
+        entry.put("durationMs", e.durationMs());
+        return entry;
     }
 
     /**

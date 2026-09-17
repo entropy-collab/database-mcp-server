@@ -25,6 +25,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -103,18 +104,33 @@ public class AuditLogController {
         List<AuditLogEntity> entities =
                 auditLogRepository.query(tool, connectionKey, start, end, clampLimit(limit));
         return entities.stream()
-                .<Map<String, Object>>map(entity -> Map.of(
-                    "id", entity.id(),
-                    "tool", entity.tool(),
-                    "sql", entity.sql(),
-                    "rows", entity.rows(),
-                    "durationMs", entity.durationMs(),
-                    "success", entity.success(),
-                    "error", entity.error(),
-                    "timestamp", entity.timestamp().toString(),
-                    "connectionKey", entity.connectionKey()
-                ))
+                .<Map<String, Object>>map(AuditLogController::toHistoryEntry)
                 .toList();
+    }
+
+    /**
+     * 一条审计记录的 JSON 形态。
+     *
+     * <p>用 {@link LinkedHashMap} + {@code put} 而不是 {@link Map#of}：{@code Map.of} 拒绝 null value
+     * （{@code ImmutableCollections} 里的 {@code Objects.requireNonNull}），而成功记录的 {@code error}
+     * 列本来就是 null、{@code connection_key} 也可为空——落库一开，这个 lambda 每条记录都会抛 NPE，
+     * 整个端点 500。顺带保证字段顺序：{@code Map.of} 无序，而页面与文档是按这里的书写顺序理解返回的。
+     *
+     * <p>null 照原样保留，不替换成空串或 {@code "—"}：短横线是前端 {@code displayValue()} 的职责，
+     * 后端把 null 变成字符串就让「字段确实为空」和「字段值就是短横线」不可区分了。
+     */
+    private static Map<String, Object> toHistoryEntry(AuditLogEntity entity) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("id", entity.id());
+        entry.put("tool", entity.tool());
+        entry.put("sql", entity.sql());
+        entry.put("rows", entity.rows());
+        entry.put("durationMs", entity.durationMs());
+        entry.put("success", entity.success());
+        entry.put("error", entity.error());
+        entry.put("timestamp", entity.timestamp().toString());
+        entry.put("connectionKey", entity.connectionKey());
+        return entry;
     }
 
     private static int clampLimit(int limit) {

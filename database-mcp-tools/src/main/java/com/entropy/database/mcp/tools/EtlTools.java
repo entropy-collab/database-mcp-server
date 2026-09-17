@@ -442,18 +442,37 @@ public class EtlTools extends McpToolBase {
     public Map<String, Object> listJobs() {
         return safeExecute(() -> {
             List<Map<String, Object>> jobs = executionEngine.listExecutions().stream()
-                    .map(exec -> Map.<String, Object>of(
-                            "jobId", exec.jobId(), "jobName", exec.jobName(), "status", exec.status(),
-                            "startedAt", exec.startedAt() != null ? exec.startedAt().toString() : null,
-                            "completedAt", exec.completedAt() != null ? exec.completedAt().toString() : null,
-                            "progress", String.format("%.1f%%", exec.getProgress()),
-                            "totalSteps", exec.stepStates().size(),
-                            "completedSteps", exec.getCompletedStepIds().size(),
-                            "failedSteps", exec.getFailedStepIds().size()))
+                    .map(EtlTools::toJobSummary)
                     .sorted(Comparator.comparing(m -> (String) m.get("jobId")))
                     .toList();
             return success(Map.of("totalJobs", jobs.size(), "jobs", jobs));
         });
+    }
+
+    /**
+     * {@code listJobs} 的一行作业摘要。
+     *
+     * <p>用 {@link LinkedHashMap} + {@code put} 而不是 {@link Map#of}：{@code startedAt} 在作业尚未开始时
+     * 是 null，{@code completedAt} 在作业未结束时是 null，而 {@code Map.of} 拒绝 null value
+     * （{@code ImmutableCollections} 里的 {@code Objects.requireNonNull}）——只要列表里有一个未开始或
+     * 正在运行的作业，整个工具就抛 NPE，{@code /api/ui/jobs} 必然 500。同一批字段在
+     * {@link #getJobStatus} 里本来就是按可空处理的（那边走 {@code context(...)}）。
+     *
+     * <p>键名、键的集合、以及字段顺序都与原来的 {@code Map.of} 书写顺序一致：这是 MCP 工具的返回结构，
+     * 页面与工具描述都按这组键取值。null 照原样保留，不替换成空串或占位符。
+     */
+    private static Map<String, Object> toJobSummary(JobExecution exec) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("jobId", exec.jobId());
+        summary.put("jobName", exec.jobName());
+        summary.put("status", exec.status());
+        summary.put("startedAt", exec.startedAt() != null ? exec.startedAt().toString() : null);
+        summary.put("completedAt", exec.completedAt() != null ? exec.completedAt().toString() : null);
+        summary.put("progress", String.format("%.1f%%", exec.getProgress()));
+        summary.put("totalSteps", exec.stepStates().size());
+        summary.put("completedSteps", exec.getCompletedStepIds().size());
+        summary.put("failedSteps", exec.getFailedStepIds().size());
+        return summary;
     }
 
     @McpTool(description = """

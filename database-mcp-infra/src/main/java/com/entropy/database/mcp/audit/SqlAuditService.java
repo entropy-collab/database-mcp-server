@@ -89,25 +89,43 @@ public class SqlAuditService {
 
     /**
      * Get top N slowest queries.
+     *
+     * <p>逐条用 {@link LinkedHashMap} 装而不是 {@code Map.of}：{@code connectionKey} 在不带连接参数的
+     * 工具调用（{@code registerPinned}、{@code getDatabaseInfo} 之类）上本来就是 null，而
+     * {@code Map.of} 对 null value 直接 {@code NullPointerException}（见
+     * {@code ImmutableCollections} 里的 {@code Objects.requireNonNull}）。这条 NPE 会被工具层包成
+     * {@code McpToolException} → HTTP 500，表现为「性能」页整页打不开。
+     *
+     * <p>null 原样保留，不折成空串或 {@code "—"}：短横线是前端 {@code displayValue()} 的职责，
+     * 后端一旦替换，「这次调用没有连接名」和「连接名就叫那个字符串」就不可区分了。
+     *
+     * <p>键名、键集合与插入顺序必须与 {@code getSlowQueries} 的工具描述一致——前端按键名取值，
+     * 改名的表现是页面上那一整列变空。
      */
     public List<Map<String, Object>> getSlowQueries(int limit) {
         synchronized (slowQueryLock) {
             return slowQueryBuffer.stream()
                     .limit(limit)
-                    .map(r -> Map.<String, Object>of(
-                            "tool", r.tool,
-                            "sql", truncate(r.sql, 500),
-                            "rows", r.rows,
-                            "durationMs", r.durationMs,
-                            "connectionKey", r.connectionKey,
-                            "timestamp", r.timestamp.toString()
-                    ))
+                    .map(r -> {
+                        Map<String, Object> entry = new LinkedHashMap<>();
+                        entry.put("tool", r.tool);
+                        entry.put("sql", truncate(r.sql, 500));
+                        entry.put("rows", r.rows);
+                        entry.put("durationMs", r.durationMs);
+                        entry.put("connectionKey", r.connectionKey);
+                        entry.put("timestamp", r.timestamp.toString());
+                        return entry;
+                    })
                     .toList();
         }
     }
 
     /**
      * Get SQL pattern statistics (TOP N by frequency).
+     *
+     * <p>这里保留 {@code Map.of}：七个 value 全部非空——{@code pattern} 是 map 的 key
+     * （{@link #normalizeSql} 最坏返回空串，不会是 null），其余六个是 long 自动装箱。
+     * 与 {@link #getSlowQueries} 的差别只来自「有没有可为 null 的值」这一点。
      */
     public List<Map<String, Object>> getSqlPatternStats(int limit) {
         synchronized (patternLock) {

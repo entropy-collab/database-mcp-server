@@ -208,6 +208,8 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
             "durationMs", durationMs,
             "success", success,
             "timestamp", Instant.now().toString(),
+            // 这个 map 是 /api/audit/logs 直接吐给页面的报文，而 Map.of 不收 null value，
+            // 所以这里必须给一个非 null 的占位。空串是既有报文契约，不在本次改动范围内。
             "connectionKey", connectionKey != null ? connectionKey : ""
         );
         buffer.offer(entry);
@@ -216,6 +218,11 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
         // Record in SqlAuditService for slow query analysis and pattern stats
         if (sqlAuditService != null) {
             try {
+                // connectionKey 原样传 null，不像上面那个 buffer entry 一样兜成空串：这里交出去的是
+                // 领域数据而不是报文，而「这次调用没有连接名」（不带连接参数的工具，如 registerPinned、
+                // getDatabaseInfo）与「连接名是空串」是两件不同的事，折成空串就永久丢掉了这个区别。
+                // 把 null 变成 "—" 或 "" 是前端 displayValue() 的职责，不是审计层的。
+                // 承接方 SqlAuditService.getSlowQueries 用 LinkedHashMap 装返回值，能容纳 null value。
                 sqlAuditService.recordQuery(tool, safeSql, rowCount, durationMs, success, connectionKey);
             } catch (Exception e) {
                 log.warn("Failed to record query in SqlAuditService: {}", e.getMessage(), e);

@@ -15,6 +15,10 @@
  */
 package com.entropy.database.mcp.web;
 
+import com.entropy.database.mcp.audit.AuditLogEntity;
+import com.entropy.database.mcp.audit.AuditLogRepository;
+import com.entropy.database.mcp.audit.ComplianceReportService;
+import com.entropy.database.mcp.audit.SqlAuditService;
 import jakarta.servlet.Filter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -31,6 +35,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -215,6 +220,50 @@ class WebUiTest {
             Map<String, Object> negative = json(mockMvc.perform(get("/api/ui/performance?limit=-7"))
                     .andReturn());
             assertThat(negative.get("limit")).isEqualTo(1);
+        }
+
+        @Autowired
+        SqlAuditService sqlAuditService;
+
+        /**
+         * 慢查询缓冲里存在 {@code connectionKey} 为 null 的记录时，性能页必须照样 200。
+         *
+         * <p>这不是构造出来的边界值：不带连接参数的工具调用（{@code registerPinned}、
+         * {@code getDatabaseInfo} 之类）在审计里的 {@code connectionKey} 本来就是 null，
+         * 现网 {@code /api/audit/history} 的返回里就有。只要这类调用中有一条耗时越过慢查询阈值
+         * 进了缓冲，{@code getSlowQueries} 的 {@code Map.of} 就会因为 null value 抛 NPE，
+         * 被工具层包成 {@code McpToolException} → HTTP 500，整个「性能」页打不开。
+         *
+         * <p>先记录再请求是这条用例成立的前提：缓冲为空时那段 map 构造根本不会执行，端点照样 200。
+         * 阈值默认 5000ms，所以这里给 6000ms。
+         *
+         * <p>断言 {@code connectionKey} 仍是 null 而不是空串：{@code "—"} 是前端
+         * {@code displayValue()} 的职责，后端把 null 折成字符串会让「这次调用没有连接名」和
+         * 「连接名就叫那个字符串」不可区分。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void performanceServesSlowQueriesWithoutConnectionKey() throws Exception {
+            sqlAuditService.recordQuery("slowQueryWithoutConnection",
+                    "SELECT 1 FROM slow_without_connection", 1, 6000L, true, null);
+
+            Map<String, Object> body = json(mockMvc.perform(get("/api/ui/performance"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus())
+                            .as("慢查询记录缺连接名不该让性能页 500")
+                            .isEqualTo(200))
+                    .andReturn());
+
+            List<Map<String, Object>> slowQueries = (List<Map<String, Object>>) body.get("slowQueries");
+            Map<String, Object> recorded = slowQueries.stream()
+                    .filter(entry -> "slowQueryWithoutConnection".equals(entry.get("tool")))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("刚记录的慢查询没有出现在 performance 返回里"));
+
+            assertThat(recorded).containsKeys("tool", "sql", "rows", "durationMs",
+                    "connectionKey", "timestamp");
+            assertThat(recorded.get("connectionKey"))
+                    .as("缺连接名的慢查询必须保持 null，不能被后端改写成空串或短横线")
+                    .isNull();
         }
 
         // ─── 服务自述 ──────────────────────────────────────────────────
@@ -752,6 +801,78 @@ class WebUiTest {
             assertThat(dataAccess.get("status"))
                     .as("配了 spring.datasource.url 之后数据访问报告不该再被跳过")
                     .isNotEqualTo("skipped");
+        }
+
+        @Autowired
+        AuditLogRepository auditLogRepository;
+
+        @Autowired
+        ComplianceReportService complianceReportService;
+
+        /**
+         * 落一条「执行成功」的审计记录：{@code error} 与 {@code connectionKey} 都是 {@code null}。
+         *
+         * <p>这不是构造出来的边界值，而是成功路径的常态——成功记录没有错误信息（{@code error} 列本就为空），
+         * 未指定连接名时 {@code connection_key} 也是空。两列在建表 DDL 里都可为空。
+         *
+         * <p>先插数据是这两条用例成立的前提：空表时 {@code getHistory} 的 stream map 与
+         * {@code generateDataAccessReport} 的明细构造根本不会被执行，端点照样 200。
+         *
+         * @return 记录的时间戳，供报告用例框定查询区间
+         */
+        private Instant insertSuccessfulRowWithNullColumns(String tool) {
+            Instant eventTime = Instant.now();
+            auditLogRepository.insert(new AuditLogEntity(
+                    null, tool, "SELECT 1", 1, 12L, true, null, eventTime, null));
+            return eventTime;
+        }
+
+        /**
+         * {@code /api/audit/history} 在库里存在成功记录（{@code error} 为 null）时必须 200，
+         * 且该字段照样以 null 出现在返回里。
+         *
+         * <p>钉的是「后端不把 null 变成字符串」：{@code "—"} 是前端 {@code displayValue()} 的职责，
+         * 后端一旦替换成空串或短横线，「字段确实为空」与「字段值就是短横线」就不可区分了。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void auditHistoryServesRowsWithNullError() throws Exception {
+            insertSuccessfulRowWithNullColumns("historyNullError");
+
+            MvcResult result = mockMvc.perform(get("/api/audit/history?limit=5"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn();
+
+            List<Map<String, Object>> entries = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readValue(result.getResponse().getContentAsString(), List.class);
+            Map<String, Object> inserted = entries.stream()
+                    .filter(entry -> "historyNullError".equals(entry.get("tool")))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("刚插入的审计记录没有出现在 history 返回里"));
+
+            assertThat(inserted).containsKeys("id", "tool", "sql", "rows", "durationMs",
+                    "success", "error", "timestamp", "connectionKey");
+            assertThat(inserted.get("error")).as("成功记录的 error 必须保持 null，不能被后端改写").isNull();
+            assertThat(inserted.get("success")).isEqualTo(true);
+        }
+
+        /**
+         * {@code getDataAccessReport} 对含 null 列的记录必须生成 {@code status=completed} 的报告。
+         *
+         * <p>NPE 会被 {@code generateDataAccessReport} 自己的 catch 吞成 {@code status=error}，
+         * 所以这里断言的是 {@code completed} 而不是「不抛异常」——后者在修复前也成立。
+         */
+        @Test
+        void dataAccessReportCompletesForRowsWithNullColumns() {
+            Instant eventTime = insertSuccessfulRowWithNullColumns("reportNullError");
+
+            Map<String, Object> report = complianceReportService.generateDataAccessReport(
+                    eventTime.minusSeconds(60), eventTime.plusSeconds(60), 10);
+
+            assertThat(report.get("status"))
+                    .as("含 null 列的审计记录不该让报告降级成 error")
+                    .isEqualTo("completed");
+            assertThat((List<?>) report.get("entries")).isNotEmpty();
         }
     }
 
