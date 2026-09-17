@@ -42,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 /**
- * 只读运维页面的端到端契约：{@code WebUiController} 的三个端点、限值夹取、审计未落库时的降级路径，
+ * 只读运维页面的端到端契约：{@code WebUiController} 的各个端点、限值夹取、审计未落库时的降级路径，
  * 以及<strong>构建出来的前端产物真的被服务出去</strong>。
  *
  * <p>最后一条是这里最值得测的：静态资源在 IDE 里从 {@code target/classes/static} 直接可见，
@@ -217,6 +217,175 @@ class WebUiTest {
             assertThat(negative.get("limit")).isEqualTo(1);
         }
 
+        // ─── 服务自述 ──────────────────────────────────────────────────
+
+        /**
+         * {@code /api/ui/info} 的四个开关必须全在，且 {@code version} 不能是空。
+         *
+         * <p>{@code version} 那一条断言的是 Maven 资源过滤真的把 {@code @project.version@} 填进了
+         * {@code application.yml}：过滤没生效时这里是字面量 {@code @project.version@} 或者
+         * {@code unknown}（{@code @Value} 的默认值），页面页脚就会显示一个假版本号。
+         * 不断言具体版本号——那会让每次发版都红一次，而它红的原因和被测行为无关。
+         *
+         * <p>{@code switches} 逐键断言而不是只看 map 非空：少报一个开关的表现是页面上少一行，
+         * 没有任何报错，而那一行恰好是「这台服务器裸跑吗」这类问题的答案。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void infoReportsVersionProfilesAndSwitches() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/ui/info"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+
+            assertThat(body).containsKeys("serviceName", "version", "activeProfiles",
+                    "startedAt", "uptimeSeconds", "switches", "toolCount");
+            assertThat((String) body.get("version"))
+                    .as("version 必须来自 spring.ai.mcp.server.version；空或 @project.version@ 说明资源过滤没生效")
+                    .isNotBlank()
+                    .doesNotContain("project.version");
+            assertThat(body.get("activeProfiles")).isInstanceOf(List.class);
+            assertThat((String) body.get("startedAt")).isNotBlank();
+
+            Map<String, Object> switches = (Map<String, Object>) body.get("switches");
+            assertThat(switches).containsKeys("authEnabled", "allowUnauthenticatedInProduction",
+                    "gatewayEnabled", "auditPersistence");
+            // 本上下文的配置：鉴权关、没有 spring.datasource.url、gateway 显式关。
+            assertThat(switches.get("authEnabled")).isEqualTo(false);
+            assertThat(switches.get("auditPersistence")).isEqualTo(false);
+            assertThat(switches.get("gatewayEnabled")).isEqualTo(false);
+
+            Map<String, Object> toolCount = (Map<String, Object>) body.get("toolCount");
+            assertThat(toolCount).containsKeys("total", "exposed");
+            assertThat((Integer) toolCount.get("total")).isPositive();
+        }
+
+        /**
+         * {@code /api/ui/tools} 必须真的列出工具，不能是一份空目录。
+         *
+         * <p>{@code total > 0} 钉住的是 {@code ToolCatalog} 的惰性索引在 HTTP 线程上也建得起来：
+         * 它依赖 {@code ObjectProvider<McpToolBase>}，构建时机出问题的表现就是一份空清单而不是报错。
+         * 不断言具体数字——工具增删是常事，数字会让这个测试变成一份需要人工同步的快照。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void toolsListsExposedDescriptors() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/ui/tools"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+
+            assertThat(body).containsKeys("total", "exposed", "groups", "tools");
+            assertThat((Integer) body.get("total")).isPositive();
+            assertThat(body.get("groups")).isInstanceOf(List.class);
+
+            List<Map<String, Object>> tools = (List<Map<String, Object>>) body.get("tools");
+            assertThat(tools).isNotEmpty();
+            assertThat(tools.get(0)).containsKeys("name", "group", "summary", "tags");
+        }
+
+        // ─── 审计报告 ──────────────────────────────────────────────────
+
+        /**
+         * 窗口回显 + 三块内容；审计未落库时两个报告是 {@code skipped} 而不是错误。
+         *
+         * <p>窗口那三个键（{@code hours}/{@code from}/{@code to}）是这里最值得钉的：报告本身不带
+         * 「我覆盖了哪段时间」，窗口是端点算出来再传给工具的，不回显的话页面上就是一份无从解释的数字。
+         *
+         * <p>{@code dataAccess.status=skipped} 与 {@code /api/ui/config} 的
+         * {@code auditPersistence=false} 是同一个原因（没有 AuditLogRepository bean）。这条断言
+         * 与 {@code AuditPersistenceConfigured} 里那条互为反面，两边一起才说明这个降级是由配置驱动的。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void auditReportsEchoWindowAndSkipReportsWithoutPersistence() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/ui/audit-reports"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+
+            assertThat(body).containsKeys("hours", "from", "to", "limit",
+                    "metrics", "dataAccess", "protection");
+            assertThat(body.get("hours")).isEqualTo(24);
+            assertThat(body.get("limit")).isEqualTo(100);
+            assertThat((String) body.get("from")).isNotBlank();
+            assertThat((String) body.get("to")).isNotBlank();
+
+            Map<String, Object> metrics = (Map<String, Object>) body.get("metrics");
+            assertThat(metrics).containsKeys("totalQueries", "slowQueryCount", "slowQueryRate",
+                    "slowQueryThresholdMs", "trackedPatterns", "maxSlowQueries", "maxSqlPatterns");
+
+            Map<String, Object> dataAccess = (Map<String, Object>) body.get("dataAccess");
+            assertThat(dataAccess.get("status"))
+                    .as("没有 spring.datasource.url 时数据访问报告必须是 skipped，而不是空报告或 500")
+                    .isEqualTo("skipped");
+            assertThat(dataAccess).containsKey("reason");
+
+            Map<String, Object> protection = (Map<String, Object>) body.get("protection");
+            assertThat(protection.get("status")).isEqualTo("skipped");
+            assertThat(protection).containsKey("reason");
+        }
+
+        /** {@code hours} 与 {@code limit} 一样按夹取后的值回显，理由同 performance 的 limit。 */
+        @Test
+        void auditReportWindowIsClamped() throws Exception {
+            Map<String, Object> tooLarge = json(mockMvc.perform(
+                            get("/api/ui/audit-reports?hours=9999&limit=9999"))
+                    .andReturn());
+            assertThat(tooLarge.get("hours")).isEqualTo(168);
+            assertThat(tooLarge.get("limit")).isEqualTo(500);
+
+            Map<String, Object> tooSmall = json(mockMvc.perform(
+                            get("/api/ui/audit-reports?hours=0&limit=-3"))
+                    .andReturn());
+            assertThat(tooSmall.get("hours")).isEqualTo(1);
+            assertThat(tooSmall.get("limit")).isEqualTo(1);
+        }
+
+        // ─── 参数校验：400 而不是 500 ──────────────────────────────────
+
+        /**
+         * {@code /api/ui/pool} 不带 {@code connection} 是 400。
+         *
+         * <p>不挡的话这个请求会走到工具的必填校验，抛 {@code McpToolException} → HTTP 500。
+         * 「调用方少传参数」和「服务器坏了」在页面上的处理不同（前者不该弹重试、不该报警）。
+         */
+        @Test
+        void poolRequiresConnection() throws Exception {
+            mockMvc.perform(get("/api/ui/pool"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+        }
+
+        /** 未知 {@code view} 是 400；不是 500，也不是一个静默的空结果。 */
+        @Test
+        void dbaRejectsUnknownView() throws Exception {
+            mockMvc.perform(get("/api/ui/dba?view=nope"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+            // 缺失同样按非法处理：省略 view 时没有一个「默认视图」是合理的猜测。
+            mockMvc.perform(get("/api/ui/dba"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+        }
+
+        /** {@code tableSize} 缺 {@code table} 是 400，与 pool 缺 connection 同一个理由。 */
+        @Test
+        void dbaTableSizeRequiresTable() throws Exception {
+            mockMvc.perform(get("/api/ui/dba?view=tableSize"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+        }
+
+        /**
+         * {@code /api/ui/dba/views} 是前端选择器的唯一数据源，空清单等于那个选择器渲染不出来。
+         *
+         * <p>不断言清单内容，只断言非空并且和 {@link #dbaRejectsUnknownView} 里那个非法值不沾边：
+         * 把九个 view 名字抄进断言只会让「加一个视图」变成改两处。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void dbaViewsListsSupportedViews() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/ui/dba/views"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            List<String> views = (List<String>) body.get("views");
+            assertThat(views).isNotEmpty().doesNotContain("nope");
+        }
+
         // ─── 静态页面 ──────────────────────────────────────────────────
 
         /**
@@ -336,6 +505,21 @@ class WebUiTest {
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
             mockMvc.perform(get("/api/ui/performance"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/info"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/tools"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/audit-reports"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            // 下面三条不带凭证时必须先撞上 401，而不是先走到参数校验的 400：
+            // 过滤器链在 DispatcherServlet 之前，顺序反了意味着未鉴权的调用方能靠状态码
+            // 区分「参数不对」和「端点不存在」，等于一个探测接口。
+            mockMvc.perform(get("/api/ui/pool"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/dba?view=nope"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/dba/views"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
         }
 
         /** 页面本身也要凭证：它和 /api/** 是同一档，不存在「页面能开、表格全 401」的中间态。 */
@@ -419,6 +603,26 @@ class WebUiTest {
             mockMvc.perform(get("/api/audit/history?limit=5"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
                     .andExpect(r -> assertThat(r.getResponse().getContentAsString()).startsWith("["));
+        }
+
+        /**
+         * {@code AuthDisabledWithoutAuditPersistence} 里那条 {@code skipped} 断言的反面：
+         * 有了 {@code spring.datasource.url} 撑起的 {@code AuditLogRepository}，
+         * 数据访问报告就必须真的查一次库。
+         *
+         * <p>只断言「不是 skipped」而不是等于 {@code completed}：两者的差别只有仓储抛不抛异常，
+         * 而这里要钉的是「报告的可用性由那个 bean 在不在决定」，不是 H2 的 DDL 行为。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void auditReportsAreNotSkippedWithPersistence() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/ui/audit-reports?hours=1&limit=5"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            Map<String, Object> dataAccess = (Map<String, Object>) body.get("dataAccess");
+            assertThat(dataAccess.get("status"))
+                    .as("配了 spring.datasource.url 之后数据访问报告不该再被跳过")
+                    .isNotEqualTo("skipped");
         }
     }
 
