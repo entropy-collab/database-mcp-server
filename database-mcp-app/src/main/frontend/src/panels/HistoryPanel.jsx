@@ -1,14 +1,17 @@
-import { Banner, Stack } from '@astryxdesign/core';
+import { Banner, VStack } from '@astryxdesign/core';
+import { useMemo } from 'react';
 import { fetchAuditHistory } from '../api.js';
 import { usePanelData } from '../usePanelData.js';
 import {
-  DataTable,
   ErrorNotice,
-  PanelNote,
-  booleanColumn,
+  InteractiveTable,
+  RESULT_ENUM_VALUES,
+  SEARCH_ALL_FIELD,
   numberColumn,
+  resultColumn,
   sqlColumn,
   textColumn,
+  timeColumn,
 } from '../components.jsx';
 
 /**
@@ -19,6 +22,52 @@ import {
  * 判据来自 /api/ui/config，而 config 的 auditPersistence 与 history 返回 503 用的是
  * 同一个 AuditLogRepository bean，所以两者不可能不一致。
  */
+
+/*
+ * 列定义与审计流水几乎一样，但刻意<b>不共用</b>一份常量。
+ *
+ * 两张表的差别是实打实的：这一张有 id（数据库主键，唯一稳定的行标识）、有 error
+ * （落库时记下的错误信息，内存缓冲那张的 error 通常已经被环形覆盖掉了），
+ * 而且默认排序按 id 倒序而不是按 timestamp——同一毫秒写入的多条记录，
+ * 只有 id 能给出确定的先后。共用一份再靠参数开关这些差异，读起来比写两份更绕。
+ */
+const COLUMNS = [
+  numberColumn('id', 'id', { px: 72 }),
+  timeColumn('timestamp', '时间'),
+  textColumn('tool', '工具', { flex: 1, weight: 'semibold', filter: 'tool' }),
+  textColumn('connectionKey', '连接', { flex: 1, filter: 'connectionKey' }),
+  sqlColumn('sql', 'SQL', { flex: 3, filter: 'sql' }),
+  numberColumn('rows', '行数', { px: 88 }),
+  numberColumn('durationMs', '耗时(ms)', { px: 104, filter: 'durationMs' }),
+  resultColumn('result', '结果', { filter: 'result' }),
+  textColumn('error', '错误', { flex: 2, filter: 'error' }),
+];
+
+const SEARCH_FIELDS = [
+  SEARCH_ALL_FIELD,
+  { key: 'tool', type: 'string', label: '工具' },
+  { key: 'connectionKey', type: 'string', label: '连接' },
+  { key: 'sql', type: 'string', label: 'SQL' },
+  { key: 'error', type: 'string', label: '错误' },
+  { key: 'durationMs', type: 'number', label: '耗时(ms)' },
+  { key: 'result', type: 'enum', label: '结果', enumValues: RESULT_ENUM_VALUES },
+];
+
+/*
+ * 排序不写自定义比较器，理由同 AuditPanel：core 的 defaultCompare 已经处理了
+ * number 快路径与空值排末尾，手写的版本反而会把空值当 0。
+ */
+
+/** id 倒序 = 写入顺序倒序，比 timestamp 倒序更确定（同毫秒的多条记录也能定序）。 */
+const DEFAULT_SORT = [{ sortKey: 'id', direction: 'descending' }];
+
+/** 有主键就用主键。内容拼出来的 key 只是没有主键时的替代品。 */
+const ROW_KEY = (row) => String(row.id);
+
+function rowTone(row) {
+  return row.success === false ? 'error' : null;
+}
+
 export default function HistoryPanel({ limit, refreshToken, auditPersistence }) {
   /*
    * 三态而不是两态：true / false / 读不到 config。
@@ -35,13 +84,17 @@ export default function HistoryPanel({ limit, refreshToken, auditPersistence }) 
     { enabled },
   );
 
-  return (
-    <Stack direction="column" gap={4}>
-      <PanelNote>
-        持久化审计表。审计落库是 opt-in 的：没有配置 spring.datasource.url 时这一页永远是空的，
-        接口会返回 503。来源 GET /api/audit/history。
-      </PanelNote>
+  /* result 的派生理由见 AuditPanel：enum 过滤、排序、CSV 三处都要字符串。 */
+  const rows = useMemo(
+    () => (Array.isArray(data) ? data : []).map((r) => ({
+      ...r,
+      result: r.success === false ? '失败' : '成功',
+    })),
+    [data],
+  );
 
+  return (
+    <VStack gap={6}>
       {auditPersistence === false && (
         <Banner
           status="info"
@@ -69,23 +122,23 @@ export default function HistoryPanel({ limit, refreshToken, auditPersistence }) 
       <ErrorNotice error={error} />
 
       {enabled && (
-        <DataTable
-          columns={[
-            numberColumn('id', 'id', { px: 72 }),
-            textColumn('timestamp', '时间', { flex: 1 }),
-            textColumn('tool', '工具', { flex: 1, weight: 'semibold' }),
-            textColumn('connectionKey', '连接', { flex: 1 }),
-            sqlColumn('sql', 'SQL', { flex: 3 }),
-            numberColumn('rows', '行数', { px: 88 }),
-            numberColumn('durationMs', '耗时(ms)', { px: 104 }),
-            booleanColumn('success', '结果'),
-            textColumn('error', '错误', { flex: 2 }),
-          ]}
-          rows={data}
+        <InteractiveTable
+          title="审计表记录"
+          source="GET /api/audit/history · 持久化审计表，落库是 opt-in 的 · 点任意一行看完整 SQL"
+          rows={rows}
+          columns={COLUMNS}
+          searchFields={SEARCH_FIELDS}
+          searchName="audit-history"
+          defaultSort={DEFAULT_SORT}
+          getRowKey={ROW_KEY}
+          getRowTone={rowTone}
+          detailTitle="审计表记录详情"
+          detailSqlKey="sql"
+          csvBaseName="audit-history"
           emptyTitle="审计表里这个区间没有记录"
           emptyDescription="调大条数，或确认审计写入确实发生过。"
         />
       )}
-    </Stack>
+    </VStack>
   );
 }

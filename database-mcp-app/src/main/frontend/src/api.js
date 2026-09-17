@@ -1,5 +1,5 @@
 /*
- * 后端读取层。四个数据端点 + 一个自举端点，全部是 GET，页面不提供任何写入口。
+ * 后端读取层。十个数据端点 + 一个自举端点，全部是 GET，页面不提供任何写入口。
  *
  * 错误处理的原则沿用零构建版本：任何非 2xx 都把状态码与响应体原样带回调用方，
  * 由面板显示出来，绝不吞掉后渲染一张空表格。开了鉴权而浏览器没带凭证时，
@@ -60,4 +60,65 @@ export function fetchConnections() {
 /** GET /api/ui/performance?limit=n → {limit, summary, slowQueries, totalTrackedPatterns, patterns, metrics} */
 export function fetchPerformance(limit) {
   return getJson(`ui/performance?limit=${limit}`);
+}
+
+/**
+ * GET /api/ui/info → {serviceName, version, activeProfiles, startedAt, uptimeSeconds, switches, toolCount}
+ *
+ * version 来自 spring.ai.mcp.server.version（Maven 资源过滤填入），不是 build-info；
+ * startedAt / uptimeSeconds 是容器 refresh 期的近似值。两点都由 InfoPanel 写在页面上。
+ */
+export function fetchInfo() {
+  return getJson('ui/info');
+}
+
+/** GET /api/ui/tools → {total, exposed, groups: [...], tools: [{name, group, summary, tags}]}（没有 inputSchema） */
+export function fetchTools() {
+  return getJson('ui/tools');
+}
+
+/**
+ * GET /api/ui/audit-reports?hours=h&limit=n
+ * → {hours, from, to, limit, metrics, dataAccess, protection}
+ *
+ * hours 被后端夹到 1..168、limit 夹到 1..500，返回体里的 hours/limit/from/to 是夹取后的
+ * 真实窗口，所以页面一律回显后端给的值而不是自己手里的入参。
+ */
+export function fetchAuditReports(hours, limit) {
+  return getJson(`ui/audit-reports?hours=${hours}&limit=${limit}`);
+}
+
+/**
+ * GET /api/ui/pool?connection=xxx → 单个连接的池指标（缺 connection 时后端 400）。
+ *
+ * 目前没有页面调它：连接页一次就把全部池指标取回来了，这个端点是给「展开某一行看单池」
+ * 用的，留在这里是为了让读取层和后端端点一一对应，而不是让下一个人以为它不存在。
+ */
+export function fetchPool(connection) {
+  return getJson(`ui/pool?connection=${encodeURIComponent(connection)}`);
+}
+
+/**
+ * GET /api/ui/dba?view=&connection=&schema=&table= → {dialect, rows: [...]}
+ *
+ * 唯一会真的往业务库发 SQL 的端点，绝大多数 view 只有 Oracle 实现，方言不匹配 / 连接不存在/
+ * 账号没有数据字典权限都是 500 + 消息。空串参数一律不发：后端把空串按「有值」处理会得到
+ * 一个查不到东西的 schema 过滤，而不是「不过滤」。
+ */
+export function fetchDba({ view, connection, schema, table }) {
+  const params = new URLSearchParams({ view });
+  if (connection) { params.set('connection', connection); }
+  if (schema) { params.set('schema', schema); }
+  if (table) { params.set('table', table); }
+  return getJson(`ui/dba?${params.toString()}`);
+}
+
+/**
+ * GET /api/ui/dba/views → {views: [...]}
+ *
+ * 前端不写第二份 view 清单：写两份之后后端新加的 view 前端点不到，前端多出的 view 点了必然 400。
+ * 这个端点只读一个常量列表，不连库，所以它可以跟着面板挂载就发。
+ */
+export function fetchDbaViews() {
+  return getJson('ui/dba/views');
 }
