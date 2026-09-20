@@ -50,14 +50,19 @@ import java.util.function.Supplier;
  * Uses Supplier-based dependency injection for shared components,
  * following Spring's DataSourceBuilder pattern.
  *
- * <p>这里没有 {@code @EnableConfigurationProperties}：{@code properties} 包由
- * {@link com.entropy.database.mcp.DatabaseMcpApplication} 上的
- * {@code @ConfigurationPropertiesScan} 统一注册。
+ * <p>{@code properties} 包由 {@link com.entropy.database.mcp.DatabaseMcpApplication} 上的
+ * {@code @ConfigurationPropertiesScan} 统一注册，所以这里不重复声明它们。
+ * 唯一的例外是 {@link com.entropy.database.mcp.authz.ToolAuthzProperties}：它住在 {@code authz} 包，
+ * 而本配置声明的 {@code connectionAuthorizer} 直接依赖它——只导入本类的切片测试拿不到扫描结果，
+ * 所以在这里用 {@code @EnableConfigurationProperties} 显式带上。两处注册用的是同一个 bean 名，
+ * 重复是幂等的。
  *
- * <p>{@code proxyBeanMethods = false} 可以安全关闭 CGLIB 代理：9 个 {@code @Bean} 方法之间
+ * <p>{@code proxyBeanMethods = false} 可以安全关闭 CGLIB 代理：{@code @Bean} 方法之间
  * 没有互相调用，依赖全部走方法参数注入。对照 {@code AsyncConfig}——那个类必须保留代理。
  */
 @Configuration(proxyBeanMethods = false)
+@org.springframework.boot.context.properties.EnableConfigurationProperties(
+        com.entropy.database.mcp.authz.ToolAuthzProperties.class)
 public class DatabaseConfig {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseConfig.class);
@@ -115,12 +120,32 @@ public class DatabaseConfig {
         return new SqlValidatorImpl(properties);
     }
 
+    /**
+     * 连接级授权组件。
+     *
+     * <p>和 {@link #routingDatabaseFacade} 声明在一起，而不是靠组件扫描：任何只导入本配置的切片测试
+     * 都会因为扫不到 {@code authz} 包而起不来，而"授权组件恰好不在扫描范围里"是个与被测行为无关的
+     * 失败原因。
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public com.entropy.database.mcp.authz.ConnectionAuthorizer connectionAuthorizer(
+            com.entropy.database.mcp.authz.ToolAuthzProperties properties) {
+        return new com.entropy.database.mcp.authz.ConnectionAuthorizer(properties);
+    }
+
+    /**
+     * @param authorizer 按调用者的连接级授权。它是必填的：{@link RoutingDatabaseFacade} 那个
+     *                   不带授权的构造器刻意是包级可见的，所以"忘了接授权"在这里是编译错误，
+     *                   而不是一个跑起来才发现的静默放行。
+     */
     @Bean
     @ConditionalOnMissingBean
     public RoutingDatabaseFacade routingDatabaseFacade(
             DynamicDataSourceManager dynamicDataSourceManager,
-            @org.springframework.context.annotation.Lazy DatabaseBackupService backupService) {
-        return new RoutingDatabaseFacade(dynamicDataSourceManager, backupService);
+            @org.springframework.context.annotation.Lazy DatabaseBackupService backupService,
+            com.entropy.database.mcp.authz.ConnectionAuthorizer authorizer) {
+        return new RoutingDatabaseFacade(dynamicDataSourceManager, backupService, authorizer);
     }
 
     // ─── Unified BYOK Factory ──────────────────────────────────────────────

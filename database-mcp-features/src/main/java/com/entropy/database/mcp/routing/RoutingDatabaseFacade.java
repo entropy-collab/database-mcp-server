@@ -35,7 +35,10 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
+
+import com.entropy.database.mcp.authz.ConnectionAuthorizer;
 
 /**
  * Routing facade that delegates to BYOK datasources only.
@@ -48,6 +51,14 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
 
     private final DynamicDataSourceManager dynamicDataSourceManager;
     private final DatabaseBackupService backupService;
+
+    /**
+     * 按调用者的连接级授权。{@code null} 表示这次装配没有授权判定——见那个包级构造器。
+     *
+     * <p>它与 {@link #rejectIfReadonly} 是两道不同的闸：{@code readonly} 是连接<em>自身</em>的属性
+     * （声明为只读的连接谁都写不了），这里判的是"就算连接可写，也得看是谁"。
+     */
+    private final ConnectionAuthorizer authorizer;
 
     /**
      * Per-connection facades, keyed by the resolved connection key.
@@ -82,10 +93,19 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
      *                      {@link DynamicDataSourceManager} this facade uses; the proxy keeps the
      *                      two service beans from constraining each other's initialisation order.
      */
+    /**
+     * @param backupService injected lazily because it resolves connections through the same
+     *                      {@link DynamicDataSourceManager} this facade uses; the proxy keeps the
+     *                      two service beans from constraining each other's initialisation order.
+     * @param authorizer 按调用者的连接级授权
+     */
+    @org.springframework.beans.factory.annotation.Autowired
     public RoutingDatabaseFacade(DynamicDataSourceManager dynamicDataSourceManager,
-                                 @Lazy DatabaseBackupService backupService) {
+                                 @Lazy DatabaseBackupService backupService,
+                                 ConnectionAuthorizer authorizer) {
         this.dynamicDataSourceManager = dynamicDataSourceManager;
         this.backupService = backupService;
+        this.authorizer = authorizer;
         // 在构造器里订阅而不是 @PostConstruct：这个类也会被直接 new 出来用（测试、以及任何不经过容器的装配），
         // @PostConstruct 在那些路径上根本不会被调用，缓存就又退化成只增不删。
         // 传出去的是只捕获 facades 这一个 map 的 lambda，而不是 this::releaseFacade——回调可能在构造器还没走完
@@ -93,6 +113,18 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
         // 执行到这一行时已经赋值完成。
         ConcurrentHashMap<String, CachedFacade> registry = this.facades;
         dynamicDataSourceManager.addEvictionListener(key -> releaseFacade(registry, key));
+    }
+
+    /**
+     * 不带授权判定的装配。
+     *
+     * <p><b>包级可见，刻意不对外开放。</b>少传一个参数就等于关掉了按调用者的授权，而"装配方式决定
+     * 安全行为"的重载恰恰是最容易被无意选中的那种。容器永远走上面那个构造器
+     * （{@link ConnectionAuthorizer} 由 {@code DatabaseConfig} 声明成 {@code @Bean}），这个只给同包的测试用。
+     */
+    RoutingDatabaseFacade(DynamicDataSourceManager dynamicDataSourceManager,
+                          @Lazy DatabaseBackupService backupService) {
+        this(dynamicDataSourceManager, backupService, null);
     }
 
     /**
@@ -193,6 +225,21 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     }
 
     /**
+     * 读取路径的解析：解析出连接，再按这条 SQL 碰到的表决定放不放行。
+     *
+     * <p>只有<em>带 SQL</em> 的读会走这里。元数据类的读（{@link #listTables} 等）仍走
+     * {@link #resolveFacade}，不判授权——它们暴露的是结构而不是数据，见 {@code ConnectionAuthorizer}
+     * 关于覆盖范围的说明。
+     */
+    private ByokDatabaseFacade resolveReadFacade(String connection, String sql) {
+        ByokDataSourceContext context = resolveContext(connection);
+        if (authorizer != null) {
+            authorizer.requireSqlRead(context.getKey(), sql);
+        }
+        return facadeFor(context);
+    }
+
+    /**
      * 写入路径的解析：先解析出真正会被写的那条连接，再决定放不放行。
      *
      * <p>{@code McpToolExceptionAspect} 也有一道 readonly 闸，但它判的是调用方<em>传进来的</em>连接名，而
@@ -205,11 +252,34 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
      *
      * <p>调用方给的名字与规范名任意一侧只读即按只读处理：别名与规范名各有一条登记，{@code readonly} 取自各自
      * 注册时的入参，两者可以不一致，而它们共享同一个物理池——不能让其中一个名字变成写入后门。
+     *
+     * @param check 按调用者的判定。三种粒度（只有连接名、带 SQL、带表名）只在这一个参数上不同，
+     *              其余步骤必须逐字相同，所以不拆成三个方法各写一遍
      */
-    private ByokDatabaseFacade resolveWriteFacade(String connection) {
+    private ByokDatabaseFacade resolveWriteFacade(
+            String connection, BiConsumer<ConnectionAuthorizer, String> check) {
         ByokDataSourceContext context = resolveContext(connection);
         rejectIfReadonly(connection, context.getKey());
+        // 按调用者判定同样放在解析之后，理由和上面那道闸完全一样：连接名解析完才不存在
+        // "没传参数所以不知道该拦谁"这种输入形状。用规范名而不是调用方传进来的别名——
+        // 策略针对的是物理连接，别名不该成为另一条授权路径
+        if (authorizer != null) {
+            check.accept(authorizer, context.getKey());
+        }
         return facadeFor(context);
+    }
+
+    /** 拿不到对象名的写入（如 {@link #inTransaction}）：只能判到连接这一级。 */
+    private ByokDatabaseFacade resolveWriteFacade(String connection) {
+        return resolveWriteFacade(connection, (authz, key) -> authz.requireWrite(key));
+    }
+
+    private ByokDatabaseFacade resolveWriteFacadeForSql(String connection, String sql) {
+        return resolveWriteFacade(connection, (authz, key) -> authz.requireSqlWrite(key, sql));
+    }
+
+    private ByokDatabaseFacade resolveWriteFacadeForTable(String connection, String table) {
+        return resolveWriteFacade(connection, (authz, key) -> authz.requireTableWrite(key, table));
     }
 
     private void rejectIfReadonly(String requestedName, String resolvedKey) {
@@ -279,18 +349,18 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     @Override
     public PaginatedQueryResult executeQuery(
             String sql, int maxRows, String continuationToken, String connection) {
-        return resolveFacade(connection).executeQuery(sql, maxRows, continuationToken, connection);
+        return resolveReadFacade(connection, sql).executeQuery(sql, maxRows, continuationToken, connection);
     }
 
     @Override
     public List<Map<String, Object>> executeNamedQuery(
             String sql, Map<String, Object> params, String connection) {
-        return resolveFacade(connection).executeNamedQuery(sql, params, connection);
+        return resolveReadFacade(connection, sql).executeNamedQuery(sql, params, connection);
     }
 
     @Override
     public List<Map<String, Object>> queryRows(String sql, String connection, Object... args) {
-        return resolveFacade(connection).queryRows(sql, connection, args);
+        return resolveReadFacade(connection, sql).queryRows(sql, connection, args);
     }
 
     @Override
@@ -302,36 +372,38 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
 
     @Override
     public com.entropy.database.mcp.domain.PlanAnalysis explainPlan(String sql, String connection) {
-        return resolveFacade(connection).explainPlan(sql, connection);
+        return resolveReadFacade(connection, sql).explainPlan(sql, connection);
     }
 
     @Override
     public List<Map<String, Object>> explainPlanRows(String sql, String connection) {
-        return resolveFacade(connection).explainPlanRows(sql, connection);
+        return resolveReadFacade(connection, sql).explainPlanRows(sql, connection);
     }
 
     // ─── Write Operations ──────────────────────────────────────────────────
 
     @Override
     public Map<String, Object> executeDdl(String sql, String connection) {
-        return resolveWriteFacade(connection).executeDdl(sql, connection);
+        return resolveWriteFacadeForSql(connection, sql).executeDdl(sql, connection);
     }
 
     @Override
     public int executeUpdate(String sql, String connection, Object... args) {
-        return resolveWriteFacade(connection).executeUpdate(sql, connection, args);
+        return resolveWriteFacadeForSql(connection, sql).executeUpdate(sql, connection, args);
     }
 
     @Override
     public long batchInsert(String table, List<String> columns, List<List<Object>> rows,
                             int batchSize, String connection) {
-        return resolveWriteFacade(connection).batchInsert(table, columns, rows, batchSize, connection);
+        return resolveWriteFacadeForTable(connection, table)
+                .batchInsert(table, columns, rows, batchSize, connection);
     }
 
     @Override
     public long batchUpsert(String table, List<String> keyColumns, List<String> columns,
                             List<List<Object>> rows, int batchSize, String connection) {
-        return resolveWriteFacade(connection).batchUpsert(table, keyColumns, columns, rows, batchSize, connection);
+        return resolveWriteFacadeForTable(connection, table)
+                .batchUpsert(table, keyColumns, columns, rows, batchSize, connection);
     }
 
     @Override

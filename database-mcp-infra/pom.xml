@@ -87,6 +87,33 @@
         </dependency>
 
         <!--
+            Facet：授权内核。工具级授权（谁能在哪条连接上做什么）落在 authz 包，判定与策略数据
+            都在这里，不进 tools 层——tools 只负责在切面上问一句"放不放行"。
+
+            facet-core 零依赖（module-info 里一个 requires 都没有），facet-store-memory 提供
+            内存适配器。策略数据是配置驱动的，所以不需要 facet-store-pg —— 那个适配器要
+            PostgreSQL 的 WITH RECURSIVE / ctid / 顾问锁，H2 上跑不起来。
+
+            NOTE 目前是本地安装的 0.1.0-SNAPSHOT（facet 尚未发布到 Central）。CI 上需要先
+            构建并 install facet，否则解析不到。
+        -->
+        <dependency>
+            <groupId>io.github.yaotj</groupId>
+            <artifactId>facet-core</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yaotj</groupId>
+            <artifactId>facet-store-memory</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yaotj</groupId>
+            <artifactId>facet-dsl-rebac</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
+
+        <!--
             H2 只出现在测试里：主代码对 H2 的唯一"引用"是 DialectUtils 里的驱动类名字符串，
             编译期不需要它。
         -->
