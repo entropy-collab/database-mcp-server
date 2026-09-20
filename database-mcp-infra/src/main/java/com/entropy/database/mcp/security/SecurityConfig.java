@@ -27,9 +27,9 @@ import org.springframework.core.env.Environment;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
@@ -37,6 +37,9 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtGra
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
@@ -97,6 +100,20 @@ public class SecurityConfig {
 
     @Value("${entropy.mcp.security.admin-username:admin}")
     private String adminUsername;
+
+    /**
+     * 调用者身份清单的文件路径，默认空——此时行为与引入这个开关之前<b>完全一致</b>，只有一个管理员。
+     *
+     * <p>为什么是文件路径而不是 yml 里的一段 list：口令（即便是 bcrypt 哈希）不该进版本控制，
+     * 这是 {@link #resolveAdminPassword()} 已经定过的调子。格式与校验见 {@link UserFile}。
+     *
+     * <p>为什么这里仍然用 {@code @Value} 而不是新建一个 {@code SecurityProperties}：
+     * 它只是一个字符串，而 {@code entropy.mcp.security.*} 一直由本类直读。真正需要
+     * {@code @ConfigurationProperties} 的是"一个用户列表"，而列表被刻意放到了进程外的文件里，
+     * 所以那个理由在这里不成立。
+     */
+    @Value("${entropy.mcp.security.users-file:}")
+    private String usersFile = "";
 
     private final Environment environment;
 
@@ -294,16 +311,91 @@ public class SecurityConfig {
     @Bean
     @ConditionalOnProperty(name = "entropy.mcp.security.enabled", havingValue = "true",
             matchIfMissing = true)
-    public UserDetailsService userDetailsService(PasswordEncoder passwordEncoder) {
+    public UserDetailsService userDetailsService(PasswordEncoder passwordEncoder,
+                                                ObjectProvider<JdbcUserStore> userStore) {
         String adminPassword = resolveAdminPassword();
+        var admin = new McpPrincipal(adminUsername, "user",
+                passwordEncoder.encode(adminPassword), Set.of("ROLE_ADMIN", "ROLE_DBA"));
 
-        UserDetails admin = User.builder()
-            .username(adminUsername)
-            .password(passwordEncoder.encode(adminPassword))
-            .roles("ADMIN", "DBA")
-            .build();
+        JdbcUserStore store = userStore.getIfAvailable();
+        if (store != null && !usersFile.isBlank()) {
+            // 两个来源就是两处真相：同一个用户名在两边不一致时，"哪个生效"取决于装配顺序
+            throw new IllegalStateException(
+                    "entropy.mcp.security.users-file 与 spring.datasource.url 只能配一个："
+                    + "身份必须有唯一来源。配了状态库就用 /api/users 管理身份，"
+                    + "只有凭据文件时身份在启动时从文件加载。");
+        }
+        if (store != null) {
+            return new UserStoreUserDetailsService(admin, store);
+        }
+        if (!usersFile.isBlank()) {
+            return new InMemoryUserDetailsManager(fromFile(admin));
+        }
+        return new InMemoryUserDetailsManager(List.of(admin));
+    }
 
-        return new InMemoryUserDetailsManager(admin);
+    /**
+     * 数据库为来源时的查找逻辑。
+     *
+     * <p>不用 {@link InMemoryUserDetailsManager}：那会在启动时把表整个读进内存，"不重启加用户"
+     * 就又失效了——而那正是选数据库的唯一理由。管理员仍然只在内存里，不进表。
+     *
+     * <p>包级可见以便直接断言"表里的 roles 真的变成了 authority"，不必为此启一整个容器。
+     */
+    record UserStoreUserDetailsService(McpPrincipal admin, JdbcUserStore store)
+            implements UserDetailsService {
+
+        @Override
+        public UserDetails loadUserByUsername(String username) {
+            if (admin.username().equals(username)) {
+                return admin;
+            }
+            var row = store.find(username)
+                    .orElseThrow(() -> new UsernameNotFoundException("未知调用者: " + username));
+            if (!row.enabled()) {
+                // 停用与不存在都报同一个异常：区分开会让这个接口变成一个"用户名是否存在"的探测器
+                throw new UsernameNotFoundException("未知调用者: " + username);
+            }
+            // 权限来自表里的 roles 列，不是 McpPrincipal.of 的空集：否则库里的身份永远拿不到
+            // /api/** 与只读面板（两者都要 ROLE_ADMIN），症状是"能调 /mcp 但打开页面一律 403"。
+            // 凭据文件那条路仍然走 McpPrincipal.of，语义不变（文件里的身份一律无权限）。
+            return new McpPrincipal(row.username(), row.type(), row.passwordHash(), row.roles());
+        }
+    }
+
+    /** 凭据文件为来源时，把整份清单读进内存。文件本身是静态的，所以全量加载没有代价。 */
+    private List<UserDetails> fromFile(McpPrincipal admin) {
+        var principals = new ArrayList<UserDetails>();
+        principals.add(admin);
+        var entries = UserFile.load(Path.of(usersFile));
+        for (var entry : entries) {
+            if (entry.username().equals(adminUsername)) {
+                // 同名会让"哪一条生效"取决于装配顺序，而那不该是安全行为的决定因素
+                throw new IllegalStateException("用户凭据文件里的 '" + entry.username()
+                        + "' 与 entropy.mcp.security.admin-username 同名，请改掉其中一个");
+            }
+            principals.add(McpPrincipal.of(entry.username(), entry.type(), entry.passwordHash()));
+        }
+        warnIdentitiesHaveNoToolLevelPolicy(usersFile, entries.size());
+        return principals;
+    }
+
+    /**
+     * 身份加载完成后的告警。
+     *
+     * <p>这一步<b>扩大了攻击面</b>而不是缩小：在此之前只有掌握管理员口令的人能到 {@code /mcp}，
+     * 之后每个身份都能。而 {@code /mcp} 目前只要求 {@code authenticated}，工具级授权尚未就位。
+     * 这条告警存在的意义就是让这个中间状态没法被忘掉。
+     */
+    static void warnIdentitiesHaveNoToolLevelPolicy(String source, int count) {
+        log.warn("""
+                ================================================================
+                已从 {} 加载 {} 个调用者身份。
+                这些身份【没有任何权限】，因此拿不到 /api/** 与只读运维页面；
+                但 /mcp 目前只要求 authenticated，所以它们可以调用全部工具，
+                包括 executeDdl / insertData / backupData / killSession。
+                在工具级授权就位之前，不要往这里加不该有 DDL 权限的人。
+                ================================================================""", source, count);
     }
 
     /**
