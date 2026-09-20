@@ -129,11 +129,18 @@ export default function InfoPanel({ refreshToken }) {
         items={[
           { label: '版本', value: data?.version, hint: VERSION_HINT },
           {
-            label: '工具数（已暴露 / 全部）',
+            /*
+             * 标签刻意写「部署期暴露」而不是「已暴露」。
+             *
+             * 这个数来自 ToolExposureFilter 的裁剪结果，启动期就定了；运行期在「工具清单」页
+             * 停用工具不会让它变小。两页都写「已暴露」会被读成互相矛盾，而它们本来是两个量：
+             * 这里是"部署允许暴露多少"，那里是"现在 tools/list 里还剩多少"。
+             */
+            label: '工具数（部署期暴露 / 全部）',
             value: toolCount.exposed === undefined && toolCount.total === undefined
               ? undefined
               : `${displayValue(toolCount.exposed)} / ${displayValue(toolCount.total)}`,
-            hint: '两个数不等说明 ToolExposureFilter 裁剪生效了，不是工具丢了',
+            hint: '两个数不等说明 ToolExposureFilter 裁剪生效了，不是工具丢了；运行期停用不影响这个数，看「工具清单」页',
           },
           {
             label: '运行时长',

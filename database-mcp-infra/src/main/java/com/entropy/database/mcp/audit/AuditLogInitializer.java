@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.audit;
 
+import com.entropy.database.mcp.util.JdbcUrls;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -71,28 +72,20 @@ public class AuditLogInitializer {
     /**
      * 按 JDBC URL 判定审计库是否只存在于进程内存里，是就告警。
      *
-     * <p>判据放在 URL 上而不是 {@code DatabaseMetaData}：产品名只能告诉你这是 H2，无法区分
-     * {@code jdbc:h2:mem:...}（进程内、必丢）与 {@code jdbc:h2:file:...}（落盘、可留存），
-     * 而这两者在留痕可靠性上是相反的结论。HSQLDB 与 Derby 的内存形态一并覆盖，它们同样可能
-     * 被部署方换上来。
+     * <p>判据本身住在 {@link com.entropy.database.mcp.util.JdbcUrls#isInMemory}，这里只负责
+     * 「审计历史会丢」这句话：同一个库上还有调用者身份表与 MCP 工具开关表，各自要说的丢失后果不同，
+     * 所以告警分开、判据共用。
      *
      * <p>包级可见以便直接断言。
      */
     static boolean warnIfInMemory(String url) {
-        if (url == null || url.isBlank()) {
-            return false;
-        }
-        String normalized = url.toLowerCase(Locale.ROOT);
-        boolean inMemory = normalized.startsWith("jdbc:h2:mem")
-                || normalized.startsWith("jdbc:hsqldb:mem")
-                || normalized.contains(":memory:")
-                || normalized.startsWith("jdbc:derby:memory");
+        boolean inMemory = JdbcUrls.isInMemory(url);
         if (inMemory) {
             log.warn("Audit log is persisted to an IN-MEMORY database ({}): audit history is lost "
                     + "when this process stops, and it is not shared across replicas. This is the "
                     + "zero-configuration default, not a compliance-grade audit trail. Point "
                     + "spring.datasource.url at an external database to keep the trail.",
-                    normalized);
+                    url.toLowerCase(Locale.ROOT));
         }
         return inMemory;
     }

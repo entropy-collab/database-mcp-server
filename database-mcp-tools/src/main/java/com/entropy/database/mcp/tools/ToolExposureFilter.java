@@ -35,8 +35,8 @@ import java.util.stream.Collectors;
  *
  * <h2>为什么必须在这一层做</h2>
  * Spring AI 的注解扫描把每个 {@code @McpTool} 方法转成一个 {@link SyncToolSpecification}，
- * 汇总成一个 {@code List} bean 后一次性灌进 MCP server。工具清单只在启动时确定一次，
- * 且服务以 {@code tools(listChanged=false)} 声明能力——协议层不支持运行期变更通知。
+ * 汇总成一个 {@code List} bean 后一次性灌进 MCP server。部署期的暴露面就在这一刻定下来，
+ * 且服务以 {@code tools(listChanged=false)} 声明能力——协议层没有"清单变了"的推送通道。
  * 因此"少暴露"只有两个位置可做：
  * <ul>
  *   <li>类级 {@code @ConditionalOnProperty}：粒度只能到整个工具类，无法单独摘掉
@@ -52,6 +52,18 @@ import java.util.stream.Collectors;
  * Spring AI 的版本演进耦合到 bean 名上；识别目标只依赖列表元素类型，换 SDK 版本仍然成立。
  * 依赖统一走 {@link ObjectProvider} 延迟解析：BeanPostProcessor 实例化极早，构造期直接
  * 注入普通 bean 会把它们拖到"未经全部后置处理器处理"的状态。
+ *
+ * <h2>这里同时是运行期开关的唯一数据源</h2>
+ * 裁剪后的 spec 列表交给 {@link ToolToggleRegistry#registerExposed}，那是运行期启用/停用工具
+ * （{@code /api/tools}）能操作的全集。本类是整个进程里唯一看得到 spec 列表的地方，而启用一个工具
+ * 需要把<b>原来那个 spec</b> 放回 server，所以快照只能在这里建。
+ *
+ * <p>快照刻意只覆盖裁剪后的集合：被本类裁掉的工具在运行期<b>无法</b>被启用回来。部署期的暴露策略
+ * 是部署方的决定，运行期开关是值班人员的工具，后者不该能绕过前者。
+ *
+ * <p>另一处刻意的不一致：本类在配置把工具全裁光时<b>直接启动失败</b>（{@code kept.isEmpty()}），
+ * 而 {@link ToolToggleRegistry} <b>允许</b>运行期把暴露集全部停掉。前者是配置错误，后者是
+ * kill switch，理由写在那个类的注释里——看到两处行为相反时请先读那一段，这不是 bug。
  */
 @Component
 public class ToolExposureFilter implements BeanPostProcessor {
@@ -60,11 +72,14 @@ public class ToolExposureFilter implements BeanPostProcessor {
 
     private final ObjectProvider<ToolExposureProperties> properties;
     private final ObjectProvider<ToolCatalog> catalog;
+    private final ObjectProvider<ToolToggleRegistry> toggles;
 
     public ToolExposureFilter(ObjectProvider<ToolExposureProperties> properties,
-                              ObjectProvider<ToolCatalog> catalog) {
+                              ObjectProvider<ToolCatalog> catalog,
+                              ObjectProvider<ToolToggleRegistry> toggles) {
         this.properties = properties;
         this.catalog = catalog;
+        this.toggles = toggles;
     }
 
     @Override
@@ -79,6 +94,9 @@ public class ToolExposureFilter implements BeanPostProcessor {
         List<SyncToolSpecification> specs = (List<SyncToolSpecification>) list;
         if (config.isNoop()) {
             log.info("MCP tool exposure: no filter configured, all {} tools registered", specs.size());
+            // 未配裁剪时"裁剪后的列表"就是全量，快照照样要建：运行期开关的可操作集合永远等于
+            // 真正交给 server 的那份列表，两条路径必须都记，否则默认部署下开关会认为一个工具都没有
+            toggles.getObject().registerExposed(specs);
             return bean;
         }
 
@@ -109,6 +127,10 @@ public class ToolExposureFilter implements BeanPostProcessor {
 
         // 让 suggestTools 只推荐真正调得到的工具：目录是从 bean 反射来的，不经过这里的裁剪。
         toolCatalog.restrictTo(kept.stream().map(spec -> spec.tool().name()).toList());
+        // 运行期开关只认这份裁剪后的列表：被上面裁掉的工具不进快照，也就无法在运行期被启用回来。
+        // 这是刻意的——部署期的暴露策略是部署方的决定，不该让值班人员用一次 HTTP 调用绕过去。
+        // 详见 ToolToggleRegistry 类注释。
+        toggles.getObject().registerExposed(kept);
         return kept;
     }
 

@@ -25,8 +25,12 @@ import java.util.stream.Stream;
  *
  * <p>{@link ToolCatalog} 与 {@link ToolExposureFilter} 都通过 ObjectProvider 延迟解析依赖
  * （避免 BeanPostProcessor 过早初始化普通 bean），单测里需要一个不依赖 Spring 上下文的实现。
+ *
+ * <p>{@code public} 而不是包级：{@link ToolToggleRegistry} 的仓储与 server 也是 ObjectProvider
+ * （见那个类注释里的循环依赖一段），而它的 HTTP 侧测试住在 {@code ...mcp.controller} 包里，
+ * 跨包要用同一个假实现。另一份拷贝只会与这份漂移。
  */
-final class FixedObjectProvider<T> implements ObjectProvider<T> {
+public final class FixedObjectProvider<T> implements ObjectProvider<T> {
 
     private final List<T> values;
 
@@ -34,8 +38,9 @@ final class FixedObjectProvider<T> implements ObjectProvider<T> {
         this.values = values;
     }
 
+    /** 空参调用表示「这个 bean 不存在」，{@link #getIfAvailable()} 因此返回 {@code null}。 */
     @SafeVarargs
-    static <T> ObjectProvider<T> of(T... values) {
+    public static <T> ObjectProvider<T> of(T... values) {
         return new FixedObjectProvider<>(List.of(values));
     }
 

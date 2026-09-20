@@ -147,7 +147,7 @@ const VIEW_GROUPS = [
       {
         value: 'tools',
         label: '工具清单',
-        hint: '已暴露的 MCP 工具目录，只有名字/分组/摘要，没有入参 schema',
+        hint: 'MCP 工具目录 + 运行期启用/停用（本面板唯一的写操作）；没有入参 schema',
       },
     ],
   },

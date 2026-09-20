@@ -19,6 +19,10 @@ import com.entropy.database.mcp.audit.AuditLogEntity;
 import com.entropy.database.mcp.audit.AuditLogRepository;
 import com.entropy.database.mcp.audit.ComplianceReportService;
 import com.entropy.database.mcp.audit.SqlAuditService;
+import com.entropy.database.mcp.toggle.ToolToggleRepository;
+import com.entropy.database.mcp.tools.ToolToggleRegistry;
+import io.modelcontextprotocol.server.McpStatelessSyncServer;
+import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.Filter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -29,6 +33,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -45,6 +51,7 @@ import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 
 /**
  * 只读运维页面的端到端契约：{@code WebUiController} 的各个端点、限值夹取、审计未落库时的降级路径，
@@ -873,6 +880,135 @@ class WebUiTest {
                     .as("含 null 列的审计记录不该让报告降级成 error")
                     .isEqualTo("completed");
             assertThat((List<?>) report.get("entries")).isNotEmpty();
+        }
+    }
+
+    // ─── 运行期启用/停用 MCP 工具 ──────────────────────────────────────────
+
+    /**
+     * {@code /api/tools} 跑在真实上下文里：这一组的第一价值是<b>上下文起得来</b>。
+     *
+     * <p>{@code ToolToggleRegistry} 要对 autoconfig 建出来的 {@code McpStatelessSyncServer} 做
+     * add/removeTool，而那个 bean 的入参正是被 {@code ToolExposureFilter}（BeanPostProcessor）
+     * 处理过的 spec 列表，而那个处理过程又要回调注册表的 {@code registerExposed}。这条链一旦被改成
+     * 构造期直接注入就是循环依赖，表现是整个应用启动失败——单测一条都抓不到，只有这里会红。
+     *
+     * <p>{@code spring.application.name} 那一行不是配置需求，是为了让本类的上下文不与
+     * {@code AuditPersistenceConfigured} 共享：Spring 的测试上下文缓存以合并后的配置为 key，
+     * 属性完全相同的两个 {@code @Nested} 会共用一个上下文（见 {@code AuthEnabled} 上那段说明），
+     * 而这一组会真的去停用工具、改动共享状态。给它一个独立的名字，两边互不影响。
+     *
+     * <p>配了 {@code spring.datasource.url}，所以这里同时是 {@code persisted=true} 那一侧的证明——
+     * 它的反面（内存模式照常可用、{@code persisted=false}）在 {@code ToolAdminControllerTest} 里。
+     */
+    @Nested
+    @SpringBootTest(properties = {
+        "entropy.mcp.database.enabled=true",
+        "entropy.mcp.database.dialect=generic",
+        "entropy.mcp.gateway.enabled=false",
+        "entropy.mcp.security.enabled=false",
+        "spring.application.name=tool-toggle-admin-test",
+        "spring.datasource.url=jdbc:h2:mem:tool_toggle_web_test;DB_CLOSE_DELAY=-1",
+        "spring.datasource.username=sa",
+        "spring.datasource.password="
+    })
+    class ToolToggleAdminApi extends WithMockMvc {
+
+        @Autowired
+        ToolToggleRegistry toggles;
+
+        @Autowired
+        McpStatelessSyncServer mcpServer;
+
+        @Autowired
+        JdbcTemplate jdbcTemplate;
+
+        private List<String> listedTools() {
+            return mcpServer.listTools().stream().map(McpSchema.Tool::name).toList();
+        }
+
+        private void setDisabled(String tool, boolean disabled) throws Exception {
+            mockMvc.perform(put("/api/tools/" + tool)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"disabled\": " + disabled + "}"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
+        }
+
+        /**
+         * 注册表的暴露集快照与 server 真正持有的工具集必须对得上。
+         *
+         * <p>拿 {@code remainingExposed()} 比而不是拿快照大小比：同一个上下文里的其它用例可能正停着
+         * 某个工具，而这条要钉的是「快照不是空的、且它与 {@code tools/list} 同步」这个不变量。
+         * 快照为空的坏法尤其安静——开关会报"一个工具都动不了"，而不是报错。
+         */
+        @Test
+        void theRegistrySnapshotMatchesWhatTheMcpServerHolds() {
+            assertThat(toggles.exposedToolNames())
+                    .as("快照必须在启动期由 ToolExposureFilter 喂进来；空的意味着那条回调没跑")
+                    .isNotEmpty();
+            assertThat(listedTools()).hasSize(toggles.remainingExposed());
+            assertThat(toggles.exposedToolNames()).containsAll(listedTools());
+        }
+
+        @Test
+        @SuppressWarnings("unchecked")
+        void listReportsTheToolsAndSaysChangesArePersisted() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/tools"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+
+            assertThat(body).containsKeys("total", "exposed", "disabledCount", "persisted", "tools");
+            assertThat((Integer) body.get("exposed")).isPositive();
+            assertThat(body.get("persisted"))
+                    .as("配了 spring.datasource.url 就该说改动活得过重启")
+                    .isEqualTo(true);
+            List<Map<String, Object>> tools = (List<Map<String, Object>>) body.get("tools");
+            assertThat(tools).isNotEmpty();
+            assertThat(tools.getFirst()).containsKeys("name", "group", "exposed", "disabled");
+        }
+
+        /**
+         * 停用真的让工具从 {@code tools/list} 消失，启用真的让它回来，并且落了库。
+         *
+         * <p>用完就放回去：本上下文被同组其它用例共享，留一个停用的工具会让它们的计数漂移。
+         */
+        @Test
+        void disablingAToolOverHttpRemovesItFromToolsListAndPersistsIt() throws Exception {
+            String tool = toggles.exposedToolNames().iterator().next();
+
+            setDisabled(tool, true);
+            try {
+                assertThat(listedTools())
+                        .as("停用的语义就是它从 tools/list 消失，而不是调用时报错")
+                        .doesNotContain(tool);
+                assertThat(toggles.isDisabled(tool)).isTrue();
+                assertThat(jdbcTemplate.queryForObject(
+                        "SELECT updated_by FROM " + ToolToggleRepository.TABLE_NAME
+                                + " WHERE tool_name = ? AND disabled = 1", String.class, tool))
+                        .as("""
+                                操作者必须落库，且不能为空——"这个工具是谁停的"没有第二处记录。
+                                这里是 anonymousUser 而不是 unknown：entropy.mcp.security.enabled=false 时
+                                过滤器链仍然装着匿名认证，SecurityContextHolder 里有一个 AnonymousAuthenticationToken。
+                                ToolToggleRegistry.UNKNOWN_ACTOR 那条回退路径要 SecurityContext 整个为空才会走到
+                                （见 ToolToggleRegistryTest.actorFallsBackToUnknownWithoutASecurityContext），
+                                它的注释说"鉴权关闭时就是这种情况"，实际不是——两者都不阻塞操作，所以行为没问题，
+                                但谁要按那句注释去断言 unknown，会在这里发现对不上。""")
+                        .isEqualTo("anonymousUser");
+            } finally {
+                setDisabled(tool, false);
+            }
+
+            assertThat(listedTools()).contains(tool);
+            assertThat(toggles.isDisabled(tool)).isFalse();
+        }
+
+        /** 未知工具名是 400，不是 500——与 {@code ToolAdminControllerTest} 同一条，这里过真实的过滤器链。 */
+        @Test
+        void unknownToolNameIsRejectedWithBadRequest() throws Exception {
+            mockMvc.perform(put("/api/tools/noSuchToolAtAll")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"disabled\": true}"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
         }
     }
 

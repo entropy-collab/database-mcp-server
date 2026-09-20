@@ -1,16 +1,21 @@
 /*
- * 后端读取层。全部是 GET，页面不提供任何写入口。
+ * 后端读取层，外加一组<b>唯一的写接口</b>（工具启用/停用，见文件末尾）。
  *
- * 两个后端控制器，两组语义完全不同的端点，这个文件按同样的顺序分成两段：
- * - WebUiController（下半段之前）：进程内状态（审计、连接、池、指标、服务信息）+ DBA 诊断视图。
+ * 三个后端控制器，三组语义完全不同的端点，这个文件按同样的顺序分成三段：
+ * - WebUiController（下一段之前）：进程内状态（审计、连接、池、指标、服务信息）+ DBA 诊断视图。
  *   除 dba 那两个之外都不连业务库，所以面板可以挂载即拉。
- * - WebUiExplorerController（本文件末尾那一大段）：schema / catalog / lineage / jobs /
+ * - WebUiExplorerController（中间那一大段）：schema / catalog / lineage / jobs /
  *   backups / cdc / quality / sql，一共 36 个端点。<b>其中绝大多数会真的对业务库发 SQL</b>，
  *   因此对应的面板一律「先填参数、点按钮才发请求」，不在挂载时打库。
+ * - ToolAdminController（本文件末尾）：`GET /api/tools` 与两个 `PUT`。
+ *   这是整个前端唯一会改服务端状态的地方——「本页面只读」这句话从这一版起<b>不再成立</b>，
+ *   改动这个文件时不要再按「反正都是 GET」来推理（比如给请求加自动重试：重试一次 PUT
+ *   是幂等的，但重试会把一次失败的操作变成"看起来没发生却已经生效"）。
  *
  * 错误处理的原则沿用零构建版本：任何非 2xx 都把状态码与响应体原样带回调用方，
  * 由面板显示出来，绝不吞掉后渲染一张空表格。开了鉴权而浏览器没带凭证时，
- * 运维要看到的是 401，而不是「没有数据」。
+ * 运维要看到的是 401，而不是「没有数据」。写请求同一口径：400 的消息里带着可选值
+ * （后端把「工具名拼错」和「被部署期裁掉」分成两句话写在消息里），原样显示才有用。
  */
 
 /** 后端 WebUiController.MAX_LIMIT 的镜像；真值由 /api/ui/config 的 maxLimit 覆盖。 */
@@ -37,6 +42,32 @@ export class ApiError extends Error {
 
 async function getJson(path) {
   const res = await fetch(url(path), { headers: { Accept: 'application/json' } });
+  const body = await res.text();
+  if (!res.ok) {
+    throw new ApiError(res.status, res.statusText, body);
+  }
+  return body ? JSON.parse(body) : null;
+}
+
+/**
+ * 带 JSON 体的 PUT。错误处理与 getJson 逐字相同（同一个 ApiError、同样原样带回响应体）。
+ *
+ * ── 为什么是新函数而不是给 getJson 加一个可选的 body 参数 ──
+ * 那样会得到一个「传了 body 就变成写请求」的两用函数，而这个文件里 40 多个调用点全是读。
+ * 一次手滑（给某个 fetchXxx 多传一个参数）就会把一次读操作变成一次真实的状态变更，
+ * 而且类型系统在这个项目里帮不上忙（纯 JS，没有 TS 检查）。分成两个函数之后，
+ * 「这一行会不会改服务端状态」用函数名就能判断，grep putJson 就是全部写入口。
+ *
+ * 不设超时也不重试：重试一次 PUT 在后端是幂等的（changed 会变成 false），但那会让
+ * 「第一次其实成功了、响应在路上丢了」这种情况显示成"未变更"，和"本来就是这个状态"
+ * 混成同一个结果。写操作宁可让调用方看见一次明确的失败。
+ */
+async function putJson(path, payload) {
+  const res = await fetch(url(path), {
+    method: 'PUT',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
   const body = await res.text();
   if (!res.ok) {
     throw new ApiError(res.status, res.statusText, body);
@@ -79,7 +110,14 @@ export function fetchInfo() {
   return getJson('ui/info');
 }
 
-/** GET /api/ui/tools → {total, exposed, groups: [...], tools: [{name, group, summary, tags}]}（没有 inputSchema） */
+/**
+ * GET /api/ui/tools → {total, exposed, groups: [...], tools: [{name, group, summary, tags}]}（没有 inputSchema）
+ *
+ * 工具页<b>已经不用它了</b>，改用了下面的 fetchToolAdmin（理由写在 ToolsPanel 的头注释里）。
+ * 留在这里的理由同 fetchPool：读取层与后端端点一一对应，删掉会让下一个人以为
+ * WebUiController 没有这个端点。<b>新代码不要用它</b>——它缺 exposed/disabled 这两个
+ * 逐工具字段，拿它渲染"状态"列只能全填"启用"，那是在说谎。
+ */
 export function fetchTools() {
   return getJson('ui/tools');
 }
@@ -445,5 +483,75 @@ export function fetchSqlRewrites({ sql, connection }) {
 /** GET /api/ui/sql/indexes → {…, recommendationCount, recommendations} · 本组唯一以表名（不是 SQL）为输入 */
 export function fetchSqlIndexes({ table, connection }) {
   return getJson(`ui/sql/indexes${query({ table, connection })}`);
+}
+
+// =============================================================================
+// ToolAdminController：运行期启用/停用 MCP 工具（本文件唯一的三个写/管端点）
+// =============================================================================
+
+/*
+ * 这一组是 /api/tools（注意<b>不在</b> /api/ui/ 之下）。后端把它单独开一个控制器，
+ * 理由是「WebUiController 的每个方法都只读进程内状态」这条约束要能一眼看出来，
+ * 前端这边同理：这一段之外的全部函数都不会改服务端状态。
+ *
+ * 鉴权和其余端点同一档（SecurityConfig 里 /api/** → ROLE_ADMIN），所以 401/403 的
+ * 处理不需要特殊化，ApiError 里那句「需要 admin 凭证」的提示照样适用。
+ * 但要知道 entropy.mcp.security.enabled=false 的部署下这两个 PUT 对任何能连上端口的人
+ * 开放——那时它比只读面板严重，页面上因此也把"这是写操作"写了出来。
+ */
+
+/**
+ * GET /api/tools → {total, exposed, disabledCount, persisted,
+ *                   tools: [{name, group, summary, tags, exposed, disabled}]}
+ *
+ * 四个顶层计数的口径（逐字对着 ToolAdminController.list 读出来的，别按直觉推）：
+ * - total：tools 数组的长度 = ToolCatalog 全量 + 快照里有而目录里没有的（扩展注册的工具）；
+ * - exposed：<b>部署期暴露集的大小</b>，包含当前被停用的那些。它<b>不是</b>"现在客户端能看到几个"；
+ * - disabledCount：其中被运行期停用的个数。所以现在 tools/list 里的个数 = exposed - disabledCount，
+ *   也就是两个 PUT 返回体里的 remainingExposed；
+ * - persisted：false 表示没配 spring.datasource.url，开关只在进程内存里，重启回到配置声明的状态。
+ *   内存模式是受支持的部署形态（默认就是它），所以这里是 200 而不是 503。
+ *
+ * 逐工具的两个布尔：
+ * - exposed=false：被部署期 entropy.mcp.tools（plane/groups/include/exclude）裁掉了，
+ *   运行期<b>不允许</b>启用（对它发 PUT 是 400）。页面必须提前把按钮禁掉，别让人点了才知道；
+ * - disabled=true：已从 tools/list 移除。它一定是 exposed 的子集（后端两个方向都先过 requireExposed）。
+ *
+ * group 可以是 null（非目录来源的工具），tags 可以是空数组——调用方不要假设非空。
+ */
+export function fetchToolAdmin() {
+  return getJson('tools');
+}
+
+/**
+ * PUT /api/tools/{name}，体 {"disabled": true|false}
+ * → {name, disabled, changed, remainingExposed, persisted}
+ *
+ * changed=false 是<b>幂等成功</b>（它本来就是这个状态），不是错误。
+ * remainingExposed=0 意味着 tools/list 现在是空数组，客户端那边通常表现为"服务没接上"——
+ * 后端刻意允许这件事（运行期 kill switch），所以拦不拦由页面决定，页面必须先问一次。
+ *
+ * 400 的三种来源都在响应体的消息里写清了，原样显示即可：缺 disabled 字段、未知工具名、
+ * 以及被部署期配置裁掉的工具名（那类只能改配置重启）。
+ *
+ * name 走 encodeURIComponent：工具名目前都是 [a-zA-Z0-9_]，但它是从 @McpTool 反射来的，
+ * 不是本前端能保证的字符集，拼进路径前一律转义。
+ */
+export function setToolDisabled(name, disabled) {
+  return putJson(`tools/${encodeURIComponent(name)}`, { disabled });
+}
+
+/**
+ * PUT /api/tools/groups/{group}，体 {"disabled": true|false}
+ * → {group, disabled, affected: [...], changed, remainingExposed, persisted}
+ *
+ * affected 是这条命令<b>作用到</b>的工具（该分组下全部已暴露的工具），changed 是其中状态
+ * 真的变了的个数——重复执行同一条命令时 affected 不变而 changed 归零，两者不同是正常的。
+ *
+ * 分组下一个已暴露的工具都没有时是 400（消息里列出可操作的分组），所以页面的分组下拉
+ * 只列"至少有一个已暴露工具"的分组，而不是全量分组名。
+ */
+export function setGroupDisabled(group, disabled) {
+  return putJson(`tools/groups/${encodeURIComponent(group)}`, { disabled });
 }
 

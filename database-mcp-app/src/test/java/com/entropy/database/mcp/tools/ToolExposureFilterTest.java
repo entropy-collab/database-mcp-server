@@ -45,6 +45,16 @@ class ToolExposureFilterTest {
     private final ToolCatalog catalog = new ToolCatalog(
             FixedObjectProvider.of(new QueryLikeTools(), new HealthLikeTools()));
 
+    /**
+     * 裁剪后的 spec 列表同时要进运行期开关的快照，所以每个用例都带一个真实的注册表。
+     *
+     * <p>server 与仓储都给空 provider：{@code registerExposed} 只往 Map 里放东西，碰不到它们。
+     * 真要 add/removeTool 的行为由 {@code ToolToggleRegistryTest} 与
+     * {@code WebUiTest.ToolToggleAdminApi} 覆盖。
+     */
+    private final ToolToggleRegistry toggles = new ToolToggleRegistry(
+            FixedObjectProvider.of(), FixedObjectProvider.of(catalog), FixedObjectProvider.of());
+
     private static final ToolExposureProperties NO_FILTER = props(Set.of(), Set.of(), Set.of());
 
     /** 绝大多数用例与 plane 无关，走默认值 {@code all}。 */
@@ -65,7 +75,8 @@ class ToolExposureFilterTest {
             spec("flashbackSample"), spec("untemplatedSample"));
 
     private ToolExposureFilter filterWith(ToolExposureProperties properties) {
-        return new ToolExposureFilter(FixedObjectProvider.of(properties), FixedObjectProvider.of(catalog));
+        return new ToolExposureFilter(FixedObjectProvider.of(properties),
+                FixedObjectProvider.of(catalog), FixedObjectProvider.of(toggles));
     }
 
     @SuppressWarnings("unchecked")
@@ -108,6 +119,28 @@ class ToolExposureFilterTest {
     void excludeAloneKeepsEverythingElse() {
         assertThat(keptNames(props(Set.of(), Set.of(), Set.of("flashbackSample"))))
                 .containsExactly("executeSample", "checkSampleHealth", "untemplatedSample");
+    }
+
+    /**
+     * 裁剪后的列表就是运行期开关的可操作全集。
+     *
+     * <p>这条钉住的是「运行期不能绕过部署期策略」：被这里裁掉的工具不进快照，
+     * {@code /api/tools} 因此启用不回来（那一侧的拒绝由 {@code ToolToggleRegistryTest} 断言）。
+     */
+    @Test
+    void registersOnlyTheKeptSpecsWithTheToggleRegistry() {
+        keptNames(props(Set.of("query-like"), Set.of(), Set.of()));
+
+        assertThat(toggles.exposedToolNames()).containsExactly("executeSample");
+    }
+
+    /** 未配裁剪时快照也必须建起来，否则默认部署下开关会认为一个工具都动不了。 */
+    @Test
+    void registersEverythingWithTheToggleRegistryWhenNoFilterIsConfigured() {
+        filterWith(NO_FILTER).postProcessAfterInitialization(allSpecs, SPEC_BEAN_NAME);
+
+        assertThat(toggles.exposedToolNames()).containsExactly(
+                "checkSampleHealth", "executeSample", "flashbackSample", "untemplatedSample");
     }
 
     @Test

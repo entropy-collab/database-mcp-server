@@ -35,6 +35,20 @@
             <artifactId>spring-boot-starter-aspectj</artifactId>
         </dependency>
 
+        <!--
+            JdbcTemplate：toggle 包的 ToolToggleRepository 把 MCP 工具开关落进服务端状态库
+            （spring.datasource.url，与 audit_log / mcp_user 同一个）。它经 features 也传递可见，
+            显式声明是因为这里是直接使用——父 POM 的说明里写了理由：依赖不下沉到真正用它的模块，
+            Maven 就无法帮我们发现越层引用。
+
+            注意 ArchUnit R1 禁止 tools 包依赖 JdbcTemplate，那条规则防的是"工具绕过门面直连业务库"；
+            仓储因此住在 com.entropy.database.mcp.toggle 而不是 ...tools，理由写在那个类里。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
         <!-- JSpecify null 性注解，见 infra 的同名依赖说明 -->
         <dependency>
             <groupId>org.jspecify</groupId>
@@ -44,6 +58,13 @@
         <dependency>
             <groupId>com.github.jsqlparser</groupId>
             <artifactId>jsqlparser</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- ToolToggleRepositoryTest 在内存库与文件库上各跑一遍建表与读写 -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

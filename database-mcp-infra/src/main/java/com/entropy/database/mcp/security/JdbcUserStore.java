@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.security;
 
+import com.entropy.database.mcp.util.JdbcUrls;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -328,20 +329,13 @@ class JdbcUserStore {
 
     /**
      * 按 JDBC URL 判断库是否只存在于进程内存里。
-
      *
-     * <p>判据在 URL 上而不是 {@code DatabaseMetaData}：产品名只能告诉你这是 H2，区分不出
-     * {@code jdbc:h2:mem:}（必丢）与 {@code jdbc:h2:file:}（留存），而这两者的结论是相反的。
-     * 与 {@code AuditLogInitializer.warnIfInMemory} 同一套判据；包级可见以便直接断言。
+     * <p>判据本身住在 {@link JdbcUrls#isInMemory}：服务端状态库现在有三个持久化组件
+     * （审计流水、调用者身份、MCP 工具开关）要问同一个问题，而它们分属三个包，各留一份拷贝
+     * 就意味着「换一种内存库」时只改到其中一两处。这里保留方法是为了让本类的测试仍然断言
+     * 「身份表会不会告警」这件事，而不是让判据有第二份实现。
      */
     static boolean isInMemory(String url) {
-        if (url == null || url.isBlank()) {
-            return false;
-        }
-        String normalized = url.toLowerCase(Locale.ROOT);
-        return normalized.startsWith("jdbc:h2:mem")
-                || normalized.startsWith("jdbc:hsqldb:mem")
-                || normalized.contains(":memory:")
-                || normalized.startsWith("jdbc:derby:memory");
+        return JdbcUrls.isInMemory(url);
     }
 }
