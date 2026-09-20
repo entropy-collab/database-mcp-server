@@ -20,6 +20,8 @@ import com.entropy.database.mcp.byok.ByokDataSourceContext;
 import com.entropy.database.mcp.byok.DynamicDataSourceManager;
 import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.domain.PaginatedQueryResult;
+import com.entropy.database.mcp.exception.ErrorCode;
+import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.facade.MetaDataCallback;
 import com.entropy.database.mcp.facade.TransactionalWork;
@@ -187,7 +189,49 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
     }
 
     private ByokDatabaseFacade resolveFacade(String connection) {
+        return facadeFor(resolveContext(connection));
+    }
+
+    /**
+     * 写入路径的解析：先解析出真正会被写的那条连接，再决定放不放行。
+     *
+     * <p>{@code McpToolExceptionAspect} 也有一道 readonly 闸，但它判的是调用方<em>传进来的</em>连接名，而
+     * {@code connection} 在多数 MCP 工具上是 {@code required = false}；省掉这个参数，切面拿到 null 就直接放行，
+     * 而 {@link #resolveContext} 在只注册了一条连接时会把它补上——于是"省掉参数"曾经等于绕过只读保护写库，
+     * 且单连接恰好是最常见的部署形态。闸门放在解析之后，就不存在"没传参数所以不知道该拦谁"这种输入形状。
+     *
+     * <p>另外这是普通方法调用而不是 advice，所以 {@link #copyRows} 经由 {@link #batchInsert} 的自调用同样被拦——
+     * Spring AOP 的自调用绕过代理，把闸门做成切面会在这条路径上失效。
+     *
+     * <p>调用方给的名字与规范名任意一侧只读即按只读处理：别名与规范名各有一条登记，{@code readonly} 取自各自
+     * 注册时的入参，两者可以不一致，而它们共享同一个物理池——不能让其中一个名字变成写入后门。
+     */
+    private ByokDatabaseFacade resolveWriteFacade(String connection) {
         ByokDataSourceContext context = resolveContext(connection);
+        rejectIfReadonly(connection, context.getKey());
+        return facadeFor(context);
+    }
+
+    private void rejectIfReadonly(String requestedName, String resolvedKey) {
+        String readonlyName = null;
+        if (dynamicDataSourceManager.isReadonly(resolvedKey)) {
+            readonlyName = resolvedKey;
+        } else if (requestedName != null && !requestedName.isBlank()
+                && dynamicDataSourceManager.isReadonly(requestedName)) {
+            readonlyName = requestedName;
+        }
+        if (readonlyName == null) {
+            return;
+        }
+        throw new McpToolException(
+                ErrorCode.CONNECTION_READONLY,
+                "Connection '" + readonlyName + "' is registered as read-only, so write operations "
+                        + "are rejected. Use a read-only tool, or a connection registered without "
+                        + "readonly=true.",
+                readonlyName);
+    }
+
+    private ByokDatabaseFacade facadeFor(ByokDataSourceContext context) {
         return facades.compute(context.getKey(), (key, cached) ->
                         cached != null && cached.facade().wraps(context)
                                 ? cached
@@ -270,29 +314,29 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
 
     @Override
     public Map<String, Object> executeDdl(String sql, String connection) {
-        return resolveFacade(connection).executeDdl(sql, connection);
+        return resolveWriteFacade(connection).executeDdl(sql, connection);
     }
 
     @Override
     public int executeUpdate(String sql, String connection, Object... args) {
-        return resolveFacade(connection).executeUpdate(sql, connection, args);
+        return resolveWriteFacade(connection).executeUpdate(sql, connection, args);
     }
 
     @Override
     public long batchInsert(String table, List<String> columns, List<List<Object>> rows,
                             int batchSize, String connection) {
-        return resolveFacade(connection).batchInsert(table, columns, rows, batchSize, connection);
+        return resolveWriteFacade(connection).batchInsert(table, columns, rows, batchSize, connection);
     }
 
     @Override
     public long batchUpsert(String table, List<String> keyColumns, List<String> columns,
                             List<List<Object>> rows, int batchSize, String connection) {
-        return resolveFacade(connection).batchUpsert(table, keyColumns, columns, rows, batchSize, connection);
+        return resolveWriteFacade(connection).batchUpsert(table, keyColumns, columns, rows, batchSize, connection);
     }
 
     @Override
     public <T> T inTransaction(String connection, TransactionalWork<T> work) {
-        return resolveFacade(connection).inTransaction(connection, work);
+        return resolveWriteFacade(connection).inTransaction(connection, work);
     }
 
     // ─── Backup Operations ─────────────────────────────────────────────────

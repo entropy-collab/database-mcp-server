@@ -139,6 +139,12 @@ public class McpToolExceptionAspect {
      * {@code @McpTool.McpAnnotations(readOnlyHint = ...)}, so it is declared in exactly one
      * place and cannot drift from what {@code tools/list} advertises.</p>
      *
+     * <p>这道闸是<em>早退</em>而不是权威判据：它只认调用方明确传进来的连接名，而 {@code connection} 在多数工具上
+     * 是 {@code required = false}，省掉参数就拿不到名字、这里只能放行。真正不可绕过的判据在
+     * {@code RoutingDatabaseFacade} 的写入路径上——那里连接已经解析完（单连接部署会自动补上），闸门也不受
+     * "参数传没传"影响。这里保留的价值是：对声明为写操作的工具，在触库之前就给出一条带工具名的明确错误，
+     * 而不是等它走到某个 facade 写方法才报。</p>
+     *
      * <p>Two exemptions: {@code createNamedConnection} registers or re-registers the
      * connection itself, so gating it on the flag it sets would make a read-only connection
      * impossible to update; and {@link #SERVER_STATE_ONLY_TOOLS} never touch the database.</p>
