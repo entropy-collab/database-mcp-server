@@ -359,26 +359,11 @@ public class SqlValidatorImpl implements SqlValidator {
     }
 
     /**
-     * Collects every table the statement reads, including tables that only appear inside a
-     * derived table, a WHERE/SELECT-list subquery, a set operation or a CTE body. Delegating to
-     * {@link TablesNamesFinder} also strips aliases and skips CTE names, so a CTE cannot shadow a
-     * whitelisted name to smuggle in a different table.
-     *
-     * <p>Traversal failure is treated as a validation failure rather than an empty result: an
-     * unresolvable statement must not slip past the whitelist.</p>
+     * 对象名提取委托给 {@link SqlTables}——表白名单与表级授权必须对"这条 SQL 碰了哪些表"
+     * 给出同一个答案，见那个类的说明。
      */
     private Set<String> extractTables(String sql, Statement stmt) {
-        Set<String> found;
-        try {
-            found = new TablesNamesFinder().getTables(stmt);
-        } catch (RuntimeException e) {
-            throw new McpSqlValidationException(sql, "Unable to resolve table names for whitelist check", e);
-        }
-        Set<String> normalized = new LinkedHashSet<>();
-        for (String name : found) {
-            if (name != null && !name.isBlank()) normalized.add(name.toUpperCase(Locale.ROOT));
-        }
-        return normalized;
+        return SqlTables.of(stmt, sql);
     }
 
     /**
