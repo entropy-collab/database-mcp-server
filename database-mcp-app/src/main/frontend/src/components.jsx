@@ -1,6 +1,6 @@
 /*
  * 面板之间共用的显示件：错误横幅、指标卡片、分区、数据表格、可交互表格、行详情面板、
- * CSV 导出、sparkline。
+ * CSV 导出、Markdown 下载、sparkline。
  *
  * 抽出来的理由和后端 WebUiController 里"全部走已有工具 bean"一样：四个面板对
  * 「加载失败长什么样」「空表格长什么样」必须给出同一个答案，否则运维会以为
@@ -194,12 +194,16 @@ export function toCsv(columns, rows) {
 /**
  * 纯前端下载。不发任何请求——页面的约束是「只发 GET」，而导出根本不需要发。
  *
- * \ufeff（BOM）不是可有可无的：没有它，Excel（Windows 简中默认 GBK）打开这份 UTF-8
+ * \ufeff（BOM）对 CSV 不是可有可无的：没有它，Excel（Windows 简中默认 GBK）打开这份 UTF-8
  * 文件会把所有中文表头显示成乱码。导出功能的实际用途就是发给别人用 Excel 打开，
  * 所以这三个字节比"文件更干净"重要。
+ *
+ * 反过来 Markdown 一律<b>不加</b> BOM：那份文件的用途是粘给模型或进 git，而 BOM 会变成正文的
+ * 第一个字符（\ufeff 不是空白，trim 不掉），表现为"第一个 # 标题不生效"或者 diff 里一个看不见
+ * 的改动。所以 bom 是调用方必须想清楚的参数，没有默认值。
  */
-function downloadTextFile(filename, text) {
-  const blob = new Blob([`\ufeff${text}`], { type: 'text/csv;charset=utf-8;' });
+function downloadTextFile(filename, text, mimeType, bom) {
+  const blob = new Blob(bom ? [`\ufeff${text}`] : [text], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -212,12 +216,33 @@ function downloadTextFile(filename, text) {
 }
 
 /** 文件名带上时间戳：运维一天里会导出好几次，`audit-logs.csv (3)` 分不清哪个是哪个。 */
-function csvFileName(base) {
+function stampedFileName(base, extension) {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`
     + `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  return `${base}-${stamp}.csv`;
+  return `${base}-${stamp}.${extension}`;
+}
+
+/**
+ * 「下载 .md」按钮。给「一大段可直接粘贴的 Markdown」用（目前只有工具提示词）。
+ *
+ * 和 ExportCsvButton 分成两个件而不是加一个 format 参数：那个件的入参是 columns + rows
+ * （表格语义），这个件的入参是一整段文本，两者除了"都会触发浏览器下载"之外没有共同点。
+ * 共用的只有下载与文件名这两个私有函数。
+ */
+export function DownloadMarkdownButton({ text, baseName, label = '下载 .md', isDisabled }) {
+  const onDownload = useCallback(() => {
+    downloadTextFile(stampedFileName(baseName, 'md'), text, 'text/markdown;charset=utf-8;', false);
+  }, [text, baseName]);
+  return (
+    <Button
+      label={label}
+      variant="secondary"
+      isDisabled={isDisabled || !text}
+      onClick={onDownload}
+    />
+  );
 }
 
 /**
@@ -229,7 +254,8 @@ function csvFileName(base) {
  */
 export function ExportCsvButton({ columns, rows, baseName, isDisabled }) {
   const onExport = useCallback(() => {
-    downloadTextFile(csvFileName(baseName), toCsv(columns, rows));
+    downloadTextFile(stampedFileName(baseName, 'csv'), toCsv(columns, rows),
+      'text/csv;charset=utf-8;', true);
   }, [columns, rows, baseName]);
   return (
     <Button

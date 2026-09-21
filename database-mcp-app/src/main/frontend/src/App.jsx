@@ -11,10 +11,10 @@
  * 刻意没用模板里的这些东西：
  * - 图标（模板用 @heroicons/react）：没装，而且为了几个装饰性图标引一个图标库不值得。
  *   SideNavItem 的 icon 是可选的，省掉之后就是纯文字导航。
- * - CommandPalette（shell-nav 里的 ⌘K 搜索）：视图从 8 个涨到 16 个之后这条重新想过一遍。
- *   还是不加：16 项分成四组之后，「我要找的东西在哪一组」是扫一眼就能完成的，
+ * - CommandPalette（shell-nav 里的 ⌘K 搜索）：视图从 8 个涨到 18 个之后这条重新想过两遍。
+ *   还是不加：18 项分成五组之后，「我要找的东西在哪一组」是扫一眼就能完成的，
  *   而 CommandPalette 要求先想起视图叫什么再打字。真正的分界线是「组数多到扫不完」，
- *   四组还差得远。前 9 项另有数字键（见 HOTKEY_VIEW_COUNT）。
+ *   五组还差得远。前 9 项另有数字键（见 HOTKEY_VIEW_COUNT）。
  * - 图表（dashboard-alert-rail 的 Sparkline / MetricChart）：那些底下是 recharts，没装。
  *   性能页那条折线是手写 SVG（见 components.jsx 的 Sparkline）。
  */
@@ -45,7 +45,7 @@ import {
   VStack,
   useHotkeys,
 } from '@astryxdesign/core';
-import { FALLBACK_MAX_LIMIT, fetchConfig } from './api.js';
+import { FALLBACK_MAX_LIMIT, fetchConfig, logout, onUnauthorized } from './api.js';
 /* 刻意从 ./searchFocus.js 而不是 ./components.jsx 取：后者会把 370 KB 的显示件
    连带一大片 core 拉进入口的静态依赖图（Vite 会给它加 modulepreload），
    视图级懒加载就白做了。理由写在 searchFocus.js 的头注释里。 */
@@ -95,13 +95,23 @@ const PANELS = {
   cdc: lazy(() => import('./panels/CdcPanel.jsx')),
   backups: lazy(() => import('./panels/BackupsPanel.jsx')),
   jobs: lazy(() => import('./panels/JobsPanel.jsx')),
+  users: lazy(() => import('./panels/UsersPanel.jsx')),
+  authz: lazy(() => import('./panels/AuthzPanel.jsx')),
 };
+
+/**
+ * 登录界面也懒加载。
+ *
+ * 它不在 PANELS 里：那张表是"侧栏能点到的视图"，而登录界面不在导航里，它是未认证状态下
+ * 整个应用的替代品。懒加载的理由和面板一样——已登录的人不该为一个他看不到的表单付下载成本。
+ */
+const LoginView = lazy(() => import('./LoginView.jsx'));
 
 /*
  * 导航数据源。
  *
- * ── 为什么从平铺的 8 项改成 4 组 16 项 ──
- * 视图数翻倍之后，平铺的侧栏是一列 16 个等重的名字，从中找一个要逐行读。分组之后
+ * ── 为什么从平铺的 8 项改成分组（现在是 5 组 18 项）──
+ * 视图数翻倍之后，平铺的侧栏是一列十几个等重的名字，从中找一个要逐行读。分组之后
  * 「我要找的东西大概在哪一组」这一步用扫的就能完成，只在组内才需要读名字。
  * 分组用 SideNavSection（它有 title 与 isHeaderHidden），而不是自己画一行标题：
  * 它会给这一组挂 role="group" + aria-labelledby，屏幕阅读器读得出组名。
@@ -203,6 +213,32 @@ const VIEW_GROUPS = [
         value: 'jobs',
         label: 'ETL 作业',
         hint: '只读；网关关闭时是 200+enabled=false，有未完成作业时列表端点会 500',
+      },
+    ],
+  },
+  /*
+   * 访问控制单独成组，而不是把「身份管理」塞进「运行状态」跟在工具清单后面。
+   *
+   * 两个理由，第二个是硬的：
+   * - 分组判据是「什么时候会打开它」。工具开关回答"客户端能看到哪些工具"，身份管理回答
+   *   "谁能连上来"——后者是在加人/裁人的时候打开的，和排查运行状态不是同一件事；
+   * - <b>插在中间会挪动已有的数字快捷键</b>。序号按 VIEWS 的全局下标算，把它放进第二组
+   *   会让 Schema 浏览从 8 变成 9、数据资产从 9 掉出快捷键范围——一个已经被记住的键位
+   *   悄悄指向了另一个视图，比没有快捷键糟。放在末尾则不影响前 9 项。
+   * 这一组后续还会加「权限视图」（按身份看连接级/表级读写），所以它不是为了一项而建的组。
+   */
+  {
+    title: '访问控制',
+    views: [
+      {
+        value: 'users',
+        label: '身份管理',
+        hint: '列出/新增/停用调用者身份（写操作）；不含环境变量里的管理员，没配状态库时整页 503',
+      },
+      {
+        value: 'authz',
+        label: '权限视图',
+        hint: '按调用者的连接级/表级读写；只读（授权改 yml 并重启），开关关闭时全放行而不是全禁止',
       },
     ],
   },
@@ -422,6 +458,16 @@ function PanelSkeleton() {
 export default function App() {
   const [config, setConfig] = useState(null);
   const [isConfigLoaded, setConfigLoaded] = useState(false);
+  /**
+   * 未认证状态。
+   *
+   * 它由两处置起：自举时 /api/ui/config 回 401，以及运行期任何一个请求回 401
+   * （会话超时走这条，见 api.js 的 notifyUnauthorized）。置起后整个应用被登录界面替换，
+   * <b>但不卸载 hash</b>——登录完回到同一个视图、同一条选中行。
+   */
+  const [needsLogin, setNeedsLogin] = useState(false);
+  /** 登录成功后重跑一次自举：拿到 config 才知道鉴权状态与 maxLimit。 */
+  const [bootstrapToken, setBootstrapToken] = useState(0);
   /* 初值从 hash 读，而且是惰性初值（useState(fn)）：写成 useState(readHash().view) 的话
      每次渲染都会解析一遍 hash，而它只在挂载时有用。 */
   const [view, setView] = useState(() => readHash().view ?? DEFAULT_VIEW);
@@ -436,12 +482,34 @@ export default function App() {
   // 自举：先读 config，再决定告警条与「审计历史」页要不要发请求。
   useEffect(() => {
     let cancelled = false;
+    setConfigLoaded(false);
     fetchConfig()
-      .then((cfg) => { if (!cancelled) { setConfig(cfg); } })
-      .catch(() => { if (!cancelled) { setConfig(null); } })
+      .then((cfg) => {
+        if (!cancelled) {
+          setConfig(cfg);
+          setNeedsLogin(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setConfig(null);
+          /* 401 = 没登录或会话超时 → 切到登录视图。
+             其他错误（503、网络不通）照旧走 isConfigLoaded=true + config=null → AuthBanner 说"状态未知"。 */
+          if (err?.status === 401) {
+            setNeedsLogin(true);
+          }
+        }
+      })
       .finally(() => { if (!cancelled) { setConfigLoaded(true); } });
     return () => { cancelled = true; };
-  }, []);
+  }, [bootstrapToken]);
+
+  // 运行期 401 通知（会话超时走这条）
+  useEffect(() => onUnauthorized(() => {
+    setNeedsLogin(true);
+    setConfigLoaded(false);
+    setConfig(null);
+  }), []);
 
   // state → hash。见 readHash 上方关于"为什么不打环"的说明。
   useEffect(() => { writeHashParams({ view, limit }); }, [view, limit]);
@@ -559,6 +627,27 @@ export default function App() {
      React 抛的错读不出哪个视图坏了。 */
   const CurrentPanel = PANELS[current.value] ?? PANELS[VIEWS[0].value];
 
+  /*
+   * 未认证时整个外壳都不渲染，只给登录界面。
+   *
+   * 这个提前返回必须放在<b>所有 hook 之后</b>（上面那些 useState / useEffect / useHotkeys 都要照常跑），
+   * 否则两次渲染之间的 hook 数量会变，React 会直接抛错。
+   *
+   * 刻意不渲染 AppShell 的骨架：侧栏与顶栏在未登录时全是不可用的，摆出来只会让人去点。
+   */
+  if (needsLogin) {
+    return (
+      <Suspense fallback={<PanelSkeleton />}>
+        <LoginView onSuccess={() => {
+          setNeedsLogin(false);
+          // 重跑自举：config 决定告警条、maxLimit 与「审计历史」页要不要发请求
+          setBootstrapToken((t) => t + 1);
+        }}
+        />
+      </Suspense>
+    );
+  }
+
   return (
     <AppShell
       contentPadding={0}
@@ -609,6 +698,15 @@ export default function App() {
                   写在 diagnostics.jsx 的头注释里。 */}
               <DiagnosticBundleButton limit={limit} />
               <Button label="刷新" variant="primary" onClick={refresh} />
+              {/*
+                退出登录。只在鉴权开着时才有意义——关着的时候没有会话可退，
+                摆一个点了什么都不发生的按钮比没有按钮更糟。
+                它是 POST /logout（GET 退出意味着任何一张图片的 src 都能把人踢下线），
+                CSRF token 由 api.js 带上；退完跳登录页。
+              */}
+              {config?.authEnabled === true && (
+                <Button label="退出" variant="secondary" onClick={() => { logout(); }} />
+              )}
             </HStack>
           }
         />

@@ -50,7 +50,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 
 /**
@@ -168,11 +170,64 @@ class WebUiTest {
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(503));
         }
 
+        /**
+         * 身份表也挂在 {@code spring.datasource.url} 上：三个端点在这个部署形态下全是 503。
+         *
+         * <p>三个动词都测而不是只测 GET：前端「身份管理」页把 503 渲染成"功能未启用"的 info 横幅
+         * 而不是故障，那个分支读的正是 {@code error.status}。哪天写路径变成 500（比如有人给控制器
+         * 加了非空断言），页面就会把一个受支持的部署形态显示成服务器故障。
+         *
+         * <p>POST 的体刻意是个空对象：没有 {@code UserAdminService} 时必须在校验请求体之前就停在
+         * 503，而不是先回一个"用户名不能为空"的 400——后者会让运维去找一个填不对的表单，
+         * 而真相是这台服务器没配状态库。
+         */
+        @Test
+        void userAdminApisAreUnavailableWithoutDatasource() throws Exception {
+            mockMvc.perform(get("/api/users"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(503));
+            mockMvc.perform(post("/api/users")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{}"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(503));
+            mockMvc.perform(delete("/api/users/whoever"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(503));
+        }
+
         @Test
         void auditLogsBufferIsServed() throws Exception {
             mockMvc.perform(get("/api/audit/logs?limit=5"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
                     .andExpect(r -> assertThat(r.getResponse().getContentAsString()).startsWith("["));
+        }
+
+        /**
+         * {@code /api/authz} 在真实上下文里的两件事：<b>bean 接得上</b>，以及默认部署下
+         * {@code enabled=false}。
+         *
+         * <p>前者是这条用例的主要价值——{@code AuthzViewController} 住在 tools 模块、
+         * {@code ToolAuthzProperties} 住在 infra 的 {@code authz} 包，而后者不在
+         * {@code @ConfigurationPropertiesScan} 覆盖的 {@code properties} 包里，靠 {@code DatabaseConfig}
+         * 上那个 {@code @EnableConfigurationProperties} 显式带上。哪天有人删掉那一行，
+         * 症状是<b>整个应用起不来</b>（控制器构造不出来），而单测一条都抓不到。
+         *
+         * <p>后者是页面的判断依据：{@code enabled=false} 时授权判定全放行，页面要出 error 横幅说
+         * "这张表不反映实际权限"。断言它默认是 false，等于钉住"这是个必须由部署方显式打开的开关"。
+         */
+        @Test
+        @SuppressWarnings("unchecked")
+        void authzViewIsServedAndReportsTheSwitchAsOffByDefault() throws Exception {
+            Map<String, Object> body = json(mockMvc.perform(get("/api/authz"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+
+            assertThat(body).containsKeys("enabled", "grantCount", "subjectCount",
+                    "connectionCount", "roles", "grants");
+            assertThat(body.get("enabled"))
+                    .as("授权是破坏性开关，默认必须是关的")
+                    .isEqualTo(false);
+            assertThat((List<Map<String, Object>>) body.get("roles"))
+                    .as("角色图例由后端给，前端不写第二份——它为空会让页面画不出读写能力")
+                    .isNotEmpty();
         }
 
         @Test
@@ -705,14 +760,30 @@ class WebUiTest {
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
             mockMvc.perform(get("/api/ui/schema/schemas"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            // /api/authz 与 /api/users 都不在 /api/ui 之下，靠的是同一条 /api/** 规则收编。
+            // 前者是一份"谁能碰哪张表"的全景图，后者能造出管理员——两条都必须在 401 上停住。
+            mockMvc.perform(get("/api/authz"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/users"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
         }
 
-        /** 页面本身也要凭证：它和 /api/** 是同一档，不存在「页面能开、表格全 401」的中间态。 */
+        /**
+         * 页面外壳与构建产物<b>匿名可读</b>（0.6.0 起的破坏性变更，与上一版这条用例相反）。
+         *
+         * <p>上一版断言的是 401：页面与 {@code /api/**} 同档。改成 permitAll 是为了让登录界面成为
+         * SPA 自己的一个视图——它必须匿名可读，而它要加载 {@code /assets/**} 里的 bundle 才能渲染。
+         * 判据变成了"保护数据而不是代码"：{@code /api/**} 仍然是 {@code ROLE_ADMIN}，
+         * 匿名能拿到的只有 HTML 外壳与 JS/CSS，里面没有任何业务数据。
+         */
         @Test
-        void thePageItselfRequiresCredentials() throws Exception {
+        void thePageShellIsPublicWhileApisStayProtected() throws Exception {
             mockMvc.perform(get("/"))
-                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
             mockMvc.perform(get("/index.html"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
+            // 反面：数据端点一个都没放开
+            mockMvc.perform(get("/api/ui/config"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
         }
 
@@ -742,17 +813,24 @@ class WebUiTest {
             }
         }
 
-        /** 反向：产物也是 ROLE_ADMIN 档，不带凭证时是 401，而不是悄悄放行。 */
+        /**
+         * 产物也匿名可读——这一条是 {@code /assets/**} 那条通配规则的另一半守门人。
+         *
+         * <p>它取代了上一版的 {@code assetsRequireCredentialsToo}（断言 401）。反转的理由同上：
+         * 未登录的浏览器要先加载 bundle 才能渲染登录表单。这里仍然逐个请求 index.html 引用到的产物，
+         * 所以"白名单里的文件名过期了"那个坑照样能被抓到。
+         */
         @Test
-        void assetsRequireCredentialsToo() throws Exception {
-            String html = mockMvc.perform(get("/index.html")
-                            .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD)))
+        void assetsArePublicToo() throws Exception {
+            String html = mockMvc.perform(get("/index.html"))
                     .andReturn().getResponse().getContentAsString();
-            for (String asset : assetPaths(html)) {
+            List<String> assets = assetPaths(html);
+            assertThat(assets).isNotEmpty();
+            for (String asset : assets) {
                 mockMvc.perform(get(asset))
                         .andExpect(r -> assertThat(r.getResponse().getStatus())
-                                .as("%s 不带凭证必须是 401", asset)
-                                .isEqualTo(401));
+                                .as("%s 不带凭证必须是 200：登录界面在 SPA 里，它要先能加载", asset)
+                                .isEqualTo(200));
             }
         }
     }
@@ -830,7 +908,7 @@ class WebUiTest {
         private Instant insertSuccessfulRowWithNullColumns(String tool) {
             Instant eventTime = Instant.now();
             auditLogRepository.insert(new AuditLogEntity(
-                    null, tool, "SELECT 1", 1, 12L, true, null, eventTime, null));
+                    null, tool, "SELECT 1", 1, 12L, true, null, eventTime, null, null));
             return eventTime;
         }
 
@@ -1008,6 +1086,279 @@ class WebUiTest {
             mockMvc.perform(put("/api/tools/noSuchToolAtAll")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"disabled\": true}"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+        }
+    }
+
+    // ─── 按当前启用的工具生成提示词 ────────────────────────────────────────
+
+    /**
+     * {@code GET /api/tools/prompt} 在<b>真实的工具集</b>上的契约。
+     *
+     * <p>单测那边（{@code ToolPromptGeneratorTest}）用的是 3 个假工具，验的是文本结构；
+     * 这里验的是它接在真东西上仍然成立：{@code toolCount} 等于注册表报的
+     * {@code remainingExposed()}，而"约束"那一段报的是这个上下文真实的配置值。
+     * 这两件事只有在完整上下文里才可能错——{@code ToolExposureFilter} 有没有把快照喂进来、
+     * {@code ToolCatalog} 的反射索引有没有覆盖到全部工具 bean，都在这条链上。
+     *
+     * <p>{@code spring.application.name} 那一行不是配置需求，是为了让本类的上下文不与
+     * {@code AuthDisabledWithoutAuditPersistence} 共享：Spring 的测试上下文缓存以合并后的配置为
+     * key，属性完全相同的两个 {@code @Nested} 会共用一个上下文（见 {@code AuthEnabled} 上那段说明），
+     * 而这一组会真的去停用工具、改动共享状态。给它一个独立的名字，两边互不影响——不给的话症状是
+     * 「单跑绿、全量红」。
+     *
+     * <p>刻意不配 {@code spring.datasource.url}：提示词与开关是否落库无关，而这个形态是默认部署。
+     */
+    @Nested
+    @SpringBootTest(properties = {
+        "entropy.mcp.database.enabled=true",
+        "entropy.mcp.database.dialect=generic",
+        "entropy.mcp.gateway.enabled=false",
+        "entropy.mcp.security.enabled=false",
+        "spring.application.name=tool-prompt-api-test"
+    })
+    class ToolPromptApi extends WithMockMvc {
+
+        @Autowired
+        ToolToggleRegistry toggles;
+
+        private Map<String, Object> prompt(String query) throws Exception {
+            return json(mockMvc.perform(get("/api/tools/prompt" + query))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+        }
+
+        /**
+         * 缺省格式是 system，四个字段齐全，{@code toolCount} 与 {@code tools/list} 的长度一致，
+         * 且「当前生效的约束」报的是这个上下文真实的开关值。
+         */
+        @Test
+        void systemPromptIsTheDefaultAndDescribesTheRealServerState() throws Exception {
+            Map<String, Object> body = prompt("");
+
+            assertThat(body).containsOnlyKeys("format", "generatedAt", "toolCount", "text");
+            assertThat(body.get("format")).isEqualTo("system");
+            assertThat(body.get("toolCount"))
+                    .as("提示词里的工具数就是此刻 tools/list 的长度")
+                    .isEqualTo(toggles.remainingExposed());
+            assertThat((Integer) body.get("toolCount"))
+                    .as("快照为空意味着 ToolExposureFilter 那条回调没跑，那时提示词会是一句"
+                            + "「当前没有可用工具」而不是报错——最安静的坏法")
+                    .isPositive();
+
+            String text = (String) body.get("text");
+            assertThat(text).contains("## 当前生效的约束", "## 可用工具", "## 这份提示词是一份快照");
+            assertThat(text)
+                    .as("三个开关都必须报生效值：这个上下文 gateway=false、ddl 与 authz 都是默认的 false")
+                    .contains("entropy.mcp.gateway.enabled=false",
+                            "entropy.mcp.database.ddl.allowed=false",
+                            "entropy.mcp.authz.enabled=false");
+            assertThat(text).contains(body.get("generatedAt").toString());
+            // 真实工具名确实进去了：清单不是空壳
+            assertThat(text).contains("### " + toggles.exposedToolNames().iterator().next());
+        }
+
+        /** {@code list} 只有清单，没有系统提示词的那几段。 */
+        @Test
+        void listPromptIsOnlyTheCatalogSection() throws Exception {
+            Map<String, Object> body = prompt("?format=list");
+
+            assertThat(body.get("format")).isEqualTo("list");
+            assertThat((String) body.get("text"))
+                    .contains("### ")
+                    .doesNotContain("## 当前生效的约束", "## 这份提示词是一份快照");
+        }
+
+        /**
+         * 刚被停用的工具不许出现在提示词里。
+         *
+         * <p>这是这个功能唯一不能出错的地方：一个不在 {@code tools/list} 里的工具名写进提示词，
+         * 就是让模型去调一个不存在的工具。
+         *
+         * <p>用完就放回去：本上下文被同组其它用例共享，留一个停用的工具会让它们的计数漂移。
+         */
+        @Test
+        void aDisabledToolDisappearsFromThePrompt() throws Exception {
+            String tool = toggles.exposedToolNames().iterator().next();
+            int before = (Integer) prompt("").get("toolCount");
+
+            mockMvc.perform(put("/api/tools/" + tool)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"disabled\": true}"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
+            try {
+                Map<String, Object> body = prompt("?format=list");
+                assertThat((String) body.get("text"))
+                        .as("被停用的工具名一个字都不该留在提示词里")
+                        .doesNotContain("### " + tool);
+                assertThat(body.get("toolCount")).isEqualTo(before - 1);
+            } finally {
+                mockMvc.perform(put("/api/tools/" + tool)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"disabled\": false}"))
+                        .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200));
+            }
+
+            assertThat((String) prompt("?format=list").get("text")).contains("### " + tool);
+        }
+
+        /** 非法 format 是 400，不是 500——这里过真实的过滤器链与参数解析。 */
+        @Test
+        void unknownFormatIsRejectedWithBadRequest() throws Exception {
+            mockMvc.perform(get("/api/tools/prompt?format=markdown"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
+        }
+    }
+
+    // ─── 调用者身份：列出 / 新增 / 停用 ─────────────────────────────────────
+
+    /**
+     * {@code /api/users} 在真实上下文里的契约。前端「身份管理」页直接读这几个形状，
+     * 所以这一组钉的是<b>页面赖以说真话的那些断言</b>，而不是 UserAdminService 的单元行为
+     * （那些在 infra 模块的单测里）：
+     *
+     * <ul>
+     *   <li>列表是<b>数组</b>且每行有 username / type / enabled / roles 四个键，<b>没有口令字段</b>——
+     *       多出一个 password 键意味着哈希会进浏览器的内存与 CSV 导出；</li>
+     *   <li>权限白名单在写入口 fail-closed（未知 role 是 400 而不是静默忽略）。页面上那两个
+     *       Switch 是这份白名单的镜像，后端一旦悄悄放宽，镜像就开始说谎；</li>
+     *   <li>停用之后<b>行还在</b>、只是 enabled 变 false，而且对已停用的身份再发一次 DELETE
+     *       仍然是 200。这一条尤其要钉：{@code UserAdminController.disable} 的注释说返回体
+     *       让调用方"能区分停用成功与本来就是停用状态"，而停用语句是无条件 UPDATE，
+     *       两种情况的响应完全相同。页面按 SQL 的真实语义写文案，测试在这里替它兜住。</li>
+     * </ul>
+     *
+     * <p>{@code spring.application.name} 单独给一个：这一组会往 {@code mcp_user} 里写行，
+     * 与其它 {@code @Nested} 共享上下文会让彼此的计数漂移（同 {@code ToolToggleAdminApi} 上那段）。
+     */
+    @Nested
+    @SpringBootTest(properties = {
+        "entropy.mcp.database.enabled=true",
+        "entropy.mcp.database.dialect=generic",
+        "entropy.mcp.gateway.enabled=false",
+        "entropy.mcp.security.enabled=false",
+        "spring.application.name=user-admin-api-test",
+        "spring.datasource.url=jdbc:h2:mem:user_admin_web_test;DB_CLOSE_DELAY=-1",
+        "spring.datasource.username=sa",
+        "spring.datasource.password="
+    })
+    class UserAdminApi extends WithMockMvc {
+
+        private Map<String, Object> create(String username, String type, String rolesJson,
+                                           int expectedStatus) throws Exception {
+            MvcResult result = mockMvc.perform(post("/api/users")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"username\": \"" + username + "\", \"type\": \"" + type
+                                    + "\", \"password\": \"not-a-real-password\", \"roles\": "
+                                    + rolesJson + "}"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(expectedStatus))
+                    .andReturn();
+            return expectedStatus == 201 ? json(result) : Map.of();
+        }
+
+        @SuppressWarnings("unchecked")
+        private List<Map<String, Object>> list() throws Exception {
+            String body = mockMvc.perform(get("/api/users"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn().getResponse().getContentAsString();
+            assertThat(body).as("列表是数组，不是包装对象——页面直接对它 map").startsWith("[");
+            return new com.fasterxml.jackson.databind.ObjectMapper().readValue(body, List.class);
+        }
+
+        private Map<String, Object> find(String username) throws Exception {
+            return list().stream()
+                    .filter(row -> username.equals(row.get("username")))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("刚建的身份没有出现在 /api/users 里: " + username));
+        }
+
+        @Test
+        @SuppressWarnings("unchecked")
+        void createdIdentityIsListedWithItsRolesAndWithoutAnyPasswordField() throws Exception {
+            Map<String, Object> created = create("panel-dba", "agent", "[\"ROLE_DBA\"]", 201);
+
+            assertThat(created).containsOnlyKeys("username", "type", "enabled", "roles");
+            assertThat(created.get("enabled")).isEqualTo(true);
+            assertThat((List<String>) created.get("roles")).containsExactly("ROLE_DBA");
+
+            Map<String, Object> listed = find("panel-dba");
+            assertThat(listed)
+                    .as("响应里出现口令（原文或哈希）意味着它会进浏览器内存与 CSV 导出")
+                    .containsOnlyKeys("username", "type", "enabled", "roles");
+            assertThat(listed.get("type")).isEqualTo("agent");
+            assertThat((List<String>) listed.get("roles")).containsExactly("ROLE_DBA");
+        }
+
+        /** 不给 roles 是合法的：那个身份能过认证，但 /api/** 与面板对它都是 403。 */
+        @Test
+        @SuppressWarnings("unchecked")
+        void identityWithoutRolesIsCreatedWithAnEmptyRoleList() throws Exception {
+            create("panel-plain", "service", "[]", 201);
+            assertThat((List<String>) find("panel-plain").get("roles")).isEmpty();
+        }
+
+        /**
+         * 未知权限是 400，不是"静默忽略"。
+         *
+         * <p>静默忽略的症状是"配了但不生效"：页面会显示一个成功横幅，而那个身份一条权限都没拿到。
+         */
+        @Test
+        void unknownRoleIsRejectedWithBadRequest() throws Exception {
+            create("panel-bogus-role", "user", "[\"ROLE_WHATEVER\"]", 400);
+            assertThat(list().stream().map(row -> row.get("username")))
+                    .as("被 400 拒掉的请求不能留下半行记录")
+                    .doesNotContain("panel-bogus-role");
+        }
+
+        /** 与环境变量里那个管理员同名是 400：否则会出现"两处定义、谁生效取决于查找顺序"。 */
+        @Test
+        void creatingAnIdentityNamedLikeTheEnvAdminIsRejected() throws Exception {
+            create("admin", "user", "[]", 400);
+        }
+
+        /** 重名是 400 而不是覆盖：用户名是主键，覆盖等于悄悄换掉一个身份的口令。 */
+        @Test
+        void duplicateUsernameIsRejected() throws Exception {
+            create("panel-dup", "user", "[]", 201);
+            create("panel-dup", "user", "[]", 400);
+        }
+
+        @Test
+        void disablingKeepsTheRowAndStaysTwoHundredOnASecondCall() throws Exception {
+            create("panel-doomed", "user", "[]", 201);
+
+            Map<String, Object> first = json(mockMvc.perform(delete("/api/users/panel-doomed"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(first.get("disabled")).isEqualTo(true);
+
+            assertThat(find("panel-doomed").get("enabled"))
+                    .as("停用是 UPDATE 而不是 DELETE：行必须还在，页面靠它显示「已停用」那一行")
+                    .isEqualTo(false);
+
+            Map<String, Object> second = json(mockMvc.perform(delete("/api/users/panel-doomed"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus())
+                            .as("""
+                                    停用语句是无条件的 UPDATE ... SET enabled = 0 WHERE username = ?，
+                                    对一个已经停用的身份再发一次照样影响一行、照样 200。
+                                    所以返回体里的 disabled:true 不代表"这次才变"——
+                                    页面不能照着它说"已生效"，api.js 里那段注释钉的就是这件事。""")
+                            .isEqualTo(200))
+                    .andReturn());
+            assertThat(second.get("disabled")).isEqualTo(true);
+        }
+
+        /** 用户名不存在才是 404。这是 404 的<b>唯一</b>来源。 */
+        @Test
+        void disablingAnUnknownIdentityIsNotFound() throws Exception {
+            mockMvc.perform(delete("/api/users/nobody-by-that-name"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(404));
+        }
+
+        /** 停用管理员是 400：它是最后一个入口，停掉之后连改回来的接口都进不去。 */
+        @Test
+        void disablingTheEnvAdminIsRejected() throws Exception {
+            mockMvc.perform(delete("/api/users/admin"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(400));
         }
     }

@@ -11,12 +11,15 @@ import {
   proportional,
 } from '@astryxdesign/core';
 import { useCallback, useMemo, useState } from 'react';
-import { fetchToolAdmin, setGroupDisabled, setToolDisabled } from '../api.js';
+import { fetchToolAdmin, fetchToolPrompt, setGroupDisabled, setToolDisabled } from '../api.js';
 import { usePanelData } from '../usePanelData.js';
 import {
+  CopyTextButton,
+  DownloadMarkdownButton,
   ErrorNotice,
   InteractiveTable,
   KpiGrid,
+  MonoBlock,
   SEARCH_ALL_FIELD,
   Section,
   textColumn,
@@ -36,6 +39,14 @@ import {
  *    entropy.mcp.tools 声明的状态，且没有任何报错——症状是"明明停掉的工具又回来了"；
  * 3. remainingExposed 归零是<b>合法</b>的运维动作（运行期 kill switch），后端刻意允许，
  *    但客户端看到的是一台没有任何工具的服务器，通常表现为"服务没接上"。
+ *
+ * ── 「生成提示词」那一段 ──
+ * 数据源 GET /api/tools/prompt，返回一整段可直接粘贴的文本。<b>文本是后端拼的，前端只展示、
+ * 复制、下载。</b>不在这里拼是刻意的：提示词的价值在于写清"当前有哪些约束"（连接的 readonly
+ * 标记、ddl.allowed、gateway.enabled、authz.enabled、停用了几个工具），那些判断全在服务端，
+ * 在 JS 里复制一份就等于保证两边漂移。这一段也是这一页两个 PUT 的下游：每次启停之后，
+ * 已生成的那份文本会被标记成「已过期」而不是继续静默展示——静默展示的下场是有人把一份少了
+ * 两个工具的提示词粘给模型。
  *
  * ── 数据源为什么从 /api/ui/tools 换成 /api/tools ──
  * 两者背后是<b>同一份 ToolCatalog 索引</b>，但字段不同：
@@ -194,6 +205,61 @@ function persistenceSuffix(body) {
     : '；本次改动只在进程内存里，重启后会回到配置声明的状态';
 }
 
+/*
+ * ── 提示词那一段 ──────────────────────────────────────────────────────────
+ */
+
+/**
+ * format 的取值。顺序即下拉框顺序，system 在前是因为它是后端的缺省值，也是九成场景要的那个。
+ *
+ * 用字符串数组而不是 {value,label} 对象：Selector 在这个项目里一直是喂字符串数组的
+ * （见上面的分组选择器），两个取值本来就是后端的查询串字面量，中文解释写在 Section 的
+ * source 里而不是塞进选项标签——选项标签要能和 URL 里那个词一眼对上，排障时少一层翻译。
+ */
+const PROMPT_FORMATS = ['system', 'list'];
+
+/** 各格式在页面上的一句话解释。缺省值那条要写明它是缺省，否则没人知道直接打端点会得到哪个。 */
+const PROMPT_FORMAT_HINT = {
+  system: '一整段可直接用的系统提示词：角色与目标 + 当前生效的约束（连接只读标记、DDL 开关、'
+    + 'gateway、授权、停用了几个工具）+ 工具清单 + 快照声明。这是后端的缺省格式。',
+  list: '只有工具清单：Markdown，按分组分节，每个工具给出完整描述与标签。'
+    + '适合塞进你自己已有的提示词模板里。',
+};
+
+/**
+ * 粗略 token 估算。<b>这是估算，不是真值。</b>
+ *
+ * 真实 token 数取决于具体模型的分词器（GPT 系的 cl100k/o200k、Claude、以及各家国产模型
+ * 各不相同），同一段文本在不同模型上能差 30% 以上。这里只想回答一个量级问题：
+ * "这份提示词塞不塞得进上下文窗口"。
+ *
+ * 系数的来历：CJK 汉字在主流 BPE 分词器里普遍是 1~2 个 token，取 1.5；
+ * 拉丁字母与标点大约 4 个字符 1 个 token，取 0.25。两段分开算比给整段乘一个系数准得多——
+ * 这份文本里中文是散文、英文是工具名和配置键，比例在不同部署下差别很大。
+ *
+ * 用 for...of 而不是索引遍历：它按码点迭代，不会把一个字符拆成两半（虽然这份文本目前
+ * 全在 BMP 内，但描述里出现一个 emoji 就会让索引遍历多数一次）。
+ */
+const CJK = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/;
+
+function estimateTokens(text) {
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (CJK.test(ch)) {
+      cjk += 1;
+    } else {
+      other += 1;
+    }
+  }
+  return Math.round(cjk * 1.5 + other * 0.25);
+}
+
+/** 千分位：几万字的字符数不分组的话，30894 和 308940 扫一眼分不出差一个数量级。 */
+function grouped(n) {
+  return n.toLocaleString('en-US');
+}
+
 export default function ToolsPanel({ refreshToken }) {
   /*
    * reloadToken 与顶栏的 refreshToken 并列进 deps：每次开关操作之后这一页必须自己重新拉
@@ -212,6 +278,18 @@ export default function ToolsPanel({ refreshToken }) {
   /** 危险操作的二次确认。null = 没有待确认的操作。 */
   const [confirm, setConfirm] = useState(null);
   const [group, setGroup] = useState('');
+
+  /* ── 提示词 ────────────────────────────────────────────────────────────
+   * 刻意不跟着面板挂载就拉：这份文本在默认部署下是几万字，而绝大多数来这一页的人是来
+   * 看开关的。做成"点一下才生成"也让「已过期」这个状态有意义——自动拉取的话每次刷新都是
+   * 一份新的，运维反而看不出清单到底变没变。
+   */
+  const [promptFormat, setPromptFormat] = useState(PROMPT_FORMATS[0]);
+  const [prompt, setPrompt] = useState(null);
+  const [promptError, setPromptError] = useState(null);
+  const [isGenerating, setGenerating] = useState(false);
+  /** 生成之后又发生过启停：此时展示的清单和服务端已经不是同一份。 */
+  const [isPromptStale, setPromptStale] = useState(false);
 
   const rows = useMemo(() => {
     const tools = Array.isArray(data?.tools) ? data.tools : [];
@@ -279,6 +357,10 @@ export default function ToolsPanel({ refreshToken }) {
    *
    * 无论成败都在 finally 里重新拉一次清单：失败时页面上的状态和服务端的真实状态最容易
    * 分叉（分组操作可能改了一半），此时保留旧数据比拉一次新数据更容易误导。
+   *
+   * 同样无论成败都把已生成的提示词标记为过期：失败的那一侧也可能已经改掉了一部分工具
+   * （分组操作逐个 removeTool），此时"提示词还是准的"这个假设不成立。标记而不是自动重新
+   * 生成，也不是静默保留旧文本——静默保留的下场是有人把一份少了两个工具的提示词粘出去。
    */
   const runToggle = useCallback(async (key, request, describe) => {
     setPending(key);
@@ -292,6 +374,7 @@ export default function ToolsPanel({ refreshToken }) {
     } finally {
       setPending(null);
       setReloadToken((t) => t + 1);
+      setPromptStale(true);
     }
   }, []);
 
@@ -403,6 +486,40 @@ export default function ToolsPanel({ refreshToken }) {
   ], [pending, toggleTool]);
 
   const canOperateGroup = group !== '' && operableGroups.includes(group) && pending === null;
+
+  /**
+   * 生成一份提示词。
+   *
+   * 失败时刻意<b>不清掉</b>上一份：内网面板重启服务时这个请求会失败，此时手里那份文本
+   * （连同它上方的「已过期」提示）仍然比一块空白有用。
+   */
+  const generatePrompt = useCallback(async () => {
+    setGenerating(true);
+    setPromptError(null);
+    try {
+      const body = await fetchToolPrompt(promptFormat);
+      setPrompt(body);
+      setPromptStale(false);
+    } catch (e) {
+      setPromptError(e);
+    } finally {
+      setGenerating(false);
+    }
+  }, [promptFormat]);
+
+  const promptText = typeof prompt?.text === 'string' ? prompt.text : '';
+
+  /*
+   * 体积：字符数是精确的，token 是估算。两个都显示——运维能一眼判断这份提示词塞不塞得进
+   * 上下文窗口，而 128 个工具的完整描述就是几万字的量级，这件事必须在复制之前看见。
+   */
+  const promptSize = useMemo(() => ({
+    chars: promptText.length,
+    tokens: estimateTokens(promptText),
+  }), [promptText]);
+
+  /** 下拉框改了但还没重新生成：展示的是另一种格式，得说出来，否则复制走的是上一个格式。 */
+  const isFormatMismatch = prompt !== null && !isPromptStale && prompt.format !== promptFormat;
 
   return (
     <VStack gap={6}>
@@ -557,6 +674,101 @@ export default function ToolsPanel({ refreshToken }) {
                 {prunedGroups.map((g) => <Badge key={g} variant="neutral" label={g} />)}
               </HStack>
             </VStack>
+          )}
+        </VStack>
+      </Section>
+
+      <Section
+        title="按当前启用的工具生成提示词"
+        source={
+          'GET /api/tools/prompt?format=' + promptFormat
+          + ' · 只含此刻真正在 tools/list 里的工具（暴露集 − 已停用）'
+          + ' · 文本在后端生成，前端不做拼装'
+        }
+        actions={promptText ? (
+          <>
+            <CopyTextButton text={promptText} what="提示词" />
+            <DownloadMarkdownButton text={promptText} baseName={`mcp-prompt-${prompt.format}`} />
+          </>
+        ) : undefined}
+      >
+        <VStack gap={4}>
+          <HStack gap={3} wrap="wrap" vAlign="end">
+            <Selector
+              label="格式"
+              options={PROMPT_FORMATS}
+              value={promptFormat}
+              onChange={setPromptFormat}
+              width={200}
+            />
+            <Button
+              label={prompt ? '重新生成' : '生成提示词'}
+              variant="primary"
+              isLoading={isGenerating}
+              onClick={generatePrompt}
+            />
+          </HStack>
+
+          <Text type="supporting" color="secondary">
+            {PROMPT_FORMAT_HINT[promptFormat]}
+          </Text>
+
+          {/* 这一条常驻：它解释了为什么这份文本不是前端拼的，也是"不要在前端改它"的依据。 */}
+          <Text type="supporting" color="secondary">
+            {'提示词里「当前生效的约束」那一段是后端从服务端实时状态读出来的：已注册连接及其'
+              + ' readonly 标记、entropy.mcp.database.ddl.allowed、entropy.mcp.gateway.enabled、'
+              + 'entropy.mcp.authz.enabled，以及有多少工具被运行期停用。这些判断只在服务端成立，'
+              + '所以整段文本在后端生成——前端拼等于把同一套判断复制一份到 JS 里，两边一定会漂移。'}
+          </Text>
+
+          {promptError && (
+            <Banner
+              status="error"
+              title="生成提示词失败"
+              description={promptError.message}
+              container="card"
+            />
+          )}
+
+          {prompt && isPromptStale && (
+            <Banner
+              status="warning"
+              title="这份提示词已过期，请重新生成"
+              description={
+                '生成之后又执行过启停操作，下面这份文本里的工具清单和服务端现在的 tools/list '
+                + '已经不是同一份了。粘出去的话，模型要么看不到刚启用的工具，要么会去调一个'
+                + '刚被停用、已经不存在的工具。点「重新生成」拿一份新的。'
+              }
+              container="card"
+            />
+          )}
+
+          {isFormatMismatch && (
+            <Banner
+              status="info"
+              title={`下面显示的是 ${prompt.format} 格式，不是当前选中的 ${promptFormat}`}
+              description="切换格式不会自动重新请求。点「重新生成」按新格式取一份。"
+              container="card"
+            />
+          )}
+
+          {prompt && (
+            <>
+              <HStack gap={2} wrap="wrap" vAlign="center">
+                <Badge variant="neutral" label={`${prompt.toolCount} 个工具`} />
+                <Badge variant="neutral" label={`${grouped(promptSize.chars)} 字符`} />
+                <Badge variant="neutral" label={`≈ ${grouped(promptSize.tokens)} token`} />
+                <Text type="supporting" color="secondary">
+                  {`生成于 ${prompt.generatedAt} · token 数是粗略估算（中文按 1 字≈1.5、`
+                    + '其余按 4 字符≈1），真实值取决于模型的分词器，不同模型能差三成以上，'
+                    + '只用来判断塞不塞得进上下文窗口。'}
+                </Text>
+              </HStack>
+              {/* 只读预览：用 MonoBlock 而不是 Textarea——这份文本不该被编辑，
+                  能编辑的输入框会让人以为改了之后复制出去的是改过的版本，而它不是
+                  （复制按钮拿的是后端返回的 text）。MonoBlock 自带等宽字体与纵向滚动。 */}
+              <MonoBlock text={promptText} maxHeight={520} />
+            </>
           )}
         </VStack>
       </Section>
