@@ -51,7 +51,7 @@ class AuditLogRepositoryH2Test {
     }
 
     private static AuditLogEntity entry(String tool, Instant at, String connectionKey) {
-        return new AuditLogEntity(null, tool, "SELECT 1 FROM dual", 7, 42L, true, null, at, connectionKey);
+        return new AuditLogEntity(null, tool, "SELECT 1 FROM dual", 7, 42L, true, null, at, connectionKey, null);
     }
 
     @Test

@@ -18,7 +18,11 @@ package com.entropy.database.mcp.audit;
 import java.time.Instant;
 
 /**
- * Audit log entity representing a single query audit entry.
+ * Audit log entity representing a single audit entry — either a query or an authentication event.
+ *
+ * <p>{@code principal} 是执行这条操作的调用者，格式与 {@code McpPrincipal.subjectRef()} 一致
+ * （{@code type:username}，如 {@code user:zhangsan}）。它可以是 {@code null}：鉴权关闭时
+ * {@code SecurityContextHolder} 里没有 {@code McpPrincipal}，老版本的表也没有这一列。
  */
 public record AuditLogEntity(
     Long id,
@@ -29,6 +33,7 @@ public record AuditLogEntity(
     boolean success,
     String error,
     Instant timestamp,
-    String connectionKey
+    String connectionKey,
+    String principal
 ) {
 }

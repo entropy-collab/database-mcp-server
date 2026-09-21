@@ -71,8 +71,10 @@ class AuditLogRepositoryDialectTest {
 
     private String capturedDdl() {
         var captor = org.mockito.ArgumentCaptor.forClass(String.class);
-        verify(jdbcTemplate).execute(captor.capture());
-        return captor.getValue();
+        // ensureTableExists now calls execute(String) twice: CREATE TABLE + ALTER TABLE (add principal column).
+        // We capture all invocations and return the first one (the DDL).
+        verify(jdbcTemplate, org.mockito.Mockito.atLeastOnce()).execute(captor.capture());
+        return captor.getAllValues().get(0);
     }
 
     @SuppressWarnings("unchecked")
@@ -140,14 +142,21 @@ class AuditLogRepositoryDialectTest {
     }
 
     @Test
-    void skipsTheDdlWhenMetadataAlreadyReportsTheTable() throws SQLException {
+    void skipsTheCreateDdlWhenMetadataAlreadyReportsTheTable() throws SQLException {
         AuditLogRepository repository = repositoryFor("Oracle");
         when(tablesResultSet.next()).thenReturn(true);
 
         repository.ensureTableExists();
 
-        // Oracle 上重复建表会报 ORA-00955，所以存在时必须完全不发 DDL
-        verify(jdbcTemplate, never()).execute(anyString());
+        // Oracle 上重复建表会报 ORA-00955，所以存在时必须跳过 CREATE TABLE。
+        // ALTER TABLE（补 principal 列）仍然会跑——它是升级旧表必须的；Oracle 那边用
+        // PL/SQL 的 EXCEPTION WHEN OTHERS 兜住"列已存在"。这里只断言没有 CREATE TABLE。
+        var captor = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(jdbcTemplate, org.mockito.Mockito.atMost(1)).execute(captor.capture());
+        for (String sql : captor.getAllValues()) {
+            assertThat(sql).as("表已存在时不能发 CREATE TABLE DDL")
+                    .doesNotContainIgnoringCase("CREATE TABLE");
+        }
     }
 
     @Test

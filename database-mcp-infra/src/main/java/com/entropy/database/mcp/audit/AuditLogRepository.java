@@ -95,7 +95,8 @@ public class AuditLogRepository {
                 success INTEGER DEFAULT 1,
                 error VARCHAR(1000),
                 event_time TIMESTAMP NOT NULL,
-                connection_key VARCHAR(200)
+                connection_key VARCHAR(200),
+                principal VARCHAR(200)
             )
             """;
 
@@ -116,7 +117,8 @@ public class AuditLogRepository {
                 success INTEGER DEFAULT 1,
                 error VARCHAR(1000),
                 event_time DATETIME(3) NOT NULL,
-                connection_key VARCHAR(200)
+                connection_key VARCHAR(200),
+                principal VARCHAR(200)
             )
             """;
 
@@ -136,7 +138,8 @@ public class AuditLogRepository {
                 success NUMBER(1) DEFAULT 1,
                 error VARCHAR2(1000),
                 event_time TIMESTAMP NOT NULL,
-                connection_key VARCHAR2(200)
+                connection_key VARCHAR2(200),
+                principal VARCHAR2(200)
             )
             """;
 
@@ -155,7 +158,8 @@ public class AuditLogRepository {
                 success INT DEFAULT 1,
                 error VARCHAR(1000),
                 event_time DATETIME2 NOT NULL,
-                connection_key VARCHAR(200)
+                connection_key VARCHAR(200),
+                principal VARCHAR(200)
             )
             """;
 
@@ -213,8 +217,8 @@ public class AuditLogRepository {
         try {
             // 列名跟着建表一起改：sql/rows/timestamp 在 MySQL/Oracle 上是保留字或类型名，不加引号解析不过
             jdbcTemplate.update(
-                "INSERT INTO audit_log (tool, sql_text, row_count, duration_ms, success, error, event_time, connection_key) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit_log (tool, sql_text, row_count, duration_ms, success, error, event_time, connection_key, principal) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 entity.tool(),
                 truncate(entity.sql(), 2000),
                 entity.rows(),
@@ -222,7 +226,8 @@ public class AuditLogRepository {
                 entity.success(),
                 truncate(entity.error(), 1000),
                 entity.timestamp(),
-                entity.connectionKey()
+                entity.connectionKey(),
+                truncate(entity.principal(), 200)
             );
         } catch (RuntimeException e) {
             // 插入失败可能只是表刚被删掉/重建，让下一次调用重新确认一次表结构
@@ -265,6 +270,49 @@ public class AuditLogRepository {
                 }
             }
             tableEnsured = true;
+        }
+        // 只在这一次确认成功后补列——如果表是刚建的（新 DDL 已含 principal），ALTER 是空操作（IF NOT EXISTS）；
+        // 如果表是旧的（从 tableAlreadyExists 跳过了 CREATE），补列是必须的。
+        // 但如果表根本不存在（上面的 synchronized 没执行到 tableEnsured=true），不走到这里。
+        ensurePrincipalColumn();
+    }
+
+    /**
+     * 旧库没有 {@code principal} 列。新建的表在 DDL 里已经带了它，但已有的表必须补上：
+     * {@code CREATE TABLE IF NOT EXISTS} 不会碰一张已经存在的表。
+     *
+     * <p>H2 / PostgreSQL / MySQL / SQL Server 都支持 {@code ALTER TABLE ... ADD COLUMN IF NOT EXISTS}
+     * 或等效的条件写法。Oracle 没有 {@code IF NOT EXISTS}，但它对已有列的 {@code ADD} 抛
+     * ORA-01430（column being added already exists），这里按 Oracle 单独 try-catch。
+     *
+     * <p>这段执行一次之后就由 {@link #tableEnsured} 的外层双检跳过，不会每条审计都跑 ALTER。
+     */
+    private volatile boolean principalColumnEnsured;
+
+    private void ensurePrincipalColumn() {
+        if (principalColumnEnsured) {
+            return;
+        }
+        synchronized (this) {
+            if (principalColumnEnsured) {
+                return;
+            }
+            Product p = this.product != null ? this.product : Product.UNKNOWN;
+            try {
+                String alterSql = switch (p) {
+                    case ORACLE -> "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE audit_log ADD principal VARCHAR2(200)'; " +
+                            "EXCEPTION WHEN OTHERS THEN IF SQLCODE <> -1430 THEN RAISE; END IF; END;";
+                    case SQLSERVER -> "IF COL_LENGTH('audit_log', 'principal') IS NULL " +
+                            "ALTER TABLE audit_log ADD principal VARCHAR(200)";
+                    case MYSQL -> "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS principal VARCHAR(200)";
+                    case H2, POSTGRESQL, UNKNOWN -> "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS principal VARCHAR(200)";
+                };
+                jdbcTemplate.execute(alterSql);
+            } catch (RuntimeException e) {
+                // 如果是"列已存在"类错误，就静默通过；其他错误打个 warn 但不阻塞审计
+                log.warn("Could not add principal column to audit_log (it may already exist): {}", e.getMessage());
+            }
+            principalColumnEnsured = true;
         }
     }
 
@@ -441,6 +489,12 @@ public class AuditLogRepository {
         @Override
         public AuditLogEntity mapRow(ResultSet rs, int rowNum) throws SQLException {
             // 列名跟着建表改了；record 的字段名（sql/rows/timestamp）不变，改的只有物理列
+            String principal = null;
+            try {
+                principal = rs.getString("principal");
+            } catch (SQLException ignored) {
+                // 旧表没有这一列（升级前的库）：静默降级为 null 而不是让查询整体失败
+            }
             return new AuditLogEntity(
                 rs.getLong("id"),
                 rs.getString("tool"),
@@ -450,7 +504,8 @@ public class AuditLogRepository {
                 rs.getBoolean("success"),
                 rs.getString("error"),
                 rs.getTimestamp("event_time").toInstant(),
-                rs.getString("connection_key")
+                rs.getString("connection_key"),
+                principal
             );
         }
     }

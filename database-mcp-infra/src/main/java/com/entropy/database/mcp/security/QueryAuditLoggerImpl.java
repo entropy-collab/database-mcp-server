@@ -30,6 +30,8 @@ import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -186,31 +188,32 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     @Override
     @Async
     public void log(String tool, String sql, int rowCount, long durationMs, boolean success, @Nullable String error, @Nullable String connectionKey) {
+        String principal = currentPrincipal();
         String safeSql = maskSensitiveValues(sql);
         // JDBC 的报错信息里常常回显出错语句的片段，口令会顺着 error 从审计流出去，
         // 所以 error 走和 sql 完全一样的脱敏
         String safeError = maskSensitiveValues(error);
         auditLog.info(
-            "mcp.db.audit tool={} sql=\"{}\" rows={} durationMs={} success={} error={} connection={}",
+            "mcp.db.audit tool={} sql=\"{}\" rows={} durationMs={} success={} error={} connection={} principal={}",
             tool,
             truncate(safeSql, properties.audit().sqlTruncateLength()),
             rowCount,
             durationMs,
             success,
             safeError != null ? safeError : "",
-            connectionKey != null ? connectionKey : ""
+            connectionKey != null ? connectionKey : "",
+            principal != null ? principal : ""
         );
 
-        Map<String, Object> entry = Map.of(
-            "tool", tool,
-            "sql", truncate(safeSql, properties.audit().entrySqlTruncateLength()),
-            "rows", rowCount,
-            "durationMs", durationMs,
-            "success", success,
-            "timestamp", Instant.now().toString(),
-            // 这个 map 是 /api/audit/logs 直接吐给页面的报文，而 Map.of 不收 null value，
-            // 所以这里必须给一个非 null 的占位。空串是既有报文契约，不在本次改动范围内。
-            "connectionKey", connectionKey != null ? connectionKey : ""
+        Map<String, Object> entry = Map.ofEntries(
+            Map.entry("tool", tool),
+            Map.entry("sql", truncate(safeSql, properties.audit().entrySqlTruncateLength())),
+            Map.entry("rows", rowCount),
+            Map.entry("durationMs", durationMs),
+            Map.entry("success", success),
+            Map.entry("timestamp", Instant.now().toString()),
+            Map.entry("connectionKey", connectionKey != null ? connectionKey : ""),
+            Map.entry("principal", principal != null ? principal : "")
         );
         buffer.offer(entry);
         evictOld();
@@ -241,7 +244,8 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
                     success,
                     safeError,
                     Instant.now(),
-                    connectionKey
+                    connectionKey,
+                    principal
                 ));
                 if (dbFailedAtNanos != 0L) {
                     dbFailedAtNanos = 0L;
@@ -279,8 +283,34 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     }
 
     private static String truncate(String s, int max) {
-        if (s == null) return "";
-        return s.length() <= max ? s : s.substring(0, max) + "...";
+        if (s == null) return null;
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
+    /**
+     * 当前调用者的 {@code type:username}，格式与 {@code McpPrincipal.subjectRef()} 一致。
+     *
+     * <p>鉴权关闭、或者调用来自一个没有可识别身份的路径时返回 {@code null}——审计表的 principal
+     * 列可空，不会因此丢掉整条审计记录。
+     *
+     * <p>这里<b>不</b>从 {@code McpToolContext} 取，和 {@code ConnectionAuthorizer} 同一个理由：
+     * 身份来自 Spring SecurityContext，不是 MCP 会话层面的东西。
+     */
+    private static @Nullable String currentPrincipal() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null) {
+            return null;
+        }
+        Object p = auth.getPrincipal();
+        if (p instanceof McpPrincipal caller) {
+            return caller.type() + ":" + caller.username();
+        }
+        // 浏览器 formLogin 的 principal 是 UserDetails 而不是 McpPrincipal（DaoAuthenticationProvider
+        // 不做类型转换）。这一条覆盖了面板上的登录成功事件——它的 principal 是 InMemoryUser。
+        if (p instanceof org.springframework.security.core.userdetails.UserDetails ud) {
+            return ud.getUsername();
+        }
+        return null;
     }
 
     /**

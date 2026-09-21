@@ -54,7 +54,7 @@ class AuditLogRepositoryTest {
     }
 
     private static AuditLogEntity entry() {
-        return new AuditLogEntity(null, "executeQuery", "SELECT 1", 1, 5L, true, null, Instant.now(), "default");
+        return new AuditLogEntity(null, "executeQuery", "SELECT 1", 1, 5L, true, null, Instant.now(), "default", null);
     }
 
     @Test
