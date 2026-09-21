@@ -20,6 +20,9 @@ import com.entropy.database.mcp.properties.ThreadPoolProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.security.task.DelegatingSecurityContextAsyncTaskExecutor;
+
+import java.util.concurrent.Executor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -54,11 +57,24 @@ class AsyncConfigTest {
         ThreadPoolProperties pools = new ThreadPoolProperties(3, 6, 42, 0, 0, 0, 0);
         AsyncConfig config = new AsyncConfig(pools, propsWithEtlSize(4));
 
-        ThreadPoolTaskExecutor async = (ThreadPoolTaskExecutor) config.getAsyncExecutor();
+        ThreadPoolTaskExecutor async = config.asyncThreadPool();
 
         assertThat(async.getCorePoolSize()).isEqualTo(3);
         assertThat(async.getMaxPoolSize()).isEqualTo(6);
         async.shutdown();
+    }
+
+    /**
+     * {@code @Async} 的执行器必须带 SecurityContext 传播，否则 {@code QueryAuditLoggerImpl.log}
+     * 在池线程上取不到调用者，审计表的 principal 列会恒为空且不报错。
+     */
+    @Test
+    void theAsyncExecutorPropagatesTheCallersSecurityContext() {
+        AsyncConfig config = new AsyncConfig(ThreadPoolProperties.defaults(), propsWithEtlSize(4));
+
+        Executor async = config.getAsyncExecutor();
+
+        assertThat(async).isInstanceOf(DelegatingSecurityContextAsyncTaskExecutor.class);
     }
 
     @Test

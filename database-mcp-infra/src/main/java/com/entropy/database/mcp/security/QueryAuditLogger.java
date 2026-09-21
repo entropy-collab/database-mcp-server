@@ -37,6 +37,14 @@ public interface QueryAuditLogger {
     void log(String tool, String sql, int rowCount, long durationMs, boolean success, @Nullable String error, @Nullable String connectionKey);
 
     /**
+     * 显式传入 principal 的审计入口。用于 SecurityContext 尚未就绪或已被清除的场景——
+     * 典型如表单登录成功（filter 写 context 之前）、登录失败（压根没有 context）、退出（context 刚被清掉）。
+     * 普通 MCP 工具调用走上面的两个重载即可，principal 会从 SecurityContextHolder 取。
+     */
+    void logWithPrincipal(String tool, String sql, int rowCount, long durationMs, boolean success,
+                          @Nullable String error, @Nullable String connectionKey, @Nullable String principal);
+
+    /**
      * Returns the most recent {@code limit} buffered audit log entries, newest first.
      */
     List<Map<String, Object>> getRecentLogs(int limit);

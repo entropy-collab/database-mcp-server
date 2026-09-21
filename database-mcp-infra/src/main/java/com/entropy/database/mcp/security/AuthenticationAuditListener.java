@@ -57,17 +57,21 @@ public class AuthenticationAuditListener {
      * {@code DisabledException}（账号停用）的下一步动作不同，只放一个"登录失败"区分不了。
      * 异常消息可能包含口令片段（某些 {@code AuthenticationProvider} 的消息里会引用输入），
      * 所以只取类名，不取 {@code getMessage()}。
+     *
+     * <p>走 {@code logWithPrincipal} 而不是 {@code log}：认证失败时根本没有 SecurityContext，
+     * 审计层自己去 {@code SecurityContextHolder} 取只会拿到 null，principal 列恒空。
      */
     @EventListener
     public void onAuthenticationFailure(AbstractAuthenticationFailureEvent event) {
         String username = event.getAuthentication().getName();
         String exceptionType = event.getException().getClass().getSimpleName();
         log.info("Authentication failed for '{}': {}", username, exceptionType);
-        auditLogger.log(
+        auditLogger.logWithPrincipal(
                 "auth:login-failed",
                 "LOGIN " + username,
                 0, 0L, false,
                 exceptionType,
-                null);
+                null,
+                username);
     }
 }

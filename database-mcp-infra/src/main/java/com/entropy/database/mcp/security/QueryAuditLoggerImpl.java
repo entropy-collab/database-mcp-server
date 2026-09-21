@@ -188,7 +188,18 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
     @Override
     @Async
     public void log(String tool, String sql, int rowCount, long durationMs, boolean success, @Nullable String error, @Nullable String connectionKey) {
-        String principal = currentPrincipal();
+        doLog(tool, sql, rowCount, durationMs, success, error, connectionKey, currentPrincipal());
+    }
+
+    @Override
+    @Async
+    public void logWithPrincipal(String tool, String sql, int rowCount, long durationMs, boolean success,
+                                 @Nullable String error, @Nullable String connectionKey, @Nullable String principal) {
+        doLog(tool, sql, rowCount, durationMs, success, error, connectionKey, principal);
+    }
+
+    private void doLog(String tool, String sql, int rowCount, long durationMs, boolean success,
+                       @Nullable String error, @Nullable String connectionKey, @Nullable String principal) {
         String safeSql = maskSensitiveValues(sql);
         // JDBC 的报错信息里常常回显出错语句的片段，口令会顺着 error 从审计流出去，
         // 所以 error 走和 sql 完全一样的脱敏
@@ -295,6 +306,11 @@ public class QueryAuditLoggerImpl implements QueryAuditLogger {
      *
      * <p>这里<b>不</b>从 {@code McpToolContext} 取，和 {@code ConnectionAuthorizer} 同一个理由：
      * 身份来自 Spring SecurityContext，不是 MCP 会话层面的东西。
+     *
+     * <p><b>它在 {@code @Async} 的线程上跑，所以依赖 {@code taskExecutor} 带 SecurityContext 传播</b>
+     * （{@code AsyncConfig.getAsyncExecutor} 用 {@code DelegatingSecurityContextAsyncTaskExecutor}
+     * 包了一层）。拆掉那层包装的症状是 principal 列恒为空且不报错。认证事件（登录成功/失败/退出）
+     * 那一刻压根没有可用上下文，所以它们走 {@link #logWithPrincipal} 显式传值，不依赖这条路径。
      */
     private static @Nullable String currentPrincipal() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();

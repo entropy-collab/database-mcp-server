@@ -55,6 +55,18 @@ public class FileAuditLogger implements QueryAuditLogger {
     @Override
     @Async
     public void log(String tool, String sql, int rowCount, long durationMs, boolean success, @Nullable String error, @Nullable String connectionKey) {
+        doLog(tool, sql, rowCount, durationMs, success, error, connectionKey);
+    }
+
+    @Override
+    @Async
+    public void logWithPrincipal(String tool, String sql, int rowCount, long durationMs, boolean success,
+                                 @Nullable String error, @Nullable String connectionKey, @Nullable String principal) {
+        doLog(tool, sql, rowCount, durationMs, success, error, connectionKey);
+    }
+
+    private void doLog(String tool, String sql, int rowCount, long durationMs, boolean success,
+                       @Nullable String error, @Nullable String connectionKey) {
         String timestamp = Instant.now().toString();
         String sqlShort = (sql != null && sql.length() > 500) ? sql.substring(0, 500) + "..." : sql;
 

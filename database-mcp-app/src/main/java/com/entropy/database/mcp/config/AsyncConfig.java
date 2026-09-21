@@ -27,6 +27,7 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.security.task.DelegatingSecurityContextAsyncTaskExecutor;
 
 import java.util.Arrays;
 import java.util.concurrent.Executor;
@@ -65,6 +66,24 @@ public class AsyncConfig implements AsyncConfigurer {
     @Override
     @Bean(name = "taskExecutor")
     public Executor getAsyncExecutor() {
+        /*
+         * 包一层 DelegatingSecurityContextAsyncTaskExecutor：把调用者的 SecurityContext 带过线程边界。
+         *
+         * 不包的后果不是"少一个特性"，而是审计表的 principal 列<b>恒为空</b>：QueryAuditLoggerImpl.log
+         * 是 @Async 的，方法体已经在这个池的线程上跑，而 SecurityContextHolder 是 ThreadLocal——
+         * 池线程上取到的是空上下文。症状是审计流水每一行都记得住"做了什么"却记不住"谁做的"，
+         * 而且不报任何错。
+         *
+         * 包装器在任务结束后会清掉池线程上的上下文，所以线程复用不会串身份。
+         */
+        return new DelegatingSecurityContextAsyncTaskExecutor(asyncThreadPool());
+    }
+
+    /**
+     * {@code @Async} 真正的线程池。单独抽出来是为了让它的宽度可以被直接断言——
+     * {@link #getAsyncExecutor()} 返回的是包装器，拿不到里面的池。
+     */
+    ThreadPoolTaskExecutor asyncThreadPool() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(pools.asyncCoreSize());
         executor.setMaxPoolSize(pools.asyncMaxSize());

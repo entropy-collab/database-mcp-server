@@ -171,6 +171,13 @@ class DdlExecutionToolsBatchAuditTest {
         }
 
         @Override
+        public void logWithPrincipal(String tool, String sql, int rowCount, long durationMs,
+                                     boolean success, String error, String connectionKey,
+                                     String principal) {
+            log(tool, sql, rowCount, durationMs, success, error, connectionKey);
+        }
+
+        @Override
         public List<Map<String, Object>> getRecentLogs(int limit) {
             return List.of();
         }

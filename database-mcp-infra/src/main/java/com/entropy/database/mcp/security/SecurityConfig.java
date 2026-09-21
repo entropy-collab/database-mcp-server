@@ -446,8 +446,10 @@ public class SecurityConfig {
                 .successHandler((request, response, authentication) -> {
                     // 表单登录成功记审计。不用 AuthenticationSuccessEvent 的理由：Basic 是每请求认证，
                     // 那个事件会每次 API 调用都发一条，审计表会被刷满（见 AuthenticationAuditListener 的注释）。
+                    // 用 logWithPrincipal 显式传入用户名：这个时刻 SecurityContext 尚未写入，
+                    // currentPrincipal() 拿不到值。
                     String who = authentication.getName();
-                    auditLogger.log("auth:login", "LOGIN " + who, 0, 0L, true, null);
+                    auditLogger.logWithPrincipal("auth:login", "LOGIN " + who, 0, 0L, true, null, null, who);
                     response.setStatus(HttpStatus.NO_CONTENT.value());
                 })
                 .failureHandler((request, response, exception) ->
@@ -458,8 +460,10 @@ public class SecurityConfig {
                 .deleteCookies("JSESSIONID")
                 .logoutSuccessHandler((request, response, authentication) -> {
                     if (authentication != null) {
-                        auditLogger.log("auth:logout", "LOGOUT " + authentication.getName(),
-                                0, 0L, true, null);
+                        // 同上用 logWithPrincipal：退出成功时 SecurityContext 已经被清掉了。
+                        String who = authentication.getName();
+                        auditLogger.logWithPrincipal("auth:logout", "LOGOUT " + who,
+                                0, 0L, true, null, null, who);
                     }
                     response.setStatus(HttpStatus.NO_CONTENT.value());
                 }))
