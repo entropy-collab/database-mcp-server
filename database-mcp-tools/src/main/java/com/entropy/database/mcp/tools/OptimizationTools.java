@@ -87,6 +87,7 @@ public class OptimizationTools extends McpToolBase {
             【索引推荐】基于表的列元数据与已有索引，推荐该表缺失的单列索引与复合索引。
             前置条件：先调用 createNamedConnection 注册数据库连接；connection 与 tableName 均必填。
             使用场景：给一张表做索引体检、建表后补索引；输入是表名而非 SQL。
+            推荐顺序：listIndexes 看现有索引 → 本工具拿缺失索引建议 → executeDdl 执行 recommendedSql（执行前先 backupSchema 留一份结构快照）。
             返回字段：connection、table、recommendationCount、recommendations（数组，每项含 table、column（复合索引时为「列1, 列2」）、indexType（BTREE / BITMAP / COMPOSITE）、recommendedSql（可直接执行的 CREATE INDEX 语句）、reason、priority（数字越小越优先））。
             不要用于：针对某条 SQL 的索引建议（用 analyzeQuery，它按 WHERE 条件推荐）；查看已有索引明细（用 listIndexes）；本工具只给建议，不会创建索引，需自行用 executeDdl 执行 recommendedSql。
             标签：[read, optimizer, index, recommendation]
@@ -111,6 +112,7 @@ public class OptimizationTools extends McpToolBase {
             【SQL 重写建议】按 SQL 文本结构匹配已知反模式，给出重写方案与可用的改写后 SQL。纯静态分析，不连接数据库、不执行 SQL。
             前置条件：sql 必填；connection 仅作回显，不影响判定结果。
             使用场景：拿不到执行计划或方言不支持 EXPLAIN 时的兜底优化；批量评审 SQL 写法。
+            推荐顺序：能连库时优先 analyzeQuery（含本工具的全部结论）；只做静态评审时直接用本工具，拿到 transformedSql 后再用 explainPlan 对比改写前后的计划。
             识别的反模式（对应 type 取值）：SELECT_STAR（SELECT * 改为显式列）、IMPLICIT_CONVERSION（列与数值比较可能隐式转换导致索引失效）、LEADING_WILDCARD（LIKE '%x' 无法走 B-tree 索引）、OR_TO_IN（同列多个 OR 等值改 IN）、NOT_IN_SUBQUERY（NOT IN 子查询改 NOT EXISTS）、NO_FILTER（无 WHERE 的全表查询）、ORDER_BY_NO_WHERE（无 WHERE 的排序）。
             返回字段：connection、sql、suggestionCount、suggestions（数组，每项含 type、originalPattern、suggestedPattern、reason、transformedSql——transformedSql 为改写后的 SQL，无法安全改写时回退为原 SQL）。
             不要用于：需要执行计划支撑的诊断（用 analyzeQuery 或 explainPlan）；索引缺失判断（用 recommendIndexes）。
@@ -135,6 +137,7 @@ public class OptimizationTools extends McpToolBase {
             【单表性能体检】只读分析一张表：估算行数与体积，给出容量告警与缺失索引建议。不修改数据库、不收集统计信息。
             前置条件：先调用 createNamedConnection 注册数据库连接；connection 与 tableName 均必填。
             使用场景：判断大表是否需要分区、索引是否明显不足、表体积是否失控。
+            推荐顺序：estimateTableSize 快速看体积 → 本工具做只读体检 → gatherTableStats 刷新优化器统计（会改库状态）→ executeDdl 落地 actionItems。
             返回字段：connection、dialect、table、estimatedRowCount 与 tableSizeMb（取不到时为 -1）、warnings（超千万行、超 1GB、大表无索引建议等）、indexRecommendations（同 recommendIndexes 的结构）、actionItems（取前 3 条建议的 CREATE INDEX 语句）。
             不要用于：写入优化器统计信息（那是 gatherTableStats，会改数据库状态；本工具纯只读）；针对某条 SQL 的诊断（用 analyzeQuery）；查看表结构（用 describeTable）。
             标签：[read, optimizer, table, performance]
@@ -167,6 +170,7 @@ public class OptimizationTools extends McpToolBase {
             【执行计划解读】把已有的执行计划文本翻译成中文解读：逐行标注访问方式与问题，并附整体摘要。不连接数据库、不重新取计划。
             前置条件：planText 必填，需先由 explainPlan（或数据库端 EXPLAIN）取得计划文本。
             使用场景：拿到 explainPlan 的原始计划后看不懂，需要中文逐行解释与结论。
+            推荐顺序：explainPlan 取计划文本 → 本工具解读 → suggestRewrites 或 recommendIndexes 拿改进动作；想一步到位则直接用 analyzeQuery。
             识别的模式：全表扫描、索引范围扫描、唯一索引访问、嵌套循环连接、哈希连接、排序操作。
             返回字段：connection、dialect（实际生效的方言标识）、interpretation（多行中文文本：每行形如「[序号] 计划行 + 标注」，末尾附「解读摘要」段落）。
             不要用于：还没有计划文本的情况（先用 explainPlan 取计划，或直接用 analyzeQuery 一步到位）；索引与重写建议（用 recommendIndexes / suggestRewrites）。
