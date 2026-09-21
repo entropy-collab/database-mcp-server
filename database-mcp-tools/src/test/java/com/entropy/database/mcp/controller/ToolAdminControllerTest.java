@@ -15,6 +15,8 @@
  */
 package com.entropy.database.mcp.controller;
 
+import com.entropy.database.mcp.byok.DynamicDataSourceManager;
+import com.entropy.database.mcp.prompt.ToolPromptGenerator;
 import com.entropy.database.mcp.toggle.ToolToggleRepository;
 import com.entropy.database.mcp.tools.FixedObjectProvider;
 import com.entropy.database.mcp.tools.McpToolBase;
@@ -27,6 +29,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.http.MediaType;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -42,7 +45,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * {@code /api/tools} 的 HTTP 契约：返回体字段、幂等语义，以及三种"入参不对"到 400 的翻译。
+ * {@code /api/tools} 的 HTTP 契约：返回体字段、幂等语义，以及四种"入参不对"到 400 的翻译
+ * （缺 {@code disabled}、未知工具名、未知分组、未知 {@code format}）。
+ *
+ * <p>{@code GET /api/tools/prompt} 在这里只验 HTTP 契约（字段齐全、缺省值、非法值到 400）；
+ * 文本内容本身在 {@code ToolPromptGeneratorTest} 里钉——那边不必起 MockMvc。
  *
  * <h2>为什么是 standaloneSetup 而不是 @SpringBootTest</h2>
  * <p>本模块没有 {@code @SpringBootConfiguration}（它在 app 模块），而这里要钉的是控制器自己的
@@ -98,6 +105,12 @@ class ToolAdminControllerTest {
     private final ToolCatalog catalog = new ToolCatalog(
             FixedObjectProvider.of(new QuerySampleTools(), new GuardedSampleTools()));
 
+    /** 提示词只用到连接名与 readonly 标记；本类不测文本内容（那在 {@code ToolPromptGeneratorTest}）。 */
+    private final DynamicDataSourceManager dataSources = mock(DynamicDataSourceManager.class);
+
+    /** 三个开关都不设 = 本仓库默认部署下的生效值。 */
+    private final MockEnvironment environment = new MockEnvironment();
+
     /** 顺序要稳定、值都非空，所以是 LinkedHashMap 而不是 {@code Map.of}。 */
     private final Map<String, SyncToolSpecification> exposedSpecs = new LinkedHashMap<>();
 
@@ -111,8 +124,12 @@ class ToolAdminControllerTest {
             exposedSpecs.put(name, spec(name));
         }
         this.toggles = registryWith(null);
-        this.controller = new ToolAdminController(toggles, catalog);
+        this.controller = new ToolAdminController(toggles, catalog, generator(toggles));
         this.mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
+    }
+
+    private ToolPromptGenerator generator(ToolToggleRegistry registry) {
+        return new ToolPromptGenerator(catalog, registry, dataSources, environment);
     }
 
     private static SyncToolSpecification spec(String name) {
@@ -308,6 +325,69 @@ class ToolAdminControllerTest {
                 .andExpect(status().isBadRequest());
     }
 
+    // ─── 提示词 ────────────────────────────────────────────────────────────
+
+    /**
+     * 返回体四个字段齐全、顺序稳定，{@code toolCount} 与 {@code tools/list} 的长度一致。
+     *
+     * <p>文本内容本身在 {@code ToolPromptGeneratorTest} 里钉；这里只钉 HTTP 契约。
+     * 键集合用直接调用断言（{@code containsExactly} 连顺序一起钉），值用 jsonPath——
+     * 两者缺一都验不全，理由同 {@link #listExposesEveryFieldTheToolsPageNeeds}。
+     */
+    @Test
+    void promptExposesEveryFieldAndCountsOnlyListedTools() throws Exception {
+        assertThat(controller.prompt("system").keySet())
+                .containsExactly("format", "generatedAt", "toolCount", "text");
+
+        mockMvc.perform(get("/api/tools/prompt"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.format").value("system"))
+                .andExpect(jsonPath("$.generatedAt").isString())
+                // 暴露集 3 个、没有被停用的：被部署期裁掉的 guardedSample 不算在内
+                .andExpect(jsonPath("$.toolCount").value(3))
+                .andExpect(jsonPath("$.text").isString());
+    }
+
+    /** {@code format} 缺省是 {@code system}，空串也走缺省（{@code ?format=} 语义上是"没传"）。 */
+    @Test
+    void promptFormatDefaultsToSystem() throws Exception {
+        mockMvc.perform(get("/api/tools/prompt"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.format").value("system"));
+        mockMvc.perform(get("/api/tools/prompt").param("format", ""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.format").value("system"));
+    }
+
+    @Test
+    void promptHonoursTheListFormat() throws Exception {
+        mockMvc.perform(get("/api/tools/prompt").param("format", "list"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.format").value("list"));
+    }
+
+    /**
+     * 非法 {@code format} 是 400 而不是 500，消息里带可选值。
+     *
+     * <p>500 会让调用方以为是服务端故障而重试，而重试一万次结果相同——与本类里其它三种
+     * "入参不对"的处理一致。
+     */
+    @Test
+    void unknownPromptFormatIsRejectedWithBadRequest() throws Exception {
+        mockMvc.perform(get("/api/tools/prompt").param("format", "markdown"))
+                .andExpect(status().isBadRequest());
+    }
+
+    /** 停用之后提示词里的工具数必须跟着减：它的口径就是此刻的 {@code tools/list}。 */
+    @Test
+    void promptDropsToolsThatWereJustDisabled() throws Exception {
+        toggles.setDisabled("listSamples", true);
+
+        mockMvc.perform(get("/api/tools/prompt").param("format", "list"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.toolCount").value(2));
+    }
+
     // ─── 内存模式 ──────────────────────────────────────────────────────────
 
     /**
@@ -337,7 +417,8 @@ class ToolAdminControllerTest {
     void reportsPersistedWhenAStateStoreIsConfigured() throws Exception {
         ToolToggleRegistry persistent = registryWith(mock(ToolToggleRepository.class));
         MockMvc withStore = MockMvcBuilders
-                .standaloneSetup(new ToolAdminController(persistent, catalog)).build();
+                .standaloneSetup(new ToolAdminController(persistent, catalog, generator(persistent)))
+                .build();
 
         withStore.perform(get("/api/tools"))
                 .andExpect(status().isOk())

@@ -33,7 +33,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 已注册 MCP 工具的运行期索引：工具名 → 所属分组、一句话摘要、标签。
+ * 已注册 MCP 工具的运行期索引：工具名 → 所属分组、一句话摘要、完整描述、标签。
  *
  * <p>索引完全由反射得出，数据源是容器里真实存在的 {@link McpToolBase} bean 及其
  * {@code @McpTool} 方法，因此不存在需要人工维护的工具名清单——新增、改名、条件化注册
@@ -51,6 +51,13 @@ import java.util.regex.Pattern;
  * <h2>摘要与标签</h2>
  * 从工具描述里解析，依赖既有的中文描述模板（{@code 【工具中文名】一句话说明。} 与
  * {@code 标签：[read, query]}）。描述不合模板时摘要退化为首行截断、标签为空，不会报错。
+ *
+ * <h2>摘要与完整描述是两个字段，用途不同</h2>
+ * {@code summary} 是<b>截断到 160 字</b>的一句话，给表格与 {@code suggestTools} 用；
+ * {@code description} 是 {@code @McpTool} 注解里的原文，一个字不删，给
+ * {@code ToolPromptGenerator} 那种"要把工具描述整段喂给模型"的场景用。两者不能互相替代：
+ * 表格里塞一段几百字的描述没法读，而提示词里只给一句摘要等于把「前置条件 / 不要用于」
+ * 这些真正能阻止误用的信息扔掉。
  *
  * <p>索引惰性构建：本类被 {@link IntentRouter}（自身也是一个工具 bean）依赖，构造期解析
  * bean 列表会形成循环依赖，故通过 {@link ObjectProvider} 延迟到首次使用。
@@ -83,14 +90,26 @@ public class ToolCatalog {
     /**
      * 单个工具的检索元数据。
      *
-     * @param name    MCP 工具名（{@code @McpTool.name()} 优先，缺省为方法名）
-     * @param group   分组名，由声明类名推导
-     * @param summary 一句话摘要，取描述里的中文名与首句
-     * @param tags    描述里 {@code 标签：[...]} 的英文小写关键字
+     * @param name        MCP 工具名（{@code @McpTool.name()} 优先，缺省为方法名）
+     * @param group       分组名，由声明类名推导
+     * @param summary     一句话摘要，取描述里的中文名与首句，<b>会被截断</b>（见 {@code summarize}）
+     * @param description {@code @McpTool.description()} 的原文，只做首尾去空白，<b>不截断</b>；
+     *                    没有描述时是空串而不是 {@code null}
+     * @param tags        描述里 {@code 标签：[...]} 的英文小写关键字
      */
-    public record ToolDescriptor(String name, String group, String summary, List<String> tags) {
+    public record ToolDescriptor(String name, String group, String summary, String description,
+                                 List<String> tags) {
 
-        /** 供关键词匹配用的小写检索文本，包含工具名、分组、摘要与标签。 */
+        /**
+         * 供关键词匹配用的小写检索文本，包含工具名、分组、摘要与标签。
+         *
+         * <p><b>刻意不含 {@link #description}。</b>这是一个取舍，不是遗漏：完整描述里有
+         * 「前置条件 / 使用场景 / 返回字段 / 不要用于」这一套模板套话，把它加进来之后几乎任何
+         * 关键词都能在几乎任何工具上命中（"连接"、"表"、"查询"、"错误" 每段描述里都有），
+         * {@code IntentRouter.suggestTools} 的弱命中权重会给所有工具都加上分，排序随之退化成
+         * 按工具名字典序——推荐功能形同废掉。要让描述参与匹配得先重做打分（比如按词频归一化），
+         * 那是另一件事。{@code ToolCatalogTest} 有一条断言钉住这里不含描述正文。
+         */
         public String searchableText() {
             return (name + ' ' + group + ' ' + summary + ' ' + String.join(" ", tags)).toLowerCase();
         }
@@ -202,7 +221,7 @@ public class ToolCatalog {
                 }
                 String name = annotation.name().isBlank() ? method.getName() : annotation.name();
                 result.put(name, new ToolDescriptor(name, group, summarize(annotation.description()),
-                        parseTags(annotation.description())));
+                        fullDescription(annotation.description()), parseTags(annotation.description())));
             }
         }
         return new LinkedHashMap<>(result);
@@ -228,6 +247,21 @@ public class ToolCatalog {
             kebab.append(Character.toLowerCase(c));
         }
         return kebab.toString();
+    }
+
+    /**
+     * 注解里的完整描述，只做首尾去空白。
+     *
+     * <p>去空白而不是原样保留：描述一律是文本块，尾部必然带一个换行、首部可能带缩进，
+     * 而这份文本会被直接拼进 Markdown 提示词，多出来的空行会变成段落分隔。
+     * 中间的换行与缩进<b>不动</b>——描述模板的每一行（前置条件 / 使用场景 / 返回字段 /
+     * 不要用于 / 标签）都是独立一行，压平会让模型读成一句长句。
+     *
+     * <p>{@code null} 与空白都折成空串，不返回 {@code null}：这个字段会进 JSON 与 Markdown，
+     * 两处都不希望出现 "null" 字面量，而本仓库刚为同一类原因修过四处 NPE。
+     */
+    static String fullDescription(String description) {
+        return description == null ? "" : description.strip();
     }
 
     /** 取描述里的 {@code 【中文名】} 与紧随的首句；不合模板时退化为首行截断。 */

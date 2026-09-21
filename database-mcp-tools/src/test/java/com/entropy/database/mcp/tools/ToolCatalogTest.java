@@ -89,4 +89,54 @@ class ToolCatalogTest {
         String text = index.get("flashbackSample").searchableText();
         assertThat(text).contains("flashbacksample", "health-like", "闪回", "oracle");
     }
+
+    /**
+     * {@code description} 是注解原文，只做首尾去空白。
+     *
+     * <p>摘要那一条已经在上面钉住了；这里钉的是"描述<b>没有</b>被摘要化"：模板里首句之后的
+     * 每一行（前置条件、返回字段、标签行）都得在。提示词生成器要的就是这几行——只给一句摘要
+     * 等于把真正能阻止误用的信息扔掉。
+     */
+    @Test
+    void keepsTheFullAnnotationDescription() {
+        ToolDescriptor descriptor = index.get("executeSample");
+
+        assertThat(descriptor.description())
+                .startsWith("【执行示例查询】")
+                .contains("前置条件：无。")
+                .contains("返回字段：rows、rowCount。")
+                .contains("标签：[read, query, select]")
+                .as("首尾去空白：文本块尾部那个换行会在 Markdown 里变成一个空段落")
+                .doesNotEndWith("\n");
+        assertThat(descriptor.description())
+                .as("描述比摘要长得多，这正是两个字段并存的理由")
+                .hasSizeGreaterThan(descriptor.summary().length());
+    }
+
+    /** 没有描述时是空串而不是 null：这个字段会进 JSON 与 Markdown，两处都不该出现 "null"。 */
+    @Test
+    void missingDescriptionBecomesAnEmptyStringNotNull() {
+        assertThat(ToolCatalog.fullDescription(null)).isEmpty();
+        assertThat(ToolCatalog.fullDescription("   \n  ")).isEmpty();
+    }
+
+    /**
+     * <b>{@code searchableText()} 刻意不含 description。</b>
+     *
+     * <p>这一条钉的是一个取舍，不是实现细节：完整描述里有「前置条件 / 使用场景 / 返回字段 /
+     * 不要用于」这套模板套话，把它加进检索文本之后几乎任何关键词都能在几乎任何工具上命中，
+     * {@code IntentRouter.suggestTools} 的弱命中权重会给所有工具都加分，排序退化成按工具名
+     * 字典序——推荐功能形同废掉。哪天有人"顺手"把 description 加进去，这条会红。
+     */
+    @Test
+    void searchableTextDeliberatelyExcludesTheFullDescription() {
+        ToolDescriptor descriptor = index.get("executeSample");
+
+        assertThat(descriptor.description())
+                .as("前提：这个夹具的描述里确实有摘要里没有的内容")
+                .contains("返回字段");
+        assertThat(descriptor.searchableText())
+                .doesNotContain("返回字段")
+                .doesNotContain("前置条件");
+    }
 }

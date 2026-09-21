@@ -15,6 +15,9 @@
  */
 package com.entropy.database.mcp.controller;
 
+import com.entropy.database.mcp.prompt.ToolPromptGenerator;
+import com.entropy.database.mcp.prompt.ToolPromptGenerator.PromptFormat;
+import com.entropy.database.mcp.prompt.ToolPromptGenerator.ToolPrompt;
 import com.entropy.database.mcp.tools.ToolCatalog;
 import com.entropy.database.mcp.tools.ToolToggleRegistry;
 import com.entropy.database.mcp.tools.ToolToggleRegistry.ToggleResult;
@@ -24,6 +27,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -38,6 +42,10 @@ import java.util.function.Supplier;
 /**
  * 运行期启用/停用 MCP 工具的运维接口。<b>停用 = 工具从 {@code tools/list} 消失</b>，
  * 真正执行与全部语义都在 {@link ToolToggleRegistry}，本类只做 HTTP 侧的翻译。
+ *
+ * <p>另外挂了一个只读端点 {@code GET /api/tools/prompt}：按此刻的 {@code tools/list} 生成一份
+ * 提示词。它和上面两个 {@code PUT} 在同一个类里，因为它的输入正是那两个 PUT 改的那份状态——
+ * 放到只读的 {@code WebUiController} 去会让"提示词里的工具清单"与"能改清单的接口"分居两处。
  *
  * <h2>鉴权</h2>
  * <p>挂在 {@code /api/**} 之下，因此由 {@code SecurityConfig.securityFilterChain} 里的
@@ -61,9 +69,17 @@ public class ToolAdminController {
     private final ToolToggleRegistry toggles;
     private final ToolCatalog catalog;
 
-    public ToolAdminController(ToolToggleRegistry toggles, ToolCatalog catalog) {
+    /**
+     * 提示词生成器。整段文本在服务端拼，理由写在 {@link ToolPromptGenerator} 的类注释里：
+     * 提示词要写清"当前有哪些约束"，而那些约束全在服务端。
+     */
+    private final ToolPromptGenerator prompts;
+
+    public ToolAdminController(ToolToggleRegistry toggles, ToolCatalog catalog,
+                               ToolPromptGenerator prompts) {
         this.toggles = toggles;
         this.catalog = catalog;
+        this.prompts = prompts;
     }
 
     /**
@@ -116,6 +132,39 @@ public class ToolAdminController {
         body.put("disabledCount", disabledNames.size());
         body.put("persisted", toggles.persistent());
         body.put("tools", tools);
+        return body;
+    }
+
+    /**
+     * 按当前启用的工具生成一份可直接粘给模型的提示词。
+     *
+     * <p>GET /api/tools/prompt?format=list|system → {@code {format, generatedAt, toolCount, text}}
+     *
+     * <p>{@code format} 缺省是 {@code system}；非法取值是 400，消息里列出可选值。
+     * {@code text} 是纯文本（Markdown），可直接粘贴，前端不做二次拼装。
+     *
+     * <p>{@code toolCount} 是写进 {@code text} 的工具数，等于此刻 {@code tools/list} 的长度，
+     * 也就是上面 {@code list()} 的 {@code exposed - disabledCount}。它<b>不是</b> {@code total}：
+     * 被部署期裁掉和被运行期停用的工具都不在提示词里——写进去就是让模型去调一个不存在的工具。
+     *
+     * <p>为什么整段文本在服务端拼而不是前端拼：提示词的价值在于写清"当前有哪些约束"
+     * （DDL 开关、连接只读标记、授权开关、停用了几个工具），而那些判断全在服务端。
+     * 详见 {@link ToolPromptGenerator} 的类注释。
+     *
+     * <p>{@code @RequestParam} 显式写出 {@code name}，理由见 {@link AuditLogController#getLogs}：
+     * 不写时参数名依赖编译期的 {@code -parameters}，下游用自己的构建配置重打包后会退化成
+     * {@code arg0}，表现为每次请求都失败，而不是编译期报错。
+     */
+    @GetMapping("/prompt")
+    public Map<String, Object> prompt(
+            @RequestParam(name = "format", defaultValue = "system") String format) {
+        ToolPrompt generated = prompts.generate(parseFormat(format));
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("format", generated.format());
+        body.put("generatedAt", generated.generatedAt().toString());
+        body.put("toolCount", generated.toolCount());
+        body.put("text", generated.text());
         return body;
     }
 
@@ -196,6 +245,20 @@ public class ToolAdminController {
                     "请求体必须带 disabled 字段：{\"disabled\": true} 停用，{\"disabled\": false} 启用");
         }
         return request.disabled();
+    }
+
+    /**
+     * 把 {@code format} 的非法取值翻成 400。
+     *
+     * <p>和 {@link #apply} 同一个理由：500 会让调用方以为是服务端故障而重试，而重试一万次结果相同。
+     * 消息原样透出——{@code PromptFormat.parse} 在里面列了可选值。
+     */
+    private static PromptFormat parseFormat(String format) {
+        try {
+            return PromptFormat.parse(format);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage(), e);
+        }
     }
 
     /**
