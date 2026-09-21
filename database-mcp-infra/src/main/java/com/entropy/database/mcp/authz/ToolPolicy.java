@@ -19,6 +19,7 @@ import facet.core.eval.Checker;
 import facet.core.eval.Schema;
 import facet.core.ir.ObjectRef;
 import facet.core.ir.ObjectType;
+import facet.core.ir.Perm;
 import facet.core.ir.Rel;
 import facet.core.ir.SubjectRef;
 import facet.core.ir.Tuple;
@@ -26,7 +27,9 @@ import facet.store.memory.MemoryAttrSource;
 import facet.store.memory.MemoryTupleSource;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.function.Predicate;
 
 import static facet.dsl.rebac.Rebac.anyOf;
 import static facet.dsl.rebac.Rebac.direct;
@@ -78,10 +81,6 @@ public final class ToolPolicy {
     static final Rel READ = new Rel("read");
     static final Rel WRITE = new Rel("write");
 
-    private static final Rel READER = new Rel("reader");
-    private static final Rel WRITER = new Rel("writer");
-    private static final Rel ADMIN = new Rel("admin");
-
     private final Checker checker;
 
     private ToolPolicy(Schema schema, MemoryTupleSource tuples) {
@@ -122,13 +121,28 @@ public final class ToolPolicy {
                 .build();
     }
 
-    /** 两个类型的关系声明逐字相同，所以只写一遍——写两遍就会有一天只改了其中一遍。 */
+    /**
+     * 两个类型的关系声明逐字相同，所以只写一遍——写两遍就会有一天只改了其中一遍。
+     *
+     * <p>角色清单与读写包含关系都从 {@link AuthzRole} 生成，<b>不在这里写死</b>：
+     * 手写 {@code anyOf(direct("reader"), direct("writer"), direct("admin"))} 的坏法是加一个角色时
+     * 只改了配置白名单、忘了改这里——配置会通过校验，那个角色也确实落进元组，但它不属于任何
+     * computed 关系，于是判定恒为拒绝，而没有任何报错指向这一行。
+     */
     private static void roles(facet.dsl.rebac.Rebac.TypeBuilder t) {
-        t.tuples("reader")
-                .tuples("writer")
-                .tuples("admin")
-                .computed("read", anyOf(direct("reader"), direct("writer"), direct("admin")))
-                .computed("write", anyOf(direct("writer"), direct("admin")));
+        for (AuthzRole role : AuthzRole.values()) {
+            t.tuples(role.configName());
+        }
+        t.computed(READ.name(), anyOf(directsOf(AuthzRole::grantsRead)))
+                .computed(WRITE.name(), anyOf(directsOf(AuthzRole::grantsWrite)));
+    }
+
+    /** {@code anyOf} 的入参：满足断言的每个角色一条 {@code direct}。 */
+    private static Perm[] directsOf(Predicate<AuthzRole> grants) {
+        return Arrays.stream(AuthzRole.values())
+                .filter(grants)
+                .map(role -> direct(role.configName()))
+                .toArray(Perm[]::new);
     }
 
     private static List<Tuple> tuples(List<ToolAuthzProperties.Grant> grants) {
@@ -145,13 +159,11 @@ public final class ToolPolicy {
         return out;
     }
 
-    /** 角色名到关系名的映射。{@code Grant} 已经把 role 收进白名单，所以这里不需要兜底分支。 */
+    /**
+     * 角色名到关系名的映射。{@code Grant} 已经把 role 收进白名单，所以这里不需要兜底分支——
+     * 真正的兜底在 {@link AuthzRole#of}，它对白名单外的值抛异常。
+     */
     private static Rel relationFor(String role) {
-        return switch (role) {
-            case "reader" -> READER;
-            case "writer" -> WRITER;
-            case "admin" -> ADMIN;
-            default -> throw new IllegalStateException("未覆盖的角色: " + role);
-        };
+        return new Rel(AuthzRole.of(role).configName());
     }
 }

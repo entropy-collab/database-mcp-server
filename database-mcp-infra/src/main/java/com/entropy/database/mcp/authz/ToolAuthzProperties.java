@@ -55,8 +55,14 @@ import java.util.Set;
 @ConfigurationProperties(prefix = "entropy.mcp.authz")
 public class ToolAuthzProperties {
 
-    /** 允许的角色名。收成白名单，理由与主体类型相同：拼错一个字母的症状是"配了但不生效"。 */
-    static final Set<String> ROLES = Set.of("reader", "writer", "admin");
+    /**
+     * 允许的角色名。收成白名单，理由与主体类型相同：拼错一个字母的症状是"配了但不生效"。
+     *
+     * <p>取值从 {@link AuthzRole} 推导，<b>不在这里再写一份</b>：这里的白名单与
+     * {@code ToolPolicy} 里那两条读写规则必须覆盖同一组角色，各写一份的漂移症状是
+     * "配置合法、启动正常、那个人写入时被拒"。
+     */
+    static final Set<String> ROLES = AuthzRole.configNames();
 
     private boolean enabled;
     private List<Grant> grants = new ArrayList<>();
