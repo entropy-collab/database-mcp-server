@@ -516,6 +516,73 @@ class DatabaseReadRepositoryTest {
         }
     }
 
+    // ─── searchTables ─────────────────────────────────────────────────────
+
+    /**
+     * 子串匹配之外还有一层编辑距离回退。调用方多为模型，表名拼错一个字母原来只会拿到空数组，
+     * 而空数组读起来跟「这个库真没有这张表」无法区分。
+     */
+    @Nested
+    @DisplayName("searchTables 的模糊回退")
+    class SearchTablesFuzzyFallback {
+
+        private List<String> namesOf(List<Map<String, Object>> rows) {
+            return rows.stream().map(row -> String.valueOf(row.get("TABLE_NAME"))).toList();
+        }
+
+        @Test
+        @DisplayName("子串命中时不走回退，结果不带 matchType")
+        void substringHitDoesNotFallBack() {
+            List<Map<String, Object>> found = repository(100, 10000).searchTables("NUM");
+
+            assertThat(namesOf(found)).contains("NUMS");
+            assertThat(found).allSatisfy(row -> assertThat(row).doesNotContainKey("matchType"));
+        }
+
+        @Test
+        @DisplayName("拼错一个字母时回退命中，并标注 matchType 与 editDistance")
+        void misspelledKeywordFallsBackToEditDistance() {
+            List<Map<String, Object>> found = repository(100, 10000).searchTables("NUMZ");
+
+            assertThat(namesOf(found)).contains("NUMS");
+            Map<String, Object> hit = found.stream()
+                .filter(row -> "NUMS".equals(String.valueOf(row.get("TABLE_NAME"))))
+                .findFirst().orElseThrow();
+            assertThat(hit.get("matchType")).isEqualTo("fuzzy");
+            assertThat(hit.get("editDistance")).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("差得太远的关键词既不子串命中也不回退命中，返回空")
+        void unrelatedKeywordMatchesNothing() {
+            assertThat(repository(100, 10000).searchTables("ZZZZ_TOTALLY_UNRELATED")).isEmpty();
+        }
+
+        @Test
+        @DisplayName("空关键词仍是「列全部表」，不进回退")
+        void blankKeywordStillListsEverything() {
+            List<Map<String, Object>> found = repository(100, 10000).searchTables(null);
+
+            assertThat(namesOf(found)).contains("NUMS");
+            assertThat(found).allSatisfy(row -> assertThat(row).doesNotContainKey("matchType"));
+        }
+
+        /**
+         * 回退结果是新建的 map，不是把 matchType 写回缓存里那份共享的 row —— 否则后续一次
+         * 「列全部表」会读到被别人的搜索污染过的结果。
+         */
+        @Test
+        @DisplayName("回退不污染缓存里的全量表清单")
+        void fallbackDoesNotMutateTheCachedListing() {
+            DatabaseReadRepository repo = repository(100, 10000);
+
+            assertThat(repo.searchTables("NUMZ")).isNotEmpty();
+
+            assertThat(repo.searchTables(null))
+                .allSatisfy(row -> assertThat(row).doesNotContainKey("matchType"));
+        }
+    }
+
     // ─── Test doubles ─────────────────────────────────────────────────────
     /** Masking disabled: returns the very same list, which is the repository's "unmasked" path. */
     private static final DataMaskingService IDENTITY_MASKING = new DataMaskingService() {
@@ -542,9 +609,6 @@ class DatabaseReadRepositoryTest {
             return metadata.keySet();
         }
 
-        @Override public Object get(String key, CacheTier tier) { return null; }
-        @Override public void put(String key, Object value, CacheTier tier) { }
-        @Override public void evict(String key, CacheTier tier) { }
         @Override public Object getQuery(String key) { return queries.get(key); }
         @Override public void putQuery(String key, Object value) { queries.put(key, value); }
         @Override public void evictQuery(String key) { queries.remove(key); }

@@ -57,6 +57,14 @@ public class DatabaseReadRepository {
     /** 当前 schema 查不出来时的占位串，明确写成「查不到」而不是编一个看起来合法的名字。 */
     static final String UNKNOWN_SCHEMA = "(unresolved current schema)";
 
+    /** 表名模糊回退的编辑距离阈值。 */
+    static final int FUZZY_MAX_DISTANCE = 3;
+    /** 短表名收紧阈值：名字越短，距离 3 就能匹配上几乎任何东西。 */
+    static final int FUZZY_SHORT_NAME_LENGTH = 10;
+    static final int FUZZY_SHORT_NAME_MAX_DISTANCE = 2;
+    /** 模糊回退的返回条数上限：结果只是「你可能想找这几张」，多了反而没法判断。 */
+    static final int FUZZY_MAX_RESULTS = 20;
+
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseDialect dialect;
     private final SqlValidator sqlValidator;
@@ -117,6 +125,10 @@ public class DatabaseReadRepository {
 
     /**
      * List tables across all schemas, optionally filtered by keyword.
+     *
+     * <p>子串匹配（{@code LIKE %keyword%}）一条都没命中时回退到编辑距离匹配。调用方多为模型，
+     * 表名拼错一个字母就得到空数组，而空数组读起来跟「这个库真没有这张表」无法区分——回退把
+     * 「拼错了」和「真没有」分开：拿到 {@code matchType=fuzzy} 就是前者。
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> searchTables(String keyword) {
@@ -129,11 +141,135 @@ public class DatabaseReadRepository {
         List<Map<String, Object>> result;
         if (keyword != null && !keyword.isBlank()) {
             result = jdbcTemplate.queryForList(sql, "%" + keyword + "%");
+            if (result.isEmpty()) {
+                result = fuzzySearchTables(keyword);
+            }
         } else {
             result = jdbcTemplate.queryForList(sql);
         }
         cache.putMetadata(cacheKey, result);
         return result;
+    }
+
+    /**
+     * 编辑距离回退：拉全量表名，按最小编辑距离挑出最像 {@code keyword} 的那几张。
+     *
+     * <p>全量表清单走 {@link #searchTables(String)} 的 null 分支，所以它自带缓存，连续几次拼错
+     * 只查一次数据库。回退本身失败（权限、超时）时返回空列表——它是一次「顺手帮忙」，不该让
+     * 原本只是没命中的搜索变成报错。
+     */
+    private List<Map<String, Object>> fuzzySearchTables(String keyword) {
+        List<Map<String, Object>> allTables;
+        try {
+            allTables = searchTables(null);
+        } catch (org.springframework.dao.DataAccessException e) {
+            log.warn("Fuzzy fallback for table search [{}] could not list all tables; "
+                    + "returning the empty exact-match result", keyword, e);
+            return List.of();
+        }
+        String needle = keyword.toUpperCase();
+        int threshold = needle.length() <= FUZZY_SHORT_NAME_LENGTH
+                ? FUZZY_SHORT_NAME_MAX_DISTANCE
+                : FUZZY_MAX_DISTANCE;
+
+        List<Map<String, Object>> matches = new ArrayList<>();
+        for (Map<String, Object> row : allTables) {
+            String tableName = stringValue(row, "table_name");
+            if (tableName == null) {
+                continue;
+            }
+            int distance = minDistanceToNameOrSegment(needle, tableName.toUpperCase(), threshold);
+            if (distance > threshold) {
+                continue;
+            }
+            // 复制而不是改原 row：allTables 来自缓存，是并发共享的。
+            Map<String, Object> match = new LinkedHashMap<>(row);
+            match.put("matchType", "fuzzy");
+            match.put("editDistance", distance);
+            matches.add(match);
+        }
+        matches.sort(java.util.Comparator.comparingInt(m -> (Integer) m.get("editDistance")));
+        return matches.size() > FUZZY_MAX_RESULTS
+                ? List.copyOf(matches.subList(0, FUZZY_MAX_RESULTS))
+                : List.copyOf(matches);
+    }
+
+    /**
+     * {@code needle} 到整表名、以及到表名每个下划线分段的最小编辑距离。
+     *
+     * <p>只比整表名的话，用 {@code TXN} 找 {@code TBL_STL_TXN_DTL} 的距离是 12，任何合理阈值都排除它；
+     * 只比分段的话，{@code TBL_STL_TXN_DTLX} 这种整体轻微拼错又会漏掉。两者取小覆盖这两类输入。
+     */
+    private static int minDistanceToNameOrSegment(String needle, String tableName, int threshold) {
+        int best = boundedLevenshtein(needle, tableName, threshold);
+        if (best == 0) {
+            return 0;
+        }
+        for (String segment : tableName.split("_")) {
+            if (segment.isEmpty()) {
+                continue;
+            }
+            best = Math.min(best, boundedLevenshtein(needle, segment, threshold));
+            if (best == 0) {
+                return 0;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Levenshtein 距离，超过 {@code max} 就不再算下去，直接返回 {@code max + 1}。
+     *
+     * <p>回退要对全库表名逐个比一遍，而绝大多数表名跟关键词毫不相干。长度差就已经超阈值的那些
+     * 一次乘法即可排除，剩下的靠每行最小值提前退出，避免为一次「顺手帮忙」跑满 O(n·m)。
+     */
+    private static int boundedLevenshtein(String a, String b, int max) {
+        int overflow = max + 1;
+        if (Math.abs(a.length() - b.length()) > max) {
+            return overflow;
+        }
+        if (a.equals(b)) {
+            return 0;
+        }
+        int[] prev = new int[b.length() + 1];
+        int[] curr = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) {
+            prev[j] = j;
+        }
+        for (int i = 1; i <= a.length(); i++) {
+            curr[0] = i;
+            int rowMin = curr[0];
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                curr[j] = Math.min(Math.min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                rowMin = Math.min(rowMin, curr[j]);
+            }
+            if (rowMin > max) {
+                return overflow;
+            }
+            int[] swap = prev;
+            prev = curr;
+            curr = swap;
+        }
+        int distance = prev[b.length()];
+        return distance > max ? overflow : distance;
+    }
+
+    /**
+     * 大小写不敏感地取一列的字符串值。元数据查询的列名大小写由驱动决定（Oracle 给大写、
+     * PostgreSQL 给小写），所以不能按固定写法取键。
+     */
+    private static String stringValue(Map<String, Object> row, String column) {
+        Object direct = row.get(column);
+        if (direct != null) {
+            return direct.toString();
+        }
+        for (Map.Entry<String, Object> entry : row.entrySet()) {
+            if (column.equalsIgnoreCase(entry.getKey()) && entry.getValue() != null) {
+                return entry.getValue().toString();
+            }
+        }
+        return null;
     }
 
     @SuppressWarnings("unchecked")
