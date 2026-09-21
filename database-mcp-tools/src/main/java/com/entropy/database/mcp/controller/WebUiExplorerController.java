@@ -719,8 +719,9 @@ public class WebUiExplorerController {
     /**
      * 执行计划。
      *
-     * <p>GET /api/ui/sql/plan?connection=&amp;sql=... → 原样透传
-     * {@code QueryAnalysisTools.explainPlan}（{@code plan}、{@code explainSql}、{@code warnings}）。
+     * <p>GET /api/ui/sql/plan?connection=&amp;sql=[&amp;withSuggestions=true] → 原样透传
+     * {@code QueryAnalysisTools.explainPlan}（{@code plan}、{@code explainSql}、{@code warnings}，
+     * 带 {@code withSuggestions=true} 时还有 {@code rewriteSuggestions}）。
      *
      * <p>只接 {@code SELECT} 或以 {@code WITH} 开头的语句，别的会被工具按 SECURITY_VIOLATION 拒掉；
      * 方言不提供 EXPLAIN 时是 EXPLAIN_NOT_SUPPORTED。两者都是 500 + 消息，页面照消息显示即可。
@@ -729,8 +730,9 @@ public class WebUiExplorerController {
     @GetMapping("/sql/plan")
     public Map<String, Object> sqlPlan(
             @RequestParam(name = "connection", required = false) @Nullable String connection,
-            @RequestParam(name = "sql", required = false) @Nullable String sql) {
-        return queryAnalysisTools.explainPlan(connection, requireParam(sql, "sql"));
+            @RequestParam(name = "sql", required = false) @Nullable String sql,
+            @RequestParam(name = "withSuggestions", required = false) @Nullable Boolean withSuggestions) {
+        return queryAnalysisTools.explainPlan(connection, requireParam(sql, "sql"), withSuggestions);
     }
 
     /**

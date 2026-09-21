@@ -20,6 +20,7 @@ import com.entropy.database.mcp.dialect.OracleDialect;
 import com.entropy.database.mcp.dialect.PostgresDialect;
 import com.entropy.database.mcp.facade.DatabaseAdminOperations;
 import com.entropy.database.mcp.facade.DatabaseReadOperations;
+import com.entropy.database.mcp.optimizer.OptimizerService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -62,7 +63,8 @@ class QueryAnalysisToolsTest {
         DatabaseAdminOperations admin = mock(DatabaseAdminOperations.class);
         when(admin.getDialect(CONNECTION)).thenReturn(dialect);
 
-        Map<String, Object> result = new QueryAnalysisTools(reads, admin).explainPlan(CONNECTION, SQL);
+        Map<String, Object> result = new QueryAnalysisTools(reads, admin, mock(OptimizerService.class))
+                .explainPlan(CONNECTION, SQL, null);
 
         return (List<String>) result.get("warnings");
     }

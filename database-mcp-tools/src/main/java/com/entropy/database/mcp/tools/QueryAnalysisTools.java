@@ -21,6 +21,8 @@ import com.entropy.database.mcp.dialect.DatabaseDialect;
 import com.entropy.database.mcp.dialect.PlanOperation;
 import com.entropy.database.mcp.facade.DatabaseAdminOperations;
 import com.entropy.database.mcp.facade.DatabaseReadOperations;
+import com.entropy.database.mcp.optimizer.OptimizerService;
+import com.entropy.database.mcp.optimizer.RewriteSuggestion;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
@@ -41,6 +43,8 @@ public class QueryAnalysisTools extends McpToolBase {
     /** Split by capability: this tool only reads rows and inspects the dialect, never writes. */
     private final DatabaseReadOperations readOperations;
     private final DatabaseAdminOperations adminOperations;
+    /** Only used to append rewrite suggestions to a plan on request; purely static analysis. */
+    private final OptimizerService optimizerService;
 
     // 表行数缓存，避免重复查询（10 分钟过期）
     private final Map<String, Long> rowCountCache = new java.util.concurrent.ConcurrentHashMap<>();
@@ -53,23 +57,30 @@ public class QueryAnalysisTools extends McpToolBase {
     private static final long ROW_COUNT_LOW_SCORE = 100_000L;
 
     public QueryAnalysisTools(DatabaseReadOperations readOperations,
-                              DatabaseAdminOperations adminOperations) {
+                              DatabaseAdminOperations adminOperations,
+                              OptimizerService optimizerService) {
         this.readOperations = readOperations;
         this.adminOperations = adminOperations;
+        this.optimizerService = optimizerService;
     }
 
     @McpTool(description = """
             【获取执行计划】对 SELECT 语句执行数据库原生 EXPLAIN，返回原始计划行与规则告警。只跑 EXPLAIN，不执行原查询。
             前置条件：先调用 createNamedConnection 注册数据库连接；connection 与 sql 均必填；sql 必须以 SELECT 或 WITH 开头，否则报安全校验错误。
             使用场景：assessQueryRisk 判定 risk_level=high（必须）或 medium（建议）时，先取计划再决定是否执行；核对是否发生全表扫描。
-            返回字段：connection、dialect、originalSql、explainSql（实际下发的 EXPLAIN 语句）、plan（计划行数组，每项为列名到值的键值对；SQL Server 因计划走会话输出，只返回一条 note 提示）、warnings（全表扫描、嵌套循环、哈希连接、排序、索引跳过扫描等提示）、success。
-            不要用于：非 SELECT 语句；方言不支持 EXPLAIN 时会返回 EXPLAIN_NOT_SUPPORTED 错误；需要中文逐行解读（把 plan 文本交给 interpretPlan）；需要一次拿到索引与重写建议（用 analyzeQuery）。
+            推荐顺序：assessQueryRisk 判风险 → 本工具取计划（withSuggestions=true 可顺带拿到改写建议）→ interpretPlan 中文解读；要连索引建议一起拿则直接用 analyzeQuery。
+            返回字段：connection、dialect、originalSql、explainSql（实际下发的 EXPLAIN 语句）、plan（计划行数组，每项为列名到值的键值对；SQL Server 因计划走会话输出，只返回一条 note 提示）、warnings（全表扫描、嵌套循环、哈希连接、排序、索引跳过扫描等提示）、success。withSuggestions=true 时额外返回 rewriteSuggestions（同 suggestRewrites 的结构：type、originalPattern、suggestedPattern、reason、transformedSql）。
+            注意：rewriteSuggestions 是纯文本静态分析的结果，与执行计划无关——它不看 plan，只按 SQL 写法匹配反模式。
+            不要用于：非 SELECT 语句；方言不支持 EXPLAIN 时会返回 EXPLAIN_NOT_SUPPORTED 错误；需要中文逐行解读（把 plan 文本交给 interpretPlan）；需要索引建议（用 analyzeQuery 或 recommendIndexes）。
             标签：[read, query, explain, plan, performance]
             """,
              annotations = @McpTool.McpAnnotations(readOnlyHint = true, destructiveHint = false, idempotentHint = false, openWorldHint = false))
     public Map<String, Object> explainPlan(
             @McpToolParam(description = ToolParams.CONNECTION_REQUIRED_DESCRIPTION) String connection,
-            @McpToolParam(description = "要分析的 SQL 语句，必填；必须是 SELECT 或以 WITH 开头的查询") String sql) {
+            @McpToolParam(description = "要分析的 SQL 语句，必填；必须是 SELECT 或以 WITH 开头的查询") String sql,
+            @McpToolParam(description = "是否在计划之外附带 SQL 改写建议，省略或 false 时只返回计划；"
+                    + "为 true 时额外返回 rewriteSuggestions，省掉一次 suggestRewrites 调用", required = false)
+            Boolean withSuggestions) {
         return safeExecute(() -> {
             validateRequired(connection, "connection");
             validateRequired(sql, "sql");
@@ -89,10 +100,15 @@ public class QueryAnalysisTools extends McpToolBase {
 
             List<Map<String, String>> planRows = executeExplainPlan(connection, dialect, trimmedSql);
             List<String> warnings = analyzePlan(planRows, dialect);
-            return success(context(
+            Map<String, Object> result = context(
                     "connection", connection, "dialect", dialect.getDialectName(),
                     "originalSql", trimmedSql, "explainSql", explainSql,
-                    "plan", planRows, "warnings", warnings, "success", true));
+                    "plan", planRows, "warnings", warnings, "success", true);
+            if (Boolean.TRUE.equals(withSuggestions)) {
+                List<RewriteSuggestion> suggestions = optimizerService.suggestRewrites(trimmedSql, connection);
+                result.put("rewriteSuggestions", suggestions);
+            }
+            return success(result);
         });
     }
 
