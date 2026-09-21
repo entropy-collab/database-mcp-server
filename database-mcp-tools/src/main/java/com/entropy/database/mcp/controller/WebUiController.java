@@ -17,6 +17,7 @@ package com.entropy.database.mcp.controller;
 
 import com.entropy.database.mcp.audit.AuditLogRepository;
 import com.entropy.database.mcp.monitor.McpMetricsCollector;
+import com.entropy.database.mcp.security.McpPrincipal;
 import com.entropy.database.mcp.tools.ConnectionAdminTools;
 import com.entropy.database.mcp.tools.DatabaseHealthTools;
 import com.entropy.database.mcp.tools.PoolMonitorTools;
@@ -26,6 +27,10 @@ import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -232,6 +237,86 @@ public class WebUiController {
         config.put("auditPersistence", auditLogRepository != null);
         config.put("maxLimit", MAX_LIMIT);
         return config;
+    }
+
+    /**
+     * 当前登录者是谁。顶栏的头像与个人信息框由它驱动。
+     *
+     * <p>GET /api/ui/me →
+     * {@code {authEnabled, authenticated, username, type, subjectRef, authorities: [...]}}
+     *
+     * <p><b>为什么需要一个专门的端点。</b>在这之前整个服务端没有任何地方把调用者身份回给前端：
+     * {@code /api/ui/config} 只答"要不要鉴权"，{@code /api/users} 只列<b>状态库里</b>的身份
+     * （环境变量里的管理员根本不在那张表里，拿它反查当前登录名会查不到）。所以顶栏想显示
+     * "现在是谁在操作"只能新开一个口子。
+     *
+     * <p><b>authenticated=false 有两种完全不同的来源，页面要分开说：</b>
+     * <ul>
+     *   <li>{@code authEnabled=false}：这个部署没有鉴权，压根不存在"当前登录者"。
+     *       审计流水里这些操作会记成 {@code unknown}；</li>
+     *   <li>{@code authEnabled=true} 而这里仍然 false：理论上到不了（{@code /api/**} 要求
+     *       {@code ROLE_ADMIN}，没凭证在过滤器链上就 401 了），真出现说明过滤器链配错了。</li>
+     * </ul>
+     * 两种都返回 200 而不是 401：401 会被前端的 {@code notifyUnauthorized} 当成会话超时，
+     * 在鉴权关闭的部署上把人踢到一个登录不了的登录页去。
+     *
+     * <p><b>{@code type} 与 {@code subjectRef} 经常是 {@code null}，而且"经常"包括最常见的部署。</b>
+     * 它们只在 {@code Authentication.getPrincipal()} 真的是 {@link McpPrincipal} 时才有值，
+     * 而这件事比看起来难成立：
+     * <ul>
+     *   <li><b>环境变量管理员（默认部署）拿不到</b>。{@code SecurityConfig.userDetailsService} 确实
+     *       构造了 {@code new McpPrincipal(adminUsername, "user", …)}，但它随后被交给
+     *       {@code InMemoryUserDetailsManager} —— 那个类的 {@code loadUserByUsername} 会把
+     *       {@code UserDetails} 重新包装成 Spring 自己的 {@code User}，类型字段在这一步丢掉。
+     *       所以「没配状态库、管理员口令来自环境变量」这个最常见的形态下只有 {@code username}；</li>
+     *   <li>配了状态库时走 {@code UserStoreUserDetailsService}，它直接返回 {@link McpPrincipal}，
+     *       那时三个字段都有；</li>
+     *   <li>JWT 那条链（{@code mcpSecurityFilterChain}）的 principal 也不是它。</li>
+     * </ul>
+     * 因此前端<b>必须</b>按可空处理，拿不到时只显示用户名，不要拼一个假的 {@code type:username} ——
+     * 那个字符串会被拿去和「权限视图」里的主体标识对照，而在上面第一种情况下它并不是判定用的那个值。
+     *
+     * <p>同理，这里<b>不</b>声称 {@code subjectRef} 等于审计流水 {@code principal} 列的值：
+     * {@code QueryAuditLoggerImpl.currentPrincipal()} 在拿不到 {@link McpPrincipal} 时回落到
+     * {@code ud.getUsername()}（不带 {@code user:} 前缀），两者在上面第一种情况下并不相同。
+     *
+     * <p>口令哈希不出现在返回值里——{@link McpPrincipal#password()} 刻意不取。
+     */
+    @GetMapping("/me")
+    public Map<String, Object> me() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("authEnabled", authEnabled);
+
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        Object principal = authentication == null ? null : authentication.getPrincipal();
+        boolean authenticated = authentication != null
+                && authentication.isAuthenticated()
+                && !(authentication instanceof AnonymousAuthenticationToken);
+        result.put("authenticated", authenticated);
+
+        if (!authenticated) {
+            return result;
+        }
+
+        if (principal instanceof McpPrincipal caller) {
+            result.put("username", caller.username());
+            result.put("type", caller.type());
+            result.put("subjectRef", caller.subjectRef());
+        } else {
+            result.put("username", authentication.getName());
+            result.put("type", null);
+            result.put("subjectRef", null);
+        }
+        /*
+         * authority 全名（ROLE_ADMIN）而不是 hasRole 里那个去掉前缀的写法，与 /api/users 的
+         * roles 字段同一口径：两处显示出来的字符串必须能对上，否则「身份管理」页里的
+         * ROLE_ADMIN 和顶栏里的 ADMIN 会被当成两种东西。
+         */
+        result.put("authorities", authentication.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .sorted()
+                .toList());
+        return result;
     }
 
     /**

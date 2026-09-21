@@ -163,6 +163,26 @@ class WebUiTest {
             assertThat(config.get("maxLimit")).isEqualTo(500);
         }
 
+        /**
+         * 鉴权关闭时 {@code /api/ui/me} 必须是 <b>200 + authenticated=false</b>，不是 401。
+         *
+         * <p>这条钉的是顶栏头像的降级路径。回 401 会被前端 {@code api.js} 的
+         * {@code notifyUnauthorized} 当成会话超时，把人踢到登录界面——而这个部署形态下
+         * 那个界面登录不了任何东西（压根没有鉴权），页面会卡死在一个假的登录页上。
+         *
+         * <p>{@code username} 一并断言为 null：没有登录者时报一个空串或 "anonymous"
+         * 会让头像渲染出一个看起来像真人的占位符。
+         */
+        @Test
+        void meReportsNoPrincipalWhenAuthIsDisabled() throws Exception {
+            Map<String, Object> me = json(mockMvc.perform(get("/api/ui/me"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(me.get("authEnabled")).isEqualTo(false);
+            assertThat(me.get("authenticated")).isEqualTo(false);
+            assertThat(me.get("username")).isNull();
+        }
+
         /** 降级路径：config 说没落库，history 就必须是 503，而不是空数组或 500。 */
         @Test
         void auditHistoryIsUnavailableWithoutDatasource() throws Exception {
@@ -720,9 +740,54 @@ class WebUiTest {
             assertThat(config.get("authEnabled")).isEqualTo(true);
         }
 
+        /**
+         * 鉴权打开时 {@code /api/ui/me} 报出<b>登录者是谁</b>。顶栏头像与个人信息框读的就是它。
+         *
+         * <p><b>这一组的部署形态下 {@code type} 与 {@code subjectRef} 必定是 null</b>，而且这正是
+         * 要钉住的东西。本类没配 {@code spring.datasource.url} 也没配 {@code users-file}，于是
+         * {@code SecurityConfig.userDetailsService} 走到最后一行 {@code new
+         * InMemoryUserDetailsManager(List.of(admin))}；那个类的 {@code loadUserByUsername} 会把
+         * {@code McpPrincipal} 重新包装成 Spring 自己的 {@code User}，{@code type} 在这一步丢掉，
+         * 所以 {@code /me} 只能落到它的 else 分支。
+         *
+         * <p>决定它有没有值的是<b>哪一个 UserDetailsService 在起作用</b>，不是用了表单登录还是
+         * HTTP Basic——两种机制都从同一个 service 取用户。配了状态库（{@code UserStoreUserDetailsService}）
+         * 时才会真的拿到 {@code McpPrincipal}，那条路目前没有对应的 {@code @Nested}：它要求
+         * 「鉴权打开 + 有状态库」，而现有两组各占一半。
+         *
+         * <p>断言的是<b>键存在且值为 null</b>，不是键缺失：{@code WebUiController.me} 的注释要求前端
+         * 按可空处理、拿不到时只显示用户名，而「键不存在」和「键为 null」在 JS 里同样是 undefined/null，
+         * 但契约上前者意味着后端换了形状。
+         *
+         * <p>也刻意<b>不</b>断言 {@code subjectRef} 等于审计流水 {@code principal} 列的值：
+         * {@code QueryAuditLoggerImpl.currentPrincipal()} 拿不到 {@code McpPrincipal} 时回落到
+         * {@code ud.getUsername()}（不带 {@code user:} 前缀），在这个形态下两者本就不同。
+         *
+         * <p>{@code authorities} 用 authority 全名（{@code ROLE_ADMIN}），与 {@code /api/users}
+         * 的 {@code roles} 同一口径：两处显示的字符串必须能对上，否则「身份管理」页里的
+         * ROLE_ADMIN 和顶栏里的 ADMIN 会被当成两种东西。
+         */
+        @SuppressWarnings("unchecked")
+        @Test
+        void meReportsTheLoggedInPrincipal() throws Exception {
+            Map<String, Object> me = json(mockMvc.perform(get("/api/ui/me")
+                            .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD)))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(me.get("authEnabled")).isEqualTo(true);
+            assertThat(me.get("authenticated")).isEqualTo(true);
+            assertThat(me.get("username")).isEqualTo("admin");
+            assertThat(me).containsKeys("type", "subjectRef");
+            assertThat(me.get("type")).isNull();
+            assertThat(me.get("subjectRef")).isNull();
+            assertThat((List<String>) me.get("authorities")).contains("ROLE_ADMIN");
+        }
+
         @Test
         void uiApisRequireCredentials() throws Exception {
             mockMvc.perform(get("/api/ui/config"))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
+            mockMvc.perform(get("/api/ui/me"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
             mockMvc.perform(get("/api/ui/connections"))
                     .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(401));
@@ -832,6 +897,56 @@ class WebUiTest {
                                 .as("%s 不带凭证必须是 200：登录界面在 SPA 里，它要先能加载", asset)
                                 .isEqualTo(200));
             }
+        }
+    }
+
+    // ─── 鉴权打开 + 有状态库：McpPrincipal 真的透得出来的那条路 ──────────────
+
+    /**
+     * {@code /api/ui/me} 的另一半：{@code type} 与 {@code subjectRef} <b>有值</b>的那个形态。
+     *
+     * <p>为什么要单独一个上下文：决定这两个字段有没有值的是「哪一个 {@code UserDetailsService}
+     * 在起作用」，而那取决于有没有配 {@code spring.datasource.url}——
+     * 配了走 {@code SecurityConfig.UserStoreUserDetailsService}（它对管理员直接
+     * {@code return admin}，也就是 {@code McpPrincipal} 原物），没配走
+     * {@code InMemoryUserDetailsManager}（它把 {@code McpPrincipal} 重新包装成 Spring 的
+     * {@code User}，{@code type} 在这一步丢掉）。
+     *
+     * <p>这两个条件此前被现有的两组各占一半：{@code AuthEnabled} 有鉴权没库，
+     * {@code UserAdminApi} 有库但 {@code security.enabled=false}。于是「配了状态库时
+     * subjectRef 确实是 user:admin」这条从来没有被任何用例覆盖过，而它正是个人信息框
+     * 显示「主体标识」、运维拿它去权限视图对照的依据。
+     *
+     * <p>{@code spring.application.name} 与库名都单独给一个，理由同 {@code UserAdminApi}
+     * 上那段：admin 口令是建上下文那一刻读死的，共享上下文会让两组互相串。
+     */
+    @Nested
+    @SpringBootTest(properties = {
+        "entropy.mcp.database.enabled=true",
+        "entropy.mcp.database.dialect=generic",
+        "entropy.mcp.gateway.enabled=false",
+        "entropy.mcp.security.enabled=true",
+        "spring.application.name=web-ui-auth-with-user-store-test",
+        "spring.datasource.url=jdbc:h2:mem:web_ui_user_store_test;DB_CLOSE_DELAY=-1",
+        "spring.datasource.username=sa",
+        "spring.datasource.password="
+    })
+    class AuthEnabledWithUserStore extends WithMockMvc {
+
+        @SuppressWarnings("unchecked")
+        @Test
+        void meReportsTypeAndSubjectRefWhenThePrincipalSurvives() throws Exception {
+            Map<String, Object> me = json(mockMvc.perform(get("/api/ui/me")
+                            .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD)))
+                    .andExpect(r -> assertThat(r.getResponse().getStatus()).isEqualTo(200))
+                    .andReturn());
+            assertThat(me.get("authEnabled")).isEqualTo(true);
+            assertThat(me.get("authenticated")).isEqualTo(true);
+            assertThat(me.get("username")).isEqualTo("admin");
+            // McpPrincipal.subjectRef() 是 type + ':' + username，前端与「权限视图」按这个形状对照
+            assertThat(me.get("type")).isEqualTo("user");
+            assertThat(me.get("subjectRef")).isEqualTo("user:admin");
+            assertThat((List<String>) me.get("authorities")).contains("ROLE_ADMIN");
         }
     }
 

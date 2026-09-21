@@ -237,6 +237,32 @@ export function fetchConfig() {
   return getJson('ui/config');
 }
 
+/**
+ * GET /api/ui/me → {authEnabled, authenticated, username, type, subjectRef, authorities}
+ *
+ * 顶栏头像与个人信息框的唯一数据源。三件事调用方必须知道：
+ *
+ * 1. <b>authenticated=false 是 200，不是 401。</b>鉴权关闭的部署里压根没有"当前登录者"，
+ *    后端为此刻意返回 200——回 401 会被上面的 notifyUnauthorized 当成会话超时，
+ *    把人踢到一个在这种部署下根本登录不了的登录页去；
+ * 2. <b>type 与 subjectRef 经常是 null，而且"经常"包括最常见的部署。</b>它们只在
+ *    Authentication 的 principal 真的是 McpPrincipal 时才有值，而「没配状态库、管理员口令
+ *    来自环境变量」这个默认形态<b>拿不到</b>——SecurityConfig 把 McpPrincipal 交给
+ *    InMemoryUserDetailsManager，后者会把它重新包装成 Spring 自己的 User，类型字段在
+ *    这一步丢掉（配了 spring.datasource.url 时走 UserStoreUserDetailsService，那时才有）。
+ *    所以显示这两个字段的地方必须能"没有就不显示"，而<b>不要</b>在前端拼一个
+ *    `${type}:${username}` 补上：那个字符串会被拿去和「权限视图」里的主体标识对照，
+ *    而在上面那种情况下它并不是判定用的那个值；
+ * 3. authorities 是 authority 全名（ROLE_ADMIN），和 /api/users 的 roles 同一口径。
+ *
+ * 它<b>不</b>和 /api/ui/config 合并：config 是匿名可读语义下的自举探针（它的 401 正是
+ * "要登录"的信号），而这个端点答的是身份。合在一起之后，"鉴权状态未知"和"不知道你是谁"
+ * 会共用一次失败，而前者要出红色横幅、后者只该让头像退化成一个占位符。
+ */
+export function fetchMe() {
+  return getJson('ui/me');
+}
+
 /** GET /api/audit/logs?limit=n → 进程内环形缓冲，重启即清空 */
 export function fetchAuditLogs(limit) {
   return getJson(`audit/logs?limit=${limit}`);

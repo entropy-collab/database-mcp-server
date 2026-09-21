@@ -21,6 +21,8 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppShell,
+  Avatar,
+  Badge,
   Banner,
   Button,
   HStack,
@@ -30,6 +32,7 @@ import {
   LayoutContent,
   LayoutHeader,
   NumberInput,
+  Popover,
   SegmentedControl,
   SegmentedControlItem,
   SideNav,
@@ -40,12 +43,13 @@ import {
   StatusDot,
   Switch,
   Text,
+  TextInput,
   Timestamp,
   TopNav,
   VStack,
   useHotkeys,
 } from '@astryxdesign/core';
-import { FALLBACK_MAX_LIMIT, fetchConfig, logout, onUnauthorized } from './api.js';
+import { FALLBACK_MAX_LIMIT, fetchConfig, fetchMe, logout, onUnauthorized } from './api.js';
 /* 刻意从 ./searchFocus.js 而不是 ./components.jsx 取：后者会把 370 KB 的显示件
    连带一大片 core 拉进入口的静态依赖图（Vite 会给它加 modulepreload），
    视图级懒加载就白做了。理由写在 searchFocus.js 的头注释里。 */
@@ -248,6 +252,39 @@ const VIEW_GROUPS = [
 const VIEWS = VIEW_GROUPS.flatMap((group) => group.views);
 
 /**
+ * 侧栏过滤：按关键字筛出仍要显示的分组与视图。
+ *
+ * ── 为什么加过滤而不是加 CommandPalette ──
+ * 文件头注释里否决 CommandPalette 的判据是「组数多到扫不完」，五组还差得远 —— 那条判断仍然成立，
+ * 这里加的<b>不是</b>它的替代品。差别在于：CommandPalette 要求先想起视图叫什么再打字（盲打），
+ * 而就地过滤是「一边缩一边看」——18 项里找一个不确定叫什么的页面，后者才有用。
+ * VS Code 的侧栏筛选、Grafana 的导航搜索都是这个形态，而不是一个浮层。
+ *
+ * ── 同时匹配 label 和 hint ──
+ * 只匹配 label 的话，输入"外键"找不到「血缘」（外键这个词在 hint 里）。而 hint 恰好是这一页
+ * 唯一说清"数据从哪来、有什么约束"的地方，让它可搜索等于让「我要找的东西在哪一页」这个问题
+ * 能用自己的词提问，而不必先知道我们给那一页起了什么名字。
+ *
+ * ── 过滤<b>只影响显示</b>，不动快捷键 ──
+ * 数字键仍然绑在 VIEWS 的全局下标上（见 HOTKEY_VIEW_COUNT），被过滤掉的项照样能按。
+ * 反过来做（过滤后重排快捷键）会让同一个键在不同过滤状态下指向不同视图——比没有快捷键糟。
+ */
+function filterGroups(keyword) {
+  const needle = keyword.trim().toLowerCase();
+  if (needle === '') {
+    return VIEW_GROUPS;
+  }
+  return VIEW_GROUPS
+    .map((group) => ({
+      ...group,
+      views: group.views.filter((v) => `${v.label} ${v.hint}`.toLowerCase().includes(needle)),
+    }))
+    /* 空组整组不渲染，而不是渲染一个只有组名的空壳：SideNavSection 的组名在没有子项时
+       会变成一行没有任何用处的标题，而"这一组里没有匹配"这件事用"组名消失了"表达就够了。 */
+    .filter((group) => group.views.length > 0);
+}
+
+/**
  * 只有前 9 项绑数字键。
  *
  * 键盘上就 1–9 能用（0 留着不用：它在"第 10 个"这个位置上没有直觉，而且 Cmd+0 在多数
@@ -433,6 +470,72 @@ function ShortcutHints({ isEnabled, onToggle }) {
 }
 
 /**
+ * 顶栏右侧的个人信息菜单。
+ *
+ * 用 Popover 而不是 DropdownMenu：菜单里要显示一段复合信息（用户名 + 类型 + 权限），
+ * DropdownMenu 的 DropdownMenuItem 是行级动作，放不下这种结构化卡片。
+ * Popover 触发器必须是 button 或 role="button"：Avatar 传了 onClick 后会渲染成
+ * <button type="button">，所以自动满足。
+ *
+ * 鉴权关闭时不渲染：没有"当前登录者"可展示，摆一个灰色头像只会让人去点，
+ * 而点开之后能看到的信息只有"鉴权关闭"——这在顶部横幅里已经用 error 级别写过了。
+ */
+function UserProfileMenu({ userInfo, onLogout }) {
+  if (!userInfo?.authenticated) {
+    return null;
+  }
+
+  const username = userInfo.username ?? '—';
+  const typeLabel = userInfo.type
+    ? ({ user: '用户', agent: 'AI Agent', service: '服务账号' })[userInfo.type] ?? userInfo.type
+    : null;
+  const authorities = userInfo.authorities ?? [];
+
+  return (
+    <Popover
+      label="个人信息"
+      placement="below"
+      alignment="end"
+      width={300}
+      content={
+        <VStack gap={4} padding={4}>
+          <VStack gap={1}>
+            <HStack gap={3} align="center">
+              <Avatar name={username} size="lg" tooltip={false} />
+              <VStack gap={0}>
+                <Text type="body" weight="semibold">{username}</Text>
+                {typeLabel && (
+                  <Text type="supporting" color="secondary">{typeLabel}</Text>
+                )}
+              </VStack>
+            </HStack>
+          </VStack>
+          {userInfo.subjectRef && (
+            <VStack gap={1}>
+              <Text type="label" color="secondary">主体标识</Text>
+              <Text type="supporting">{userInfo.subjectRef}</Text>
+            </VStack>
+          )}
+          {authorities.length > 0 && (
+            <VStack gap={1}>
+              <Text type="label" color="secondary">权限</Text>
+              <Text type="supporting">{authorities.join(', ')}</Text>
+            </VStack>
+          )}
+          <Button label="退出登录" variant="secondary" onClick={onLogout} />
+        </VStack>
+      }
+    >
+      <Button
+        label={username}
+        variant="ghost"
+        icon={<Avatar name={username} size="xsm" tooltip={false} />}
+      />
+    </Popover>
+  );
+}
+
+/**
  * 懒加载期间的占位。
  *
  * 用 core 的 Skeleton（props 以 dist/Skeleton/Skeleton.d.ts 为准：width / height /
@@ -478,6 +581,27 @@ export default function App() {
   const [updatedAt, setUpdatedAt] = useState(null);
   /* 惰性初值：读 localStorage 是同步 IO，只在挂载时需要一次。 */
   const [colorMode, setColorMode] = useState(readStoredColorMode);
+  /**
+   * 当前登录者信息。
+   *
+   * 由 /api/ui/me 在自举成功后拉取，用于顶栏右侧的头像与个人信息菜单。
+   * 与 config 分开请求：config 是匿名可读的自举探针（401 是"要登录"的信号），
+   * 而 /me 的 401 会被 notifyUnauthorized 切到登录页——合在一起之后两者的失败
+   * 语义会混在一起。
+   *
+   * 鉴权关闭时 authenticated=false，头像不渲染——那时没有"当前登录者"可展示。
+   */
+  const [userInfo, setUserInfo] = useState(null);
+  /**
+   * 侧栏过滤关键字。
+   *
+   * <b>刻意不进 hash</b>：hash 里的三个键（view / limit / row）描述的是"看的是什么"，
+   * 复制出去给同事是要复现那个现场。过滤关键字是"我正在找东西"这个中间动作，
+   * 把它写进 URL 会让分享出去的链接带着一个别人不需要的收窄状态。
+   * 同理不进 localStorage：下次打开面板时侧栏少了一半视图、而原因在一个已经忘了的输入框里，
+   * 这是个很难自己诊断的状态。
+   */
+  const [navKeyword, setNavKeyword] = useState('');
 
   // 自举：先读 config，再决定告警条与「审计历史」页要不要发请求。
   useEffect(() => {
@@ -488,6 +612,10 @@ export default function App() {
         if (!cancelled) {
           setConfig(cfg);
           setNeedsLogin(false);
+          // config 拿到之后再拉当前登录者——两者分开请求的理由见 userInfo 的注释
+          fetchMe()
+            .then((me) => { if (!cancelled) { setUserInfo(me); } })
+            .catch(() => { if (!cancelled) { setUserInfo(null); } });
         }
       })
       .catch((err) => {
@@ -509,6 +637,7 @@ export default function App() {
     setNeedsLogin(true);
     setConfigLoaded(false);
     setConfig(null);
+    setUserInfo(null);
   }), []);
 
   // state → hash。见 readHash 上方关于"为什么不打环"的说明。
@@ -622,6 +751,13 @@ export default function App() {
   const maxLimit = config?.maxLimit ?? FALLBACK_MAX_LIMIT;
   const panelProps = { limit, refreshToken };
   const current = VIEWS.find((v) => v.value === view) ?? VIEWS[0];
+  /* 过滤后的分组列表。useMemo 避免每次渲染都跑一遍 filter + map —— VIEW_GROUPS 不变时，
+     只有 navKeyword 变化才需要重算。 */
+  const visibleGroups = useMemo(() => filterGroups(navKeyword), [navKeyword]);
+  const visibleViewCount = useMemo(
+    () => visibleGroups.reduce((n, g) => n + g.views.length, 0),
+    [visibleGroups],
+  );
   /* PANELS 的键和 VIEWS 的 value 是同一套（readHash 已经挡掉了未知 view），
      取不到时兜到第一个视图，而不是渲染 undefined —— lazy 组件是 undefined 时
      React 抛的错读不出哪个视图坏了。 */
@@ -699,14 +835,15 @@ export default function App() {
               <DiagnosticBundleButton limit={limit} />
               <Button label="刷新" variant="primary" onClick={refresh} />
               {/*
-                退出登录。只在鉴权开着时才有意义——关着的时候没有会话可退，
-                摆一个点了什么都不发生的按钮比没有按钮更糟。
-                它是 POST /logout（GET 退出意味着任何一张图片的 src 都能把人踢下线），
-                CSRF token 由 api.js 带上；退完跳登录页。
+                个人信息菜单。替代了原来的「退出」按钮。
+                点击右上角头像弹出个人信息框（用户名、类型、权限）与退出按钮。
+                只在鉴权开启且已获取到用户信息时渲染——鉴权关闭时不存在"当前登录者"。
+                退出仍然是 POST /logout（理由同原来的退出按钮）。
               */}
-              {config?.authEnabled === true && (
-                <Button label="退出" variant="secondary" onClick={() => { logout(); }} />
-              )}
+              <UserProfileMenu
+                userInfo={userInfo}
+                onLogout={() => { logout(); }}
+              />
             </HStack>
           }
         />
@@ -715,25 +852,71 @@ export default function App() {
         <SideNav
           collapsible
           resizable={{ defaultWidth: 240, minWidth: 200, maxWidth: 340 }}
-          header={<SideNavHeading heading="运维视图" />}
+          header={
+            <SideNavHeading
+              heading="运维视图"
+              /* 副标题报「当前显示 / 全部」而不是只报总数：过滤生效时这两个数不等，
+                 而"少了几项"这件事必须能一眼看出来，否则会被当成视图丢了。 */
+              subheading={
+                navKeyword.trim() === ''
+                  ? `${VIEWS.length} 个视图`
+                  : `${visibleViewCount} / ${VIEWS.length} 个视图`
+              }
+            />
+          }
+          /*
+            过滤框钉在标题下方（topContent 是 sticky 的，滚动导航时它不动）。
+            这是 VS Code / Grafana 侧栏的形态：就地收窄，而不是浮层。
+            理由与"为什么不加 CommandPalette"的区别写在 filterGroups 上方。
+          */
+          topContent={
+            <TextInput
+              label="过滤视图"
+              isLabelHidden
+              placeholder="过滤视图（名称或说明）"
+              value={navKeyword}
+              onChange={setNavKeyword}
+              hasClear
+              size="sm"
+            />
+          }
         >
           {/*
             分组渲染。上一版是一个 isHeaderHidden 的单 Section 包住八项；16 项之后组名
             必须<b>显示</b>出来（isHeaderHidden 去掉了），否则分组只在代码里存在。
 
-            数字前缀只给前 9 项：给不带快捷键的项也编号会造出「第 12 项按 12」的错觉。
-            序号从 VIEWS 里的全局下标算，而不是组内下标 —— 组内下标会让四组各自从 1 开始，
-            和快捷键完全对不上。
+            ── 这一版把三件事从 label 里搬了出去 ──
+            1. 数字快捷键：原来拼进 label（`1 · 审计流水`），现在走 endContent 的 Kbd。
+               拼进 label 的问题是那个数字会被读成名字的一部分（屏幕阅读器会念"一点审计流水"），
+               而且左对齐的序号把真正的名字往右推了两格，扫一列名字时要跳过噪声。
+               放到右侧之后它自成一列，这也是 Linear / Slack / VS Code 的做法；
+            2. 分组条数：SideNavSection 的 endContent 挂一个 Badge。过滤时它就是"这一组匹配几项"；
+            3. hint：原来只在点开之后出现在正文标题带里——那太晚了，它要回答的正是
+               "我该不该点这一项"。现在用原生 title 属性挂上去（SideNavItem 把未识别的 props
+               透传到根元素），悬停即见。<b>刻意不用 core 的 Tooltip 包一层</b>：那会在
+               SideNavSection 与 SideNavItem 之间插进一个 DOM 节点，而这两者之间的
+               role="group" / 列表语义是靠直接父子关系成立的。
+
+            序号仍然从 VIEWS 的全局下标算，而不是组内下标或过滤后的下标 —— 后两者都会让
+            同一个键在不同状态下指向不同视图。
           */}
-          {VIEW_GROUPS.map((group) => (
-            <SideNavSection key={group.title} title={group.title}>
+          {visibleGroups.map((group) => (
+            <SideNavSection
+              key={group.title}
+              title={group.title}
+              endContent={<Badge variant="neutral" label={String(group.views.length)} />}
+            >
               {group.views.map((v) => {
                 const index = VIEWS.findIndex((x) => x.value === v.value);
                 const hasHotkey = index < HOTKEY_VIEW_COUNT;
                 return (
                   <SideNavItem
                     key={v.value}
-                    label={hasHotkey ? `${index + 1} · ${v.label}` : v.label}
+                    label={v.label}
+                    title={v.hint}
+                    /* 快捷键说明条说的是"只有侧栏前 9 项有数字键"，这里只给那 9 项挂键帽，
+                       两处口径必须一致：给第 10 项挂一个键帽会造出"按 10"的错觉。 */
+                    endContent={hasHotkey ? <Kbd keys={String(index + 1)} /> : undefined}
                     href={`#view=${v.value}&limit=${limit}`}
                     isSelected={v.value === view}
                     /*
@@ -747,6 +930,22 @@ export default function App() {
               })}
             </SideNavSection>
           ))}
+          {/*
+            过滤没有命中时给一句话，而不是留一片空白。
+            空白侧栏在过滤框下面看起来像"导航坏了"；写出来它才是一个可理解的状态。
+          */}
+          {visibleGroups.length === 0 && (
+            <VStack gap={2} padding={4}>
+              <Text type="supporting" color="secondary">
+                {`没有名称或说明匹配「${navKeyword.trim()}」的视图。`}
+              </Text>
+              <Button
+                label="清空过滤"
+                variant="ghost"
+                onClick={() => setNavKeyword('')}
+              />
+            </VStack>
+          )}
         </SideNav>
       }
     >
