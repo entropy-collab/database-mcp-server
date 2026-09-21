@@ -23,7 +23,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
 import org.springframework.core.env.Environment;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -36,11 +40,17 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.DelegatingAuthenticationEntryPoint;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+import org.springframework.security.web.authentication.www.BasicAuthenticationEntryPoint;
+import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -230,20 +240,108 @@ public class SecurityConfig {
      * 而日志里只有几条 403，没有任何东西指向"白名单里的文件名过期了"。
      * 这个坑一旦踩到很难反推，所以这一行必须是通配，并且不要"为了更精确"再改回文件名。
      *
-     * <p>放通配的代价是可控的：{@code /assets/**} 下只有 Vite 的构建产物，
-     * 这个目录里不会出现任何数据端点；而它的档位仍然是 {@code ROLE_ADMIN}，不是 {@code permitAll}，
-     * 所以未认证的请求拿到的依旧是 401。
+     * <p>放通配的代价是可控的：{@code /assets/**} 下只有 Vite 的构建产物，这个目录里不会出现任何数据端点。
+     *
+     * <h2>0.6.0 起这三个路径是 {@code permitAll}（破坏性变更，与上一版注释相反）</h2>
+     * <p>上一版把它们和 {@code /api/**} 放在同一档（{@code ROLE_ADMIN}），理由是避免"页面能开、
+     * 表格全 401"。改成 {@code permitAll} 是为了让登录界面成为 SPA 自己的一个视图，而不是一张
+     * 手写的自包含 HTML——登录界面必须匿名可读，而 SPA 的登录视图要加载 {@code /assets/**} 里的
+     * bundle 才能渲染。
+     *
+     * <p><b>判据变了：要保护的是"数据"而不是"代码"。</b>放通之后匿名可读的东西只有 HTML 外壳与
+     * JS/CSS，而它们里面没有任何业务数据——审计流水、慢查询原文、连接清单全部来自 {@code /api/**}，
+     * 那一档仍然是 {@code ROLE_ADMIN}。上一版担心的"页面能开、表格全 401"现在恰恰是<b>期望行为</b>：
+     * 面板发现 {@code /api/ui/config} 是 401 就渲染登录视图，而不是显示一堆空表格。
+     *
+     * <p>代价（明码标价）：JS/CSS 与 HTML 结构对任何能连上端口的人可读，等于把前端代码与
+     * 端点路径清单公开。换来的是登录界面与面板同一套设计系统、同一份构建产物，以及登录后
+     * <b>整页不刷新</b>（location.hash 里的现场不丢）。主流 SPA 项目就是这个取舍。
      */
     private static final String[] WEB_UI_RESOURCES = {"/", "/index.html", "/assets/**"};
 
+    /** 表单登录与退出的动作端点。两者都要 {@code permitAll}，否则 {@code denyAll} 会把它们收走。 */
+    private static final String LOGIN_PROCESSING_URL = "/login";
+    private static final String LOGOUT_URL = "/logout";
+
+    /** MCP 传输端点。只有 HTTP {@code /mcp}，没有 stdio，也没有 SSE 的第二个路径。 */
+    private static final String[] MCP_ENDPOINTS = {"/mcp", "/mcp/**"};
+
+    /**
+     * MCP 端点的过滤器链。<b>这条链的行为与引入登录页之前逐字相同</b>，改动时要格外小心。
+     *
+     * <p>把它单独拆出来，是"给浏览器加表单登录"这件事能不影响 MCP 客户端的<b>唯一</b>办法。
+     * 如果在同一条链上加 {@code formLogin}，会同时坏掉两件事：
+     * <ol>
+     *   <li>CSRF 一旦打开，{@code POST /mcp} 会变成 403——MCP 的每一次工具调用都是 POST；</li>
+     *   <li>{@code formLogin} 会把未认证请求的入口点换成"302 跳登录页"，于是 MCP 客户端收到的是
+     *       302 + 一段 HTML 而不是 401。{@code mcp-remote} 那边的表现是"连不上但看不出为什么"，
+     *       因为它在等一个带 {@code WWW-Authenticate} 的 401。</li>
+     * </ol>
+     *
+     * <p>{@code @Order(1)}：它必须排在 UI 链之前，否则 {@code /mcp} 会被 UI 链的
+     * {@code securityMatcher}（其余全部路径）先吃掉。
+     */
     @Bean
-    public SecurityFilterChain securityFilterChain(
+    @Order(1)
+    public SecurityFilterChain mcpSecurityFilterChain(
             HttpSecurity http,
             ObjectProvider<JwtAuthenticationConverter> jwtAuthenticationConverter) throws Exception {
         http
+            .securityMatcher(MCP_ENDPOINTS)
             .csrf(csrf -> csrf.disable())
             .sessionManagement(session -> session
                 .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> {
+                if (securityEnabled) {
+                    auth.anyRequest().authenticated();
+                } else {
+                    auth.anyRequest().permitAll();
+                }
+            });
+
+        if (securityEnabled) {
+            http.httpBasic(basic -> basic.realmName("database-mcp-server"));
+            configureJwtIfAvailable(http, jwtAuthenticationConverter);
+        }
+        return http.build();
+    }
+
+    /**
+     * 浏览器面板与运维 API 的过滤器链：表单登录 + 会话 cookie，同时<b>保留</b> HTTP Basic。
+     *
+     * <h2>为什么 Basic 不能删</h2>
+     * <p>{@code /api/**} 不只被浏览器调：运维脚本、{@code curl -u}、以及本仓库的全部 MockMvc 用例都用
+     * Basic。删掉它等于让"加一个工具开关"这种事只能开浏览器做。两种机制并存的代价是要显式决定
+     * 未认证请求收到什么，见下面的入口点。
+     *
+     * <h2>入口点按 Accept 分流（这是浏览器能看到登录页的关键）</h2>
+     * <ul>
+     *   <li>{@code Accept: text/html}（浏览器地址栏导航）→ 302 跳 {@value #LOGIN_PAGE}；</li>
+     *   <li>其余（{@code fetch} 带的 {@code application/json}、{@code curl} 的 {@code *&#47;*}、
+     *       MockMvc 不带 Accept）→ {@code BasicAuthenticationEntryPoint} 的 401。</li>
+     * </ul>
+     * 分流而不是一律 302：SPA 的 {@code fetch} 拿到 302 会跟着去取登录页的 HTML，然后在
+     * {@code JSON.parse} 上炸掉，报错信息指向一个不存在的解析问题。而 401 是前端已经在处理的东西
+     * （{@code api.js} 收到 401 会自己跳登录页并把当前 hash 带上）。
+     *
+     * <h2>CSRF：打开，但带一条例外</h2>
+     * <p>有了 cookie 会话就有了 CSRF 面（浏览器会自动带上 cookie），所以这条链上 CSRF 必须开——
+     * 这与原先"全局 csrf.disable()"相反，而原先那样是对的：Basic 凭据不会被浏览器自动附加。
+     * 例外是<b>带 {@code Authorization} 头的请求</b>：那种请求的凭据是调用方显式放上去的，
+     * 不存在"受害者浏览器替攻击者发请求"这条路径，而要求脚本先去取一个 CSRF token 只会把
+     * {@code curl -u ... -X PUT} 这件事变成三步。
+     * <p><b>这条链刻意不带 {@code @Order}。</b>它没有 {@code securityMatcher}，所以匹配"任何请求"，
+     * 而 Spring Security 要求这种链<b>排在最后</b>（否则抛 {@code UnreachableFilterChainException}）。
+     * 不加注解等于取 {@code LOWEST_PRECEDENCE}，自然落在最后；加一个 {@code @Order(2)} 反而会把它
+     * 排到测试里那条同样匹配 {@code /**} 的 {@code TestSecurityConfig#testSecurityFilterChain} 之前，
+     * 结果是<b>整个测试套件的上下文起不来</b>。/mcp 那条链靠 {@code @Order(1)} 排在前面就够了。
+     */
+    @Bean
+    public SecurityFilterChain webSecurityFilterChain(
+            HttpSecurity http,
+            ObjectProvider<JwtAuthenticationConverter> jwtAuthenticationConverter,
+            QueryAuditLogger auditLogger) throws Exception {
+        http
             .authorizeHttpRequests(auth -> {
                 // 存活/就绪探针拿不到凭证，所以 health 必须匿名可达；但「可达」只该给出 UP/DOWN。
                 // 组件明细里会带上 db 组件的驱动异常（含 JDBC URL）等信息，因此明细由
@@ -251,12 +349,14 @@ public class SecurityConfig {
                 auth.requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                     .requestMatchers("/actuator/info").permitAll();
                 if (securityEnabled) {
+                    // 面板的 HTML 与构建产物匿名可读，登录动作端点也一样：登录界面是 SPA 的一个视图，
+                    // 而 SPA 要先能加载才谈得上渲染登录表单。判据与代价见 WEB_UI_RESOURCES 的注释。
+                    auth.requestMatchers(WEB_UI_RESOURCES).permitAll()
+                        .requestMatchers(LOGIN_PROCESSING_URL, LOGOUT_URL).permitAll();
                     // Audit history replays raw SQL, which can contain inlined credentials;
                     // keep it and the remaining actuator surface behind an authenticated admin.
                     auth.requestMatchers("/api/**").hasRole("ADMIN")
-                        .requestMatchers(WEB_UI_RESOURCES).hasRole("ADMIN")
                         .requestMatchers("/actuator/**").authenticated()
-                        .requestMatchers("/mcp").authenticated()
                         .anyRequest().denyAll();
                 } else {
                     // 这里仍然是 permitAll：关掉鉴权的语义就是「整个服务不设门」，把 /api/** 或 actuator
@@ -268,29 +368,127 @@ public class SecurityConfig {
                     // 这个路径才读得到」变成了「浏览器打开根路径就看得到」，无鉴权的实际暴露面因此变大。
                     // 页面顶部那条红色横幅就是为这件事准备的，它由 /api/ui/config 的 authEnabled 驱动，
                     // 也就是由本开关驱动；打开本开关是关掉这个暴露的唯一方式。
-                    auth.requestMatchers("/mcp").permitAll()
-                        .anyRequest().permitAll();
+                    auth.anyRequest().permitAll();
                 }
             });
 
-        if (securityEnabled) {
-            // Without an authentication mechanism the rules above can never be satisfied.
-            http.httpBasic(basic -> basic.realmName("database-mcp-server"));
-
-            if (jwtResourceServerConfigured(environment)) {
-                JwtAuthenticationConverter converter = jwtAuthenticationConverter.getIfAvailable();
-                http.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {
-                    if (converter != null) {
-                        jwt.jwtAuthenticationConverter(converter);
-                    }
-                }));
-                log.info("MCP HTTP authentication accepts HTTP Basic and Bearer (JWT) credentials.");
-            } else {
-                log.info("MCP HTTP authentication accepts HTTP Basic credentials "
-                    + "(no spring.security.oauth2.resourceserver.jwt.* configured, JWT disabled).");
-            }
+        if (!securityEnabled) {
+            /*
+             * 鉴权关闭时这条链回到原样：无会话、无 CSRF、无登录页。
+             *
+             * 这不是偷懒——挂一个"谁都能过"的登录表单比没有登录页更糟：它会让人以为服务有门。
+             * 前端那边同理，永远收不到 401，所以也永远不会跳到登录页去。
+             */
+            return http
+                .csrf(csrf -> csrf.disable())
+                .sessionManagement(session -> session
+                    .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .build();
         }
+
+        var basicEntryPoint = new BasicAuthenticationEntryPoint();
+        basicEntryPoint.setRealmName("database-mcp-server");
+        basicEntryPoint.afterPropertiesSet();
+
+        /*
+         * 未认证时的响应：一律 401，<b>不做 302</b>。
+         *
+         * 页面（/、/index.html、/assets/**）现在是 permitAll，所以"跳去哪儿"这件事不存在了——
+         * 浏览器拿到的就是面板本身，面板发现 /api/ui/config 是 401 就自己渲染登录视图。
+         *
+         * 分两档的原因只有一个：<b>WWW-Authenticate 头</b>。
+         * - fetch（Accept: application/json）→ 纯 401，不带那个头。带上它会让某些浏览器在
+         *   XHR/fetch 的 401 上弹出原生 Basic 对话框，而那个框和我们的登录表单会同时出现；
+         * - 其余（curl 默认的通配 Accept、MockMvc 不带 Accept）→ BasicAuthenticationEntryPoint，
+         *   带 realm 的标准 401，`curl -u` 的体验与既有用例都靠它。
+         * ignoredMediaTypes(ALL) 是第一档成立的前提：不带 Accept 的请求会被解析成通配的
+         * MediaType.ALL，不忽略它就会连 curl 一起吃进来。
+         */
+        var jsonRequest = new MediaTypeRequestMatcher(MediaType.APPLICATION_JSON);
+        jsonRequest.setIgnoredMediaTypes(Set.of(MediaType.ALL));
+
+        var unauthorizedEntryPoint = new DelegatingAuthenticationEntryPoint(
+            new LinkedHashMap<>(Map.of(jsonRequest, new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))));
+        unauthorizedEntryPoint.setDefaultEntryPoint(basicEntryPoint);
+
+        http
+            /*
+             * CSRF：用 Spring Security 7 的 spa() 预设，不再手写。
+             *
+             * 它一次做完三件原先要自己拼的事：CookieCsrfTokenRepository.withHttpOnlyFalse()、
+             * SpaCsrfTokenRequestHandler（请求头里来的原始 token 照常识别，渲染进响应体的那份仍然
+             * 带 BREACH 防护的 Xor 编码）、以及把延迟加载的 token 落成 cookie。
+             *
+             * 手写版曾经用 CsrfTokenRequestAttributeHandler + 一个自己的 OncePerRequestFilter，
+             * 那是 Security 6 时代的配方，代价是<b>显式放弃了 BREACH 防护</b>。换成 spa() 是净删代码。
+             *
+             * 例外仍然保留：带 Authorization 头的请求不校验 CSRF。CSRF 防的是浏览器自动附加的凭据，
+             * 而 Basic / Bearer 是调用方显式放上去的；否则 curl -u ... -X PUT 要先去取一个 token。
+             */
+            .csrf(csrf -> csrf
+                .spa()
+                .ignoringRequestMatchers(request -> request.getHeader(HttpHeaders.AUTHORIZATION) != null))
+            .formLogin(form -> form
+                /*
+                 * 登录界面是 SPA 自己的一个视图（见前端 LoginView），所以这里把 loginPage 指到 "/"：
+                 * 它的唯一作用是关掉 Spring 自动生成的那张登录页，避免 GET /login 冒出一张
+                 * 与面板毫无关系的默认表单。真正的未认证响应由下面的 exceptionHandling 决定。
+                 */
+                .loginPage("/")
+                .loginProcessingUrl(LOGIN_PROCESSING_URL)
+                /*
+                 * 成功/失败都只给状态码，不做 302。
+                 *
+                 * 登录表单在 SPA 里用 fetch 提交：204 之后它重新拉一次 /api/ui/config 就切到面板，
+                 * <b>整页不刷新</b>，所以 location.hash 里的现场（view / limit / 选中行）天然保住了——
+                 * 这也是把登录做进 SPA 之后，redirect 参数那套东西可以整体删掉的原因。
+                 */
+                .successHandler((request, response, authentication) -> {
+                    // 表单登录成功记审计。不用 AuthenticationSuccessEvent 的理由：Basic 是每请求认证，
+                    // 那个事件会每次 API 调用都发一条，审计表会被刷满（见 AuthenticationAuditListener 的注释）。
+                    String who = authentication.getName();
+                    auditLogger.log("auth:login", "LOGIN " + who, 0, 0L, true, null);
+                    response.setStatus(HttpStatus.NO_CONTENT.value());
+                })
+                .failureHandler((request, response, exception) ->
+                    response.setStatus(HttpStatus.UNAUTHORIZED.value())))
+            .logout(logout -> logout
+                .logoutUrl(LOGOUT_URL)
+                .invalidateHttpSession(true)
+                .deleteCookies("JSESSIONID")
+                .logoutSuccessHandler((request, response, authentication) -> {
+                    if (authentication != null) {
+                        auditLogger.log("auth:logout", "LOGOUT " + authentication.getName(),
+                                0, 0L, true, null);
+                    }
+                    response.setStatus(HttpStatus.NO_CONTENT.value());
+                }))
+            .httpBasic(basic -> basic.authenticationEntryPoint(basicEntryPoint))
+            .exceptionHandling(ex -> ex.authenticationEntryPoint(unauthorizedEntryPoint));
+
+        configureJwtIfAvailable(http, jwtAuthenticationConverter);
         return http.build();
+    }
+
+    /**
+     * 配了 {@code spring.security.oauth2.resourceserver.jwt.*} 才挂 JWT 校验，两条链各挂一次。
+     *
+     * <p>不能无条件挂：一个都没配时容器里没有 {@code JwtDecoder}，{@code oauth2ResourceServer}
+     * 会让上下文启动失败。
+     */
+    private void configureJwtIfAvailable(
+            HttpSecurity http,
+            ObjectProvider<JwtAuthenticationConverter> jwtAuthenticationConverter) throws Exception {
+        if (!jwtResourceServerConfigured(environment)) {
+            log.debug("JWT disabled (no spring.security.oauth2.resourceserver.jwt.* configured).");
+            return;
+        }
+        JwtAuthenticationConverter converter = jwtAuthenticationConverter.getIfAvailable();
+        http.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {
+            if (converter != null) {
+                jwt.jwtAuthenticationConverter(converter);
+            }
+        }));
     }
 
     private static boolean jwtResourceServerConfigured(Environment environment) {

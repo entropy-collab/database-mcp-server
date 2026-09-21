@@ -53,6 +53,26 @@
         </dependency>
 
         <!--
+            Servlet API，provided 作用域。
+
+            SecurityConfig 里有三处直接碰 servlet 类型，都不是可以绕开的写法：
+            1. CSRF 的例外判断是一个 RequestMatcher lambda（读 Authorization 头）；
+            2. formLogin 的成功/失败处理器与 logout 的成功处理器都是
+               (HttpServletRequest, HttpServletResponse, ...) 形态的函数式接口——它们要返回
+               204/401 而不是 302，而框架没有现成的"只给状态码"实现；
+            3. 入口点分流用的 MediaTypeRequestMatcher 也在同一族类型上。
+            spring-boot-starter-security 不带 Servlet API（容器才带），所以必须显式声明。
+
+            provided 而不是 compile：运行期由 tomcat-embed-core 提供（app 模块的 starter-web 带上来），
+            compile 作用域会让这个 API jar 跟着 infra 进下游依赖树，出现两份同名类的风险。
+        -->
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!--
             只要 micrometer-core（MeterRegistry / Counter / Timer）。具体的 registry 实现是
             部署选择，留在 app；换 Prometheus 以外的后端不需要改 infra。
         -->

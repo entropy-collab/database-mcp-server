@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.security;
 
 import jakarta.servlet.Filter;
+import jakarta.servlet.http.Cookie;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,9 +29,14 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
@@ -42,6 +48,8 @@ import java.util.Base64;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 
 /**
  * Verifies that {@code entropy.mcp.security.enabled} actually switches an authentication
@@ -97,7 +105,12 @@ class SecurityConfigTest {
         private Filter springSecurityFilterChain;
 
         @Autowired
-        private SecurityFilterChain securityFilterChain;
+        @Qualifier("mcpSecurityFilterChain")
+        private SecurityFilterChain mcpChain;
+
+        @Autowired
+        @Qualifier("webSecurityFilterChain")
+        private SecurityFilterChain webChain;
 
         private MockMvc mockMvc;
 
@@ -108,16 +121,64 @@ class SecurityConfigTest {
                 .build();
         }
 
+        /** Basic 必须在<b>两条</b>链上：/mcp 的客户端用它，运维脚本与本文件的用例也用它。 */
         @Test
         void filterChainRegistersBasicAuthenticationFilter() {
-            assertThat(securityFilterChain.getFilters())
+            assertThat(mcpChain.getFilters())
+                .as("MCP 客户端只有 Basic / Bearer 两种凭据形式，这条链上丢了 Basic 等于客户端全连不上")
                 .anyMatch(BasicAuthenticationFilter.class::isInstance);
+            assertThat(webChain.getFilters())
+                .as("表单登录不能把 Basic 顶掉：curl -u 与全部 MockMvc 用例都走它")
+                .anyMatch(BasicAuthenticationFilter.class::isInstance);
+        }
+
+        /**
+         * 表单登录只能在浏览器那条链上。
+         *
+         * <p>这是"加登录页不影响 MCP"这件事的<b>结构性</b>保证：一旦 formLogin 落到 /mcp 那条链上，
+         * 未认证的 MCP 请求会收到 302 + 登录页 HTML 而不是 401，而客户端在等一个带
+         * {@code WWW-Authenticate} 的 401，表现是"连不上但看不出为什么"。
+         */
+        @Test
+        void formLoginIsOnlyWiredOnTheBrowserChain() {
+            assertThat(webChain.getFilters())
+                .anyMatch(UsernamePasswordAuthenticationFilter.class::isInstance);
+            assertThat(mcpChain.getFilters())
+                .as("/mcp 那条链不能有表单登录：它会把 401 变成 302")
+                .noneMatch(UsernamePasswordAuthenticationFilter.class::isInstance);
+        }
+
+        /**
+         * CSRF 只在浏览器那条链上。
+         *
+         * <p>同理的另一半：MCP 的每次工具调用都是 POST，CSRF 一旦覆盖到 /mcp 就是全量 403。
+         */
+        @Test
+        void csrfIsOnlyEnforcedOnTheBrowserChain() {
+            assertThat(webChain.getFilters())
+                .as("有了会话 cookie 就必须有 CSRF：cookie 会被浏览器自动附加")
+                .anyMatch(CsrfFilter.class::isInstance);
+            assertThat(mcpChain.getFilters())
+                .as("CSRF 覆盖到 /mcp 的症状是每一次工具调用都 403")
+                .noneMatch(CsrfFilter.class::isInstance);
         }
 
         @Test
         void mcpWithoutCredentialsIsUnauthorized() throws Exception {
             mockMvc.perform(get("/mcp"))
                 .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(401));
+        }
+
+        /** MCP 的调用是 POST，且不带任何 CSRF token——它必须照样过。 */
+        @Test
+        void mcpPostWithBasicCredentialsIsNotRejectedAsCsrf() throws Exception {
+            mockMvc.perform(post("/mcp")
+                    .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{}"))
+                .andExpect(result -> assertThat(result.getResponse().getStatus())
+                    .as("403 说明 CSRF 漏到了 /mcp 上")
+                    .isNotEqualTo(403));
         }
 
         @Test
@@ -161,8 +222,151 @@ class SecurityConfigTest {
 
         @Test
         void jwtIsNotWiredWhenNoIssuerIsConfigured() {
-            assertThat(securityFilterChain.getFilters())
+            assertThat(mcpChain.getFilters())
                 .noneMatch(filter -> filter.getClass().getName().contains("BearerTokenAuthenticationFilter"));
+            assertThat(webChain.getFilters())
+                .noneMatch(filter -> filter.getClass().getName().contains("BearerTokenAuthenticationFilter"));
+        }
+
+        // ─── 登录界面与表单登录 ────────────────────────────────────────────
+
+        /**
+         * 面板的 HTML 与构建产物匿名可读：登录界面是 SPA 的一个视图，SPA 得先能加载。
+         *
+         * <p>判据与代价见 {@code SecurityConfig.WEB_UI_RESOURCES} 的注释——要保护的是"数据"
+         * （{@code /api/**}，仍然 ROLE_ADMIN）而不是"代码"。
+         */
+        @Test
+        void thePanelShellIsReachableWithoutCredentials() throws Exception {
+            mockMvc.perform(get("/index.html"))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(200));
+            mockMvc.perform(get("/").accept(MediaType.TEXT_HTML))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(200));
+        }
+
+        /**
+         * 未认证的浏览器导航<b>不再是 302</b>：页面本身放通了，所以"跳去哪儿"这件事不存在。
+         *
+         * <p>这条与上一版（302 跳 /login.html）相反，是刻意的反转：登录界面进了 SPA，
+         * 未登录状态由前端在收到 401 后自己渲染。
+         */
+        @Test
+        void unauthenticatedApiCallsAreNotRedirected() throws Exception {
+            mockMvc.perform(get("/api/ui/config").accept(MediaType.TEXT_HTML))
+                .andExpect(result -> assertThat(result.getResponse().getStatus())
+                    .as("302 说明还挂着一个跳转入口点，而登录页已经不存在了")
+                    .isEqualTo(401));
+        }
+
+        /**
+         * fetch（{@code Accept: application/json}）拿到的 401 <b>不带 WWW-Authenticate</b>。
+         *
+         * <p>带上它会让某些浏览器在 XHR/fetch 的 401 上弹出原生 Basic 对话框，那个框会和 SPA 自己的
+         * 登录表单同时出现。不带 Accept 的脚本仍然走 BasicAuthenticationEntryPoint，那一档要带头，
+         * {@code curl -u} 的体验靠它。
+         */
+        @Test
+        void jsonClientsGetPlainUnauthorizedWhileScriptsKeepTheBasicChallenge() throws Exception {
+            mockMvc.perform(get("/api/ui/config").accept(MediaType.APPLICATION_JSON))
+                .andExpect(result -> {
+                    assertThat(result.getResponse().getStatus()).isEqualTo(401);
+                    assertThat(result.getResponse().getHeader(HttpHeaders.WWW_AUTHENTICATE))
+                        .as("fetch 的 401 不能带 Basic 挑战，否则浏览器会弹原生登录框")
+                        .isNull();
+                });
+            mockMvc.perform(get("/api/ui/config"))
+                .andExpect(result -> {
+                    assertThat(result.getResponse().getStatus()).isEqualTo(401);
+                    assertThat(result.getResponse().getHeader(HttpHeaders.WWW_AUTHENTICATE))
+                        .as("curl / 脚本要靠这个头知道该带 Basic 凭据")
+                        .startsWith("Basic");
+                });
+        }
+
+        /** 没带 CSRF token 的表单登录必须 403：这条钉住"浏览器那条链上 CSRF 真的开着"。 */
+        @Test
+        void formLoginWithoutCsrfTokenIsForbidden() throws Exception {
+            mockMvc.perform(post("/login")
+                    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                    .param("username", "admin")
+                    .param("password", ADMIN_PASSWORD))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(403));
+        }
+
+        /**
+         * 完整的登录流程：取 token → POST /login → 204 → 用同一个会话读 API → 200 → 退出 → 401。
+         *
+         * <p>刻意手动走双提交（取 XSRF-TOKEN cookie、按 X-XSRF-TOKEN 回传）而不是引
+         * {@code spring-security-test} 的 {@code csrf()}：这里要验证的正是 cookie 真的被下发了
+         * （靠 SecurityConfig 里那个 CsrfCookieFilter），而 {@code csrf()} 会绕过那一步。
+         */
+        @Test
+        void formLoginCreatesASessionAndLogoutInvalidatesIt() throws Exception {
+            MvcResult page = mockMvc.perform(get("/")).andReturn();
+            Cookie csrfCookie = page.getResponse().getCookie("XSRF-TOKEN");
+            assertThat(csrfCookie)
+                .as("csrf().spa() 没生效：登录表单拿不到 token，任何 POST /login 都会 403")
+                .isNotNull();
+
+            MvcResult login = mockMvc.perform(post("/login")
+                    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                    .cookie(csrfCookie)
+                    .header("X-XSRF-TOKEN", csrfCookie.getValue())
+                    .param("username", "admin")
+                    .param("password", ADMIN_PASSWORD))
+                .andExpect(result -> assertThat(result.getResponse().getStatus())
+                    .as("成功必须是 204 而不是 302：登录表单用 fetch 提交，整页不刷新才能保住 hash 里的现场")
+                    .isEqualTo(204))
+                .andReturn();
+
+            MockHttpSession session = (MockHttpSession) login.getRequest().getSession(false);
+            assertThat(session).isNotNull();
+
+            mockMvc.perform(get("/api/ui/config").session(session))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(200));
+
+            mockMvc.perform(post("/logout")
+                    .session(session)
+                    .cookie(csrfCookie)
+                    .header("X-XSRF-TOKEN", csrfCookie.getValue()))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(204));
+
+            mockMvc.perform(get("/api/ui/config").session(session))
+                .andExpect(result -> assertThat(result.getResponse().getStatus())
+                    .as("退出之后同一个会话必须不再能读 API")
+                    .isEqualTo(401));
+        }
+
+        @Test
+        void formLoginWithWrongPasswordIsUnauthorized() throws Exception {
+            Cookie csrfCookie = mockMvc.perform(get("/"))
+                .andReturn().getResponse().getCookie("XSRF-TOKEN");
+
+            mockMvc.perform(post("/login")
+                    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                    .cookie(csrfCookie)
+                    .header("X-XSRF-TOKEN", csrfCookie.getValue())
+                    .param("username", "admin")
+                    .param("password", "wrong-password"))
+                .andExpect(result -> assertThat(result.getResponse().getStatus())
+                    .as("失败必须是 401 而不是 302：登录视图要能就地把错误显示出来")
+                    .isEqualTo(401));
+        }
+
+        /**
+         * 带 {@code Authorization} 头的写请求<b>不</b>要求 CSRF token。
+         *
+         * <p>CSRF 防的是"浏览器自动附带的凭据"，而 Basic 头是调用方显式放上去的。不留这条例外，
+         * {@code curl -u ... -X PUT} 会先要求去取一个 token，运维脚本全得改成三步。
+         * 断言 400 而不是"不是 403"：400 是那个不存在的工具名换来的，说明请求真的走到了控制器里。
+         */
+        @Test
+        void basicAuthenticatedWritesDoNotNeedACsrfToken() throws Exception {
+            mockMvc.perform(put("/api/tools/noSuchToolAtAll")
+                    .header(HttpHeaders.AUTHORIZATION, basicAuth("admin", ADMIN_PASSWORD))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"disabled\": true}"))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(400));
         }
     }
 
@@ -178,13 +382,15 @@ class SecurityConfigTest {
     class JwtResourceServerConfigured {
 
         @Autowired
-        private SecurityFilterChain securityFilterChain;
+        @Qualifier("mcpSecurityFilterChain")
+        private SecurityFilterChain mcpChain;
 
+        /** JWT 要挂在<b>两条</b>链上：MCP 客户端可能用 Bearer，浏览器那条链上它也不该缺。 */
         @Test
         void bearerTokenFilterIsWiredAlongsideBasic() {
-            assertThat(securityFilterChain.getFilters())
+            assertThat(mcpChain.getFilters())
                 .anyMatch(BasicAuthenticationFilter.class::isInstance);
-            assertThat(securityFilterChain.getFilters())
+            assertThat(mcpChain.getFilters())
                 .anyMatch(filter -> filter.getClass().getSimpleName().equals("BearerTokenAuthenticationFilter"));
         }
     }
@@ -206,7 +412,8 @@ class SecurityConfigTest {
         private Filter springSecurityFilterChain;
 
         @Autowired
-        private SecurityFilterChain securityFilterChain;
+        @Qualifier("mcpSecurityFilterChain")
+        private SecurityFilterChain mcpChain;
 
         private MockMvc mockMvc;
 
@@ -231,7 +438,7 @@ class SecurityConfigTest {
 
         @Test
         void basicAuthenticationFilterIsWiredByDefault() {
-            assertThat(securityFilterChain.getFilters())
+            assertThat(mcpChain.getFilters())
                 .anyMatch(BasicAuthenticationFilter.class::isInstance);
         }
 
@@ -260,7 +467,12 @@ class SecurityConfigTest {
         private Filter springSecurityFilterChain;
 
         @Autowired
-        private SecurityFilterChain securityFilterChain;
+        @Qualifier("mcpSecurityFilterChain")
+        private SecurityFilterChain mcpChain;
+
+        @Autowired
+        @Qualifier("webSecurityFilterChain")
+        private SecurityFilterChain webChain;
 
         private MockMvc mockMvc;
 
@@ -279,8 +491,29 @@ class SecurityConfigTest {
 
         @Test
         void noAuthenticationFilterIsRegistered() {
-            assertThat(securityFilterChain.getFilters())
+            assertThat(mcpChain.getFilters())
                 .noneMatch(BasicAuthenticationFilter.class::isInstance);
+            assertThat(webChain.getFilters())
+                .noneMatch(BasicAuthenticationFilter.class::isInstance);
+        }
+
+        /**
+         * 鉴权关闭时<b>没有</b>登录页也没有会话：挂一个谁都能过的登录表单比没有登录页更糟，
+         * 它会让人以为服务有门。前端同理——它永远收不到 401，所以永远不会跳过去。
+         */
+        @Test
+        void noFormLoginAndNoCsrfWhenAuthenticationIsDisabled() {
+            assertThat(webChain.getFilters())
+                .noneMatch(UsernamePasswordAuthenticationFilter.class::isInstance);
+            assertThat(webChain.getFilters())
+                .noneMatch(CsrfFilter.class::isInstance);
+        }
+
+        /** 页面导航也不跳登录页：这个部署形态下根本没有"未登录"这个状态。 */
+        @Test
+        void browserNavigationIsNotRedirected() throws Exception {
+            mockMvc.perform(get("/").accept(MediaType.TEXT_HTML))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isNotEqualTo(302));
         }
     }
 

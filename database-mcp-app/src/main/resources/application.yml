@@ -1,5 +1,22 @@
 server:
   port: 8686
+  servlet:
+    session:
+      # 运维面板的登录会话（0.6.0 起面板改成表单登录）。只影响浏览器这条过滤器链——
+      # /mcp 仍然是 STATELESS，MCP 客户端不建会话，也不受这里任何一项影响。
+      #
+      # 超时后浏览器的下一个 /api/** 请求是 401，前端据此跳回登录页并把当前 hash 带上，
+      # 登录完回到同一个现场（见 api.js 的 redirectToLogin）。
+      timeout: 30m
+      cookie:
+        http-only: true
+        # lax 而不是 strict：strict 下"从别处点链接进面板"不会带 cookie，表现成莫名其妙的未登录，
+        # 而这个面板的链接（hash 里带着现场）确实会被贴到群里。跨站 POST 已被 lax 挡住，
+        # 剩下的 CSRF 面由 SecurityConfig 打开的 CSRF token 覆盖。
+        same-site: lax
+        # secure 刻意不写死 true：内网 HTTP 部署会因此完全拿不到会话 cookie，
+        # 症状是"登录成功但立刻又跳回登录页"，而且看不出原因。
+        # 跑在 HTTPS 上的部署请显式设 server.servlet.session.cookie.secure=true。
 
 management:
   endpoints:
