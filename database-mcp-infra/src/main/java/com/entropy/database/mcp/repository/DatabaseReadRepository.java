@@ -37,6 +37,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Database read operations repository.
@@ -50,8 +51,6 @@ public class DatabaseReadRepository {
     public static final int DEFAULT_FETCH_SIZE = 100;
     public static final int DEFAULT_QUERY_TIMEOUT_SECONDS = 30;
 
-    /** 元数据缓存里存会话当前 schema 的键；缓存本身是连接维度的，所以不需要再带连接名。 */
-    private static final String CURRENT_SCHEMA_CACHE_KEY = "current_schema";
     /** 方言没有 schema 概念（SQLite）时，结果里对「搜的是哪个 schema」的诚实回答。 */
     static final String NO_SCHEMA_CONCEPT = "(dialect has no schema concept)";
     /** 当前 schema 查不出来时的占位串，明确写成「查不到」而不是编一个看起来合法的名字。 */
@@ -64,6 +63,20 @@ public class DatabaseReadRepository {
     static final int FUZZY_SHORT_NAME_MAX_DISTANCE = 2;
     /** 模糊回退的返回条数上限：结果只是「你可能想找这几张」，多了反而没法判断。 */
     static final int FUZZY_MAX_RESULTS = 20;
+
+    // ─── 元数据缓存键前缀 ─────────────────────────────────────────────────
+    // 写键与失效匹配共用这几个常量。原来是两处各写一遍字面量（读路径拼 "columns:"、
+    // 失效路径再拼一遍），一旦改名就只改一边，症状是「缓存照样命中旧结构、失效一条都没清掉」，
+    // 且不会报错。
+    /** 单表列元数据：{@code columns:<搜过的 schema>.<调用方给的表名>}。 */
+    static final String KEY_COLUMNS = "columns:";
+    /** 单表索引：{@code indexes:<入参 schema>.<调用方给的表名>}。 */
+    static final String KEY_INDEXES = "indexes:";
+    /** Schema 级清单，随建表/删表变化。 */
+    static final String KEY_TABLES = "tables:";
+    static final String KEY_TABLES_ALL = "tables_all:";
+    static final String KEY_VIEWS = "views:";
+    static final String KEY_SEQUENCES = "sequences:";
 
     private final JdbcTemplate jdbcTemplate;
     private final DatabaseDialect dialect;
@@ -108,9 +121,74 @@ public class DatabaseReadRepository {
 
     // ─── Metadata Queries (cached via metadataCache) ──────────────────────
 
+    /**
+     * 丢掉与这几张表相关的元数据缓存，外加 schema 级清单。DDL 执行成功后调用。
+     *
+     * <p>为什么住在读仓储里：键是在这里拼出来的（{@link #KEY_COLUMNS} 等），失效匹配必须跟拼键
+     * 用同一份知识。放到门面或工具层去猜键的形状，是让同一件事有两份定义。
+     *
+     * <p><b>匹配按「最后一段表名」且忽略大小写。</b>列元数据的键带的是<em>实际搜过的</em> schema
+     * （{@code columns:QDITP.T}），而 DDL 语句通常不写 schema，所以 schema 那一段无法复原、只能
+     * 跳过；表名那一段则是调用方当初传进来的原样字符串（{@code describeTable("nums")} 留下的是
+     * {@code columns:PUBLIC.nums}），而 {@code SqlTables} 给的是大写，所以必须忽略大小写比。
+     *
+     * <p><b>schema 级清单一律清掉</b>，不去分辨这条 DDL 是不是 CREATE / DROP TABLE：{@code tables:}
+     * 里含行数估算、{@code views:} / {@code sequences:} 也可能被同一批 DDL 改到，而重取它们只是
+     * 一条字典视图查询。为了省这一条查询去做语句类型判定，判错的代价是「结构已变但清单还是旧的」，
+     * 不值当。
+     *
+     * <p><b>查询结果缓存不在此列。</b>它的键是 {@code sha256(schema + "." + sql)}，无法按表匹配，
+     * 要清只能整个清掉。这里不碰它——它的 TTL 是 30 秒级，而元数据是分钟级，前者的陈旧窗口本来
+     * 就被 TTL 兜住了。需要立刻一起清的场景请显式调 {@code clearCache}。
+     *
+     * @param tables 受影响的表名，{@code SqlTables} 口径（已大写，可能带 schema 前缀）
+     * @return 被清掉的条目数
+     */
+    public int evictMetadataForTables(Set<String> tables) {
+        if (tables == null || tables.isEmpty()) {
+            return 0;
+        }
+        Set<String> bareNames = new java.util.HashSet<>();
+        for (String name : tables) {
+            String bare = bareTableName(name);
+            if (!bare.isEmpty()) {
+                bareNames.add(bare.toUpperCase(java.util.Locale.ROOT));
+            }
+        }
+        if (bareNames.isEmpty()) {
+            return 0;
+        }
+        int removed = cache.evictMetadataWhere(key -> isSchemaListingKey(key)
+                || mentionsTable(key, bareNames));
+        log.debug("Metadata evicted after DDL on tables {}: {} entries", bareNames, removed);
+        return removed;
+    }
+
+    /** Schema 级清单键——建表/删表/建视图都会让它过期。 */
+    private static boolean isSchemaListingKey(String key) {
+        return key.startsWith(KEY_TABLES)
+                || key.startsWith(KEY_TABLES_ALL)
+                || key.startsWith(KEY_VIEWS)
+                || key.startsWith(KEY_SEQUENCES);
+    }
+
+    /** 单表键（{@code columns:S.T} / {@code indexes:S.T}）的表名是否在集合里。 */
+    private static boolean mentionsTable(String key, Set<String> bareNamesUpper) {
+        if (!key.startsWith(KEY_COLUMNS) && !key.startsWith(KEY_INDEXES)) {
+            return false;
+        }
+        return bareNamesUpper.contains(bareTableName(key).toUpperCase(java.util.Locale.ROOT));
+    }
+
+    /** 最后一个点之后的部分：{@code columns:QDITP.T} → {@code T}，{@code APP.USERS} → {@code USERS}。 */
+    private static String bareTableName(String qualified) {
+        int dot = qualified.lastIndexOf('.');
+        return dot < 0 ? qualified : qualified.substring(dot + 1);
+    }
+
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listTables(String schema) {
-        String cacheKey = "tables:" + schema;
+        String cacheKey = KEY_TABLES + schema;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
             return checkType(cached, cacheKey, "List<Map<String, Object>>");
@@ -132,7 +210,7 @@ public class DatabaseReadRepository {
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> searchTables(String keyword) {
-        String cacheKey = "tables_all:" + keyword;
+        String cacheKey = KEY_TABLES_ALL + keyword;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
             return checkType(cached, cacheKey, "List<Map<String, Object>>");
@@ -308,7 +386,7 @@ public class DatabaseReadRepository {
         // 缓存键用「真实搜过的 schema」而不是入参：省略与显式传同一个 schema 是同一次查询，
         // 用入参会留下 "columns:null.T" 与 "columns:QDITP.T" 两份内容相同的条目。
         String searchedSchema = resolveSearchedSchema(schema);
-        String cacheKey = "columns:" + searchedSchema + "." + table;
+        String cacheKey = KEY_COLUMNS + searchedSchema + "." + table;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
             return checkType(cached, cacheKey, "Map<String, Object>");
@@ -375,15 +453,38 @@ public class DatabaseReadRepository {
     }
 
     /**
-     * 会话当前 schema 名，按连接缓存（{@link DatabaseCache} 本身就是连接维度的）。
+     * 会话当前 schema 名。解析成功后就一直留着，不再问第二次。
+     *
+     * <p>原来它是元数据缓存里的一条（键 {@code current_schema}），于是跟着 {@code metadata-ttl}
+     * 一起过期——默认 5 分钟。但它是<b>连接级常量</b>：{@code SELECT USER FROM DUAL} /
+     * {@code current_schema()} 在一条连接的整个生命周期里不会变，连接没了这个字段也跟着没了。
+     * 放在缓存里的代价是每 5 分钟白跑一次查询，而且会被 {@code clearCache} 与 DDL 后的粗粒度
+     * 失效连带清掉——清掉一个不可能变的值，重取它只是浪费。
+     *
+     * <p>{@code volatile} 而不是加锁：两个线程同时解析最坏情况是多跑一次只读查询、然后写入同一个值，
+     * 没有正确性问题，不值得为此在读路径上放一把锁。
+     *
+     * <p>{@code null} 表示「还没解析成功过」。失败<b>不</b>记进来，见 {@link #currentSchema()}。
+     */
+    private volatile String resolvedCurrentSchema;
+
+    /**
+     * 会话当前 schema 名，连接内只解析一次。
      *
      * <p>取不到时返回占位串而不是抛错：这个值只用于把结果标注得可读，不该让一次
      * describeTable 因为标注失败而失败。
+     *
+     * <p><b>失败不记忆化。</b>{@link #UNKNOWN_SCHEMA} 可能来自一次瞬时故障（连接刚断、
+     * 权限正在调整），把它固化下来会让这条连接之后所有结果都永久标错 schema，而且没有任何
+     * 手段纠正——连 {@code clearCache} 都清不掉它了。所以失败时下次仍然重试。
+     *
+     * <p>{@link #NO_SCHEMA_CONCEPT} 也不记忆化，但理由相反：它是方言的静态事实
+     * （SQLite 没有 schema 概念），一次 {@code null} 判断就能得出，没有必要占一个字段。
      */
     private String currentSchema() {
-        Object cached = cache.getMetadata(CURRENT_SCHEMA_CACHE_KEY);
-        if (cached instanceof String name) {
-            return name;
+        String memoised = resolvedCurrentSchema;
+        if (memoised != null) {
+            return memoised;
         }
         String sql = dialect.currentSchemaQuery();
         if (sql == null) {
@@ -393,7 +494,7 @@ public class DatabaseReadRepository {
         try {
             String name = jdbcTemplate.queryForObject(sql, String.class);
             String resolved = (name == null || name.isBlank()) ? UNKNOWN_SCHEMA : name;
-            cache.putMetadata(CURRENT_SCHEMA_CACHE_KEY, resolved);
+            resolvedCurrentSchema = resolved;
             return resolved;
         } catch (org.springframework.dao.DataAccessException e) {
             log.warn("Could not resolve the current schema of this {} connection with [{}]; "
@@ -405,7 +506,7 @@ public class DatabaseReadRepository {
 
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listIndexes(String table, String schema) {
-        String cacheKey = "indexes:" + schema + "." + table;
+        String cacheKey = KEY_INDEXES + schema + "." + table;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
             return checkType(cached, cacheKey, "List<Map<String, Object>>");
@@ -419,7 +520,7 @@ public class DatabaseReadRepository {
 
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listViews(String schema) {
-        String cacheKey = "views:" + schema;
+        String cacheKey = KEY_VIEWS + schema;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
             return checkType(cached, cacheKey, "List<Map<String, Object>>");
@@ -432,7 +533,7 @@ public class DatabaseReadRepository {
 
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listSequences(String schema) {
-        String cacheKey = "sequences:" + schema;
+        String cacheKey = KEY_SEQUENCES + schema;
         Object cached = cache.getMetadata(cacheKey);
         if (cached != null) {
             return checkType(cached, cacheKey, "List<Map<String, Object>>");

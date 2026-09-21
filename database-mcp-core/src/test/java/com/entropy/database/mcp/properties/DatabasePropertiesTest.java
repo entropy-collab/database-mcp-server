@@ -38,7 +38,7 @@ class DatabasePropertiesTest {
             new DatabaseProperties.DdlProperties(false),
             new DatabaseProperties.SecurityProperties(10, 5, java.util.List.of()),
             new DatabaseProperties.EtlProperties(4),
-            new DatabaseProperties.CacheProperties(1000, 30, 5, 10),
+            new DatabaseProperties.CacheProperties(1000, 30, 5, false, null, 30),
             new DatabaseProperties.ConnectionPoolProperties(30000, 600000, 1800000),
             new DatabaseProperties.PreparedStatementProperties(250, 2048),
             new DatabaseProperties.MetricsProperties(5000),
@@ -63,7 +63,7 @@ class DatabasePropertiesTest {
             new DatabaseProperties.DdlProperties(false),
             new DatabaseProperties.SecurityProperties(10, 5, java.util.List.of()),
             new DatabaseProperties.EtlProperties(4),
-            new DatabaseProperties.CacheProperties(1000, 30, 5, 10),
+            new DatabaseProperties.CacheProperties(1000, 30, 5, false, null, 30),
             new DatabaseProperties.ConnectionPoolProperties(30000, 600000, 1800000),
             new DatabaseProperties.PreparedStatementProperties(250, 2048),
             new DatabaseProperties.MetricsProperties(5000),
@@ -104,12 +104,12 @@ class DatabasePropertiesTest {
 
     @Test
     void cachePropertiesClampToDefaults() {
-        var properties = new DatabaseProperties.CacheProperties(0, 0, 0, 0);
+        var properties = new DatabaseProperties.CacheProperties(0, 0, 0, false, null, 0);
 
         Assertions.assertThat(properties.maxSize()).isEqualTo(1000);
         Assertions.assertThat(properties.queryCacheTtlSeconds()).isEqualTo(30);
         Assertions.assertThat(properties.metadataCacheTtlMinutes()).isEqualTo(5);
-        Assertions.assertThat(properties.warmCacheTtlMinutes()).isEqualTo(10);
+        Assertions.assertThat(properties.metadataDiskFlushIntervalSeconds()).isEqualTo(30);
     }
 
     @Test

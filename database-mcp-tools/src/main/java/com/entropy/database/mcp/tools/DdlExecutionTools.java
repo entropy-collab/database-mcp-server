@@ -20,6 +20,7 @@ import com.entropy.database.mcp.exception.McpToolException;
 import com.entropy.database.mcp.facade.DatabaseOperations;
 import com.entropy.database.mcp.properties.DatabaseProperties;
 import com.entropy.database.mcp.security.QueryAuditLogger;
+import com.entropy.database.mcp.security.SqlTables;
 import com.entropy.database.mcp.security.SqlValidator;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static com.entropy.database.mcp.util.ValidationUtils.requireNotEmpty;
 
@@ -91,6 +93,51 @@ public class DdlExecutionTools extends McpToolBase {
         }
     }
 
+    /**
+     * DDL 成功之后丢掉与被改对象相关的元数据缓存。
+     *
+     * <p>不这么做的话，{@code ALTER TABLE T ADD COLUMN} 之后 {@code describeTable("T")} 会继续返回
+     * 改之前的列，直到 {@code metadata-ttl}（默认 5 分钟）过期——而这五分钟里它是一个「成功」的
+     * 结果，看不出是旧的。原来这条路上一处缓存失效都没有：整个服务只在 {@code clearCache} 工具和
+     * 连接被驱逐时清缓存。
+     *
+     * <p>挂在工具层而不是门面层，是因为只有这里知道「刚跑的是 DDL」。门面侧的
+     * {@code executeUpdate} 同时承载 DML，在那里清缓存会让每次 INSERT 也把元数据清一遍；
+     * {@code inTransaction} 更是通用入口。
+     *
+     * <p>取不到对象名时（{@code SqlTables} 返回空——方言特有语法解析不了、或 CREATE SCHEMA 这类
+     * 本来就没有表名的语句）传空集合下去，门面会退回整连接清空。粗一点只是多几次字典查询，
+     * 漏掉才是错。
+     *
+     * <p>整段包了异常兜底：DDL 已经执行成功了，清缓存失败不能把它变成一次失败的调用。
+     */
+    private void evictMetadataAfterDdl(String connection, List<String> appliedStatements) {
+        if (appliedStatements == null || appliedStatements.isEmpty()) {
+            return;
+        }
+        try {
+            Set<String> affected = new java.util.LinkedHashSet<>();
+            boolean unknown = false;
+            for (String ddl : appliedStatements) {
+                Set<String> names = SqlTables.ofOrEmpty(ddl);
+                if (names.isEmpty()) {
+                    unknown = true;
+                } else {
+                    affected.addAll(names);
+                }
+            }
+            // 只要有一条语句的对象名取不到，整批都按「不知道改了什么」处理：这批里其他语句的
+            // 表名是对的，但那条取不到的可能碰了别的表，按它给的子集清就是漏清。
+            int evicted = routingFacade.evictMetadataForTables(
+                    unknown ? Set.of() : affected, connection);
+            log.debug("Metadata cache evicted after DDL on connection {}: tables={}, entries={}",
+                    connection, unknown ? "<unknown>" : affected, evicted);
+        } catch (RuntimeException e) {
+            log.warn("Failed to evict metadata cache after DDL on connection {}; "
+                    + "stale schema metadata may be served until the TTL expires", connection, e);
+        }
+    }
+
     // ─── DDL ────────────────────────────────────────────────────────────────
 
     @McpTool(description = """
@@ -107,7 +154,9 @@ public class DdlExecutionTools extends McpToolBase {
             @McpToolParam(description = "要执行的单条 DDL 语句（如 CREATE TABLE / ALTER TABLE / DROP INDEX）") String sql,
             @McpToolParam(description = ToolParams.CONNECTION_DESCRIPTION, required = false) String connection) {
         requireDdlAllowed("executeDdl");
-        return routingFacade.executeDdl(sql, connection);
+        Map<String, Object> result = routingFacade.executeDdl(sql, connection);
+        evictMetadataAfterDdl(connection, List.of(sql));
+        return result;
     }
 
     @McpTool(description = """
@@ -171,6 +220,7 @@ public class DdlExecutionTools extends McpToolBase {
             long startTime = System.currentTimeMillis();
             int affected = routingFacade.executeUpdate(ddl, connection);
             long duration = System.currentTimeMillis() - startTime;
+            evictMetadataAfterDdl(connection, List.of(ddl));
             return success(Map.of(
                     "connectionName", connection,
                     "ddl", ddl,
@@ -200,6 +250,9 @@ public class DdlExecutionTools extends McpToolBase {
         requireDdlAllowed("executeDdlBatch");
         requireNotEmpty(statements, "statements");
         return safeExecute(() -> {
+            // 在事务外声明，好让提交之后的失效能读到「哪几条真的生效了」：回滚分支里它已被清空，
+            // 非事务型库上它是那些已经永久生效、必须清缓存的语句。
+            List<String> applied = new ArrayList<>();
             try {
                 return routingFacade.inTransaction(connection, tx -> {
                     // Whether wrapping DDL in a transaction means anything on this target. Oracle and
@@ -210,7 +263,6 @@ public class DdlExecutionTools extends McpToolBase {
 
                     long startTime = System.currentTimeMillis();
                     List<Map<String, Object>> results = new ArrayList<>();
-                    List<String> applied = new ArrayList<>();
                     boolean allSuccess = true;
 
                     for (String ddl : statements) {
@@ -249,6 +301,9 @@ public class DdlExecutionTools extends McpToolBase {
                 });
             } catch (DdlBatchRolledBack e) {
                 return success(e.payload());
+            } finally {
+                // 提交（或回滚）之后才清：回滚分支里 applied 是空的，什么都不清正是对的——结构没变。
+                evictMetadataAfterDdl(connection, applied);
             }
         });
     }

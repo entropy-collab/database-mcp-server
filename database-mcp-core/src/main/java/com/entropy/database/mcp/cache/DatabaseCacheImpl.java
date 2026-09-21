@@ -206,6 +206,28 @@ public class DatabaseCacheImpl implements DatabaseCache {
         }
     }
 
+    @Override
+    public int evictMetadataWhere(java.util.function.Predicate<String> keyFilter) {
+        if (metadataCache == null || keyFilter == null) {
+            return 0;
+        }
+        // Collect first, then invalidate in one call: invalidating while iterating the asMap() view
+        // is legal for a ConcurrentMap but makes the returned count depend on iteration order.
+        var doomed = metadataCache.asMap().keySet().stream()
+                .filter(fullKey -> fullKey.startsWith(METADATA_PREFIX))
+                .filter(fullKey -> keyFilter.test(fullKey.substring(METADATA_PREFIX.length())))
+                .toList();
+        if (doomed.isEmpty()) {
+            return 0;
+        }
+        metadataCache.invalidateAll(doomed);
+        if (diskStore != null) {
+            diskStore.markDirty();
+        }
+        log.debug("Metadata cache entries evicted by filter: {}", doomed.size());
+        return doomed.size();
+    }
+
     // ─── Bulk Operations ──────────────────────────────────────────────────
 
     @Override

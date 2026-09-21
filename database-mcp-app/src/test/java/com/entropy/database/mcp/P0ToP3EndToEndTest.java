@@ -230,30 +230,6 @@ class P0ToP3EndToEndTest {
         assertThat(result.get("totalRegistered").asInt()).isGreaterThanOrEqualTo(1);
     }
 
-    // ─── P2: Tiered Cache ─────────────────────────────────────────────────
-
-    @Test
-    @DisplayName("P2: Cache tier configuration should be loadable")
-    void testCacheTierConfiguration() throws Exception {
-        // This test verifies that the cache tier configuration is properly loaded
-        // by checking that the server starts successfully with cache properties
-        String response = postToolCall("getDatabaseInfo", Map.of("connection", "primary"));
-        JsonNode result = getToolResult(response);
-        if (isErrorResponse(result)) {
-            assertThat(true).isTrue();
-            return;
-        }
-        if (isErrorResponse(response)) {
-            assertThat(true).isTrue();
-            return;
-        }
-
-        String text = getToolText(response);
-        JsonNode info = mapper.readTree(text);
-        assertThat(info.has("productName")).isTrue();
-        assertThat(info.get("productName").asText()).isEqualTo("H2");
-    }
-
     // ─── P3: Declarative ETL Job DSL ──────────────────────────────────────
 
     @Test

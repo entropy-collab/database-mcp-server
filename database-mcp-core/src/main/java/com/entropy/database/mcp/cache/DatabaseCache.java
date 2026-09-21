@@ -16,32 +16,19 @@
 package com.entropy.database.mcp.cache;
 
 /**
- * Multi-tier database cache interface.
- * Provides hot/warm/cold cache layers with refresh-ahead support.
+ * Two-cache database cache: query results and schema metadata, each with its own size budget
+ * and TTL.
+ *
+ * <p>This used to be declared as a "multi-tier cache with hot/warm/cold layers and refresh-ahead
+ * support" and carried a {@code CacheTier} enum with {@code HOT}/{@code WARM}/{@code COLD}
+ * constants. None of that existed: the three tiers were no-op branches in the implementation, the
+ * tier-taking {@code get}/{@code put}/{@code evict} overloads had no callers anywhere (every caller
+ * uses {@code getQuery}/{@code getMetadata} directly), and the {@code warm-cache-ttl} property that
+ * appeared to configure them was never read. The names have been removed rather than implemented,
+ * because nothing in this server needs a third tier — access-based expiry already keeps hot entries
+ * alive and lets cold ones fall out.
  */
 public interface DatabaseCache {
-
-    /**
-     * Cache tier enumeration.
-     */
-    enum CacheTier {
-        HOT, WARM, COLD, QUERY, METADATA
-    }
-
-    /**
-     * Get a value from the cache.
-     */
-    Object get(String key, CacheTier tier);
-
-    /**
-     * Put a value into the cache.
-     */
-    void put(String key, Object value, CacheTier tier);
-
-    /**
-     * Evict a value from the cache.
-     */
-    void evict(String key, CacheTier tier);
 
     /**
      * Get a value from the query cache.
@@ -92,6 +79,22 @@ public interface DatabaseCache {
      * Evict a value from the metadata cache.
      */
     void evictMetadata(String key);
+
+    /**
+     * Evict every metadata entry whose key satisfies {@code keyFilter}; returns how many were
+     * removed.
+     *
+     * <p>Needed because the caller that knows a schema change happened does not know which cache
+     * keys it invalidated. A table's column metadata is keyed by the <em>resolved</em> schema
+     * ({@code columns:QDITP.T}), and a DDL statement rarely names a schema, so the exact key cannot
+     * be reconstructed — only recognised. Expressed as a predicate rather than a prefix because the
+     * discriminating part of these keys is the table name at the end, not the category at the front.
+     *
+     * <p>The filter sees the caller's own key space: a connection-scoped cache does not leak its
+     * scope prefix into the predicate, same as {@link #getMetadata(String, java.util.function.Function)}
+     * does not leak it into the loader.
+     */
+    int evictMetadataWhere(java.util.function.Predicate<String> keyFilter);
 
     /**
      * Clear all caches.

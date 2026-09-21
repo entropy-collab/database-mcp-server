@@ -43,11 +43,6 @@ public final class DatabaseConstants {
      */
     public static final Duration DEFAULT_METADATA_CACHE_TTL = Duration.ofMinutes(5);
 
-    /**
-     * Default warm cache TTL.
-     */
-    public static final Duration DEFAULT_WARM_CACHE_TTL = Duration.ofMinutes(10);
-
     // ─── Connection Pool ──────────────────────────────────────────────────
 
     /**

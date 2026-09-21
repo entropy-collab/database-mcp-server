@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Facade over a single BYOK datasource context.
@@ -386,6 +387,19 @@ class ByokDatabaseFacade implements DatabaseMetadataOperations, DatabaseReadOper
     @Override
     public void clearCache(String connection) {
         context.getCache().invalidateAll();
+    }
+
+    /**
+     * 键的形状只有读仓储知道，所以匹配也归它做——这里只负责把调用转给本连接的那一份。
+     * 表名取不到时（{@code tables} 为空）退回整连接清空：粗一点是浪费，漏掉是错。
+     */
+    @Override
+    public int evictMetadataForTables(Set<String> tables, String connection) {
+        if (tables == null || tables.isEmpty()) {
+            clearCache(connection);
+            return -1;
+        }
+        return context.getReadRepository().evictMetadataForTables(tables);
     }
 
     // ─── Statistics ────────────────────────────────────────────────────────

@@ -583,8 +583,147 @@ class DatabaseReadRepositoryTest {
         }
     }
 
-    // ─── Test doubles ─────────────────────────────────────────────────────
-    /** Masking disabled: returns the very same list, which is the repository's "unmasked" path. */
+    // ─── evictMetadataForTables ───────────────────────────────────────────
+
+    /**
+     * DDL 之后的元数据失效。在这之前这条路上一处失效都没有：{@code ALTER TABLE} 之后
+     * {@code describeTable} 会继续返回旧结构直到 TTL 过期，而那是一个「成功」的结果，
+     * 看不出是旧的。
+     */
+    @Nested
+    @DisplayName("evictMetadataForTables")
+    class EvictMetadataForTables {
+
+        private DatabaseReadRepository warmed() {
+            DatabaseReadRepository repo = repository(100, 10000);
+            repo.describeTable("NUMS", "PUBLIC");   // columns:PUBLIC.NUMS
+            repo.describeTable("NUMS", null);       // 省略 schema 的那条路（会话当前 schema）
+            repo.listIndexes("NUMS", "PUBLIC");     // indexes:PUBLIC.NUMS
+            repo.listTables("PUBLIC");              // tables:PUBLIC
+            repo.searchTables("NUM");               // tables_all:NUM
+            repo.listSchemas();                     // schemas
+            // 视图与序列清单直接塞进缓存，不走 listViews / listSequences：H2 的
+            // information_schema.sequences 在这个版本里没有 cache_size 列，方言那条 SQL 跑不通。
+            // 本组用例要验的是失效匹配的形状，不是方言能不能列序列。
+            cache.putMetadata("views:PUBLIC", List.of());
+            cache.putMetadata("sequences:PUBLIC", List.of());
+            return repo;
+        }
+
+        @Test
+        @DisplayName("清掉被改表的列与索引")
+        void evictsColumnsAndIndexesOfTheNamedTable() {
+            DatabaseReadRepository repo = warmed();
+            assertThat(cache.metadataKeys())
+                .contains("columns:PUBLIC.NUMS", "indexes:PUBLIC.NUMS");
+
+            repo.evictMetadataForTables(Set.of("NUMS"));
+
+            assertThat(cache.metadataKeys())
+                .doesNotContain("columns:PUBLIC.NUMS", "indexes:PUBLIC.NUMS");
+        }
+
+        @Test
+        @DisplayName("不碰其他表的列元数据")
+        void leavesOtherTablesAlone() {
+            DatabaseReadRepository repo = warmed();
+            cache.putMetadata("columns:PUBLIC.OTHER", List.of());
+
+            repo.evictMetadataForTables(Set.of("NUMS"));
+
+            assertThat(cache.metadataKeys()).contains("columns:PUBLIC.OTHER");
+        }
+
+        /**
+         * 不去分辨语句类型：{@code tables:} 里含行数估算，视图与序列也可能被同一批 DDL 改到，
+         * 重取它们只是一条字典视图查询。为省这条查询去判语句类型，判错的代价是「结构已变、清单还旧」。
+         */
+        @Test
+        @DisplayName("schema 级清单一律清掉")
+        void alwaysEvictsSchemaListings() {
+            DatabaseReadRepository repo = warmed();
+
+            repo.evictMetadataForTables(Set.of("NUMS"));
+
+            assertThat(cache.metadataKeys())
+                .noneMatch(key -> key.startsWith("tables:")
+                        || key.startsWith("tables_all:")
+                        || key.startsWith("views:")
+                        || key.startsWith("sequences:"));
+        }
+
+        /**
+         * 改一张表不会增删 schema，所以 {@code schemas} 清单留着。
+         *
+         * <p>会话当前 schema 不在这条断言里：它已经不是缓存条目，而是读仓储上的一个连接级字段
+         * （见 {@code DatabaseReadRepository.resolvedCurrentSchema}）。它本来就不可能被 DDL 改变，
+         * 放在缓存里只会被这里的失效连带清掉、然后白重取一次。
+         */
+        @Test
+        @DisplayName("schemas 清单留着")
+        void keepsSchemaLevelConstants() {
+            DatabaseReadRepository repo = warmed();
+            assertThat(cache.metadataKeys()).contains("schemas");
+
+            repo.evictMetadataForTables(Set.of("NUMS"));
+
+            assertThat(cache.metadataKeys()).contains("schemas");
+        }
+
+        /** 会话当前 schema 不再占缓存条目——它是连接级常量，不该跟着元数据一起过期或被清掉。 */
+        @Test
+        @DisplayName("会话当前 schema 不进元数据缓存")
+        void currentSchemaIsNotACacheEntry() {
+            DatabaseReadRepository repo = repository(100, 10000);
+
+            // 省略 schema 才会走到「问一下当前 schema」那条路
+            assertThat(repo.describeTable("NUMS", null).get("schema")).isEqualTo("PUBLIC");
+
+            assertThat(cache.metadataKeys()).doesNotContain("current_schema");
+        }
+
+        /**
+         * 键里的表名是调用方当初传的原样字符串，而 SqlTables 一律给大写——两边对不上就等于一条都清不掉。
+         *
+         * <p>键直接塞进缓存而不走 {@code describeTable("nums")}：H2 存的是大写表名，小写入参在 H2 上
+         * 根本查不到表、也就不会留下缓存条目。这里要验的是匹配规则本身，所以按「大小写敏感的方言会
+         * 留下什么键」直接构造。
+         */
+        @Test
+        @DisplayName("表名大小写不敏感")
+        void matchesTableNameIgnoringCase() {
+            DatabaseReadRepository repo = repository(100, 10000);
+            cache.putMetadata("columns:PUBLIC.nums", List.of());
+
+            repo.evictMetadataForTables(Set.of("NUMS"));
+
+            assertThat(cache.metadataKeys()).doesNotContain("columns:PUBLIC.nums");
+        }
+
+        /** SqlTables 保留 schema 前缀（{@code app.users} → {@code APP.USERS}），比的是最后一段。 */
+        @Test
+        @DisplayName("带 schema 前缀的表名也能匹配")
+        void matchesSchemaQualifiedNames() {
+            DatabaseReadRepository repo = warmed();
+
+            repo.evictMetadataForTables(Set.of("SOMEWHERE_ELSE.NUMS"));
+
+            assertThat(cache.metadataKeys()).doesNotContain("columns:PUBLIC.NUMS");
+        }
+
+        @Test
+        @DisplayName("表名集合为空时一条都不清——粗粒度回退由门面决定，不在这里")
+        void emptyTableSetIsANoOp() {
+            DatabaseReadRepository repo = warmed();
+            int before = cache.metadataKeys().size();
+
+            assertThat(repo.evictMetadataForTables(Set.of())).isZero();
+
+            assertThat(cache.metadataKeys()).hasSize(before);
+        }
+    }
+
+    // ─── Test doubles ─────────────────────────────────────────────────────    /** Masking disabled: returns the very same list, which is the repository's "unmasked" path. */
     private static final DataMaskingService IDENTITY_MASKING = new DataMaskingService() {
         @Override
         public List<Map<String, Object>> maskResults(List<Map<String, Object>> rows,
@@ -621,6 +760,12 @@ class DatabaseReadRepositoryTest {
 
         @Override public void putMetadata(String key, Object value) { metadata.put(key, value); }
         @Override public void evictMetadata(String key) { metadata.remove(key); }
+
+        @Override public int evictMetadataWhere(java.util.function.Predicate<String> keyFilter) {
+            var doomed = metadata.keySet().stream().filter(keyFilter).toList();
+            doomed.forEach(metadata::remove);
+            return doomed.size();
+        }
         @Override public void clear() { queries.clear(); metadata.clear(); }
         @Override public void invalidateAll() { clear(); }
         @Override public void shutdown() { }

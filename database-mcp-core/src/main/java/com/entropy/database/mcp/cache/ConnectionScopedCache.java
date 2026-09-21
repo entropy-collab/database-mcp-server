@@ -103,6 +103,18 @@ public class ConnectionScopedCache implements DatabaseCache {
         shared.evictMetadata(scoped(key));
     }
 
+    @Override
+    public int evictMetadataWhere(java.util.function.Predicate<String> keyFilter) {
+        if (keyFilter == null) {
+            return 0;
+        }
+        // Two jobs in one predicate: confine the sweep to this connection, and hand the caller its
+        // own unscoped key. Letting the scope prefix reach the caller's filter would make every
+        // filter written against logical keys (startsWith("columns:")) silently match nothing.
+        return shared.evictMetadataWhere(scopedKey ->
+                scopedKey.startsWith(scope) && keyFilter.test(scopedKey.substring(scope.length())));
+    }
+
     // ─── Bulk Operations ──────────────────────────────────────────────────
 
     @Override

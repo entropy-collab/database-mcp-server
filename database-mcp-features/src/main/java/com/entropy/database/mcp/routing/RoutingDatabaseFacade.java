@@ -465,6 +465,11 @@ public class RoutingDatabaseFacade implements DatabaseOperations {
         resolveFacade(connection).clearCache(connection);
     }
 
+    @Override
+    public int evictMetadataForTables(java.util.Set<String> tables, String connection) {
+        return resolveFacade(connection).evictMetadataForTables(tables, connection);
+    }
+
     // ─── Statistics ────────────────────────────────────────────────────────
 
     @Override

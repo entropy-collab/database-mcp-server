@@ -31,6 +31,17 @@ public interface DatabaseAdminOperations {
 
     void clearCache(String connection);
 
+    /**
+     * Evict metadata entries whose key mentions any of the given table names.
+     *
+     * <p>Called after DDL succeeds. If {@code tables} is empty (parser could not extract names),
+     * falls back to {@link #clearCache(String)}. Table names should be upper-cased by the caller,
+     * consistent with the normalisation in {@link com.entropy.database.mcp.security.SqlTables}.
+     *
+     * @return number of entries evicted
+     */
+    int evictMetadataForTables(java.util.Set<String> tables, String connection);
+
     Map<String, Object> getStatistics(String connection);
 
     /**
