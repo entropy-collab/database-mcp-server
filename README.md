@@ -3,6 +3,7 @@
 A Java-based Model Context Protocol (MCP) server for secure database query and management, built on Spring Boot 4.1 and Spring AI 2.0.
 
 <p align="center">
+  <a href="https://github.com/entropy-collab/database-mcp-server/actions/workflows/build.yml"><img src="https://github.com/entropy-collab/database-mcp-server/actions/workflows/build.yml/badge.svg?branch=main" alt="Build"></a>
   <a href="#"><img src="https://img.shields.io/badge/Java-25-brightgreen.svg" alt="Java 25"></a>
   <a href="#"><img src="https://img.shields.io/badge/Spring%20Boot-4.1.0-blue.svg" alt="Spring Boot 4.1"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-lightgrey.svg" alt="License"></a>

@@ -1,0 +1,67 @@
+# 唯一的 CI 入口：跑 `mvn clean verify`，也就是本地验证用的同一条命令。
+#
+# 刻意不拆成 build / test 两个 job：verify 里已经包含 surefire + failsafe + ArchUnit +
+# WebUiStaticAssetsPresenceTest，拆开只会让前端产物在两个 job 之间来回传。
+#
+# 不带 -Dfrontend.skip=true：跳过前端后 target/classes/static 是空的，
+# WebUiStaticAssetsPresenceTest 会失败。CI 要验的正是"完整产物能不能装出来"。
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # 允许手动触发，便于在不推提交的情况下复验。
+  workflow_dispatch:
+
+# 同一分支上新推的提交取消上一次未完成的运行；main 上不取消，避免丢掉徽章状态。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # java.version 在根 pom 里是 25，低于它编不过（record pattern / 新 API）。
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          # 带上 ~/.m2/repository 的缓存，key 由所有 pom.xml 的 hash 决定。
+          cache: 'maven'
+
+      # frontend-maven-plugin 会把 node v22.23.0 + npm 10.9.8 装进
+      # database-mcp-app/src/main/frontend/node/（刻意不在 target/ 下，见该模块 pom 的注释）。
+      # 这一层缓存省掉每次约 30MB 的 node tarball 下载；npm ci 的 tarball 走 ~/.npm。
+      - name: Cache frontend toolchain and npm packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            database-mcp-app/src/main/frontend/node
+            ~/.npm
+          key: frontend-${{ runner.os }}-${{ hashFiles('database-mcp-app/pom.xml', 'database-mcp-app/src/main/frontend/package-lock.json') }}
+          restore-keys: |
+            frontend-${{ runner.os }}-
+
+      - name: Build and verify
+        run: mvn -B -ntp clean verify
+
+      # 失败时把 surefire/failsafe 的报告捞出来——GitHub 的日志折叠视图里
+      # 单条断言失败很容易被上千行 Spring 启动日志埋掉。
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: '**/target/*-reports/'
+          retention-days: 7
