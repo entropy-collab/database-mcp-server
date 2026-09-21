@@ -72,6 +72,38 @@
     </properties>
 
     <repositories>
+        <!--
+            随仓库分发的 facet 授权内核（libs/ 下按 Maven 目录布局摆放，三个 jar 合计约 150KB）。
+
+            为什么要有这个仓库：facet 是本项目之外的另一个工程，尚未发布到任何公共仓库。
+            在此之前 database-mcp-infra 依赖的是本机 mvn install 出来的 0.1.0-SNAPSHOT——
+            结果是"只有作者那台机器能构建"：GitHub Actions 与任何 clone 者都会在
+            database-mcp-infra 上报 Could not find artifact io.github.yaotj:facet-core。
+
+            为什么版本号带 commit sha（0.1.0-c9642a1 = facet 仓库的 HEAD）：
+            这批 jar 是 snapshot 构建，不是正式的 0.1.0。写成 0.1.0 会在 facet 真正发布
+            0.1.0 时撞坐标，且两者内容不同。带 sha 的限定符排在 0.1.0 之前，将来 facet
+            发到 Central 后直接把版本改成 0.1.0 即是一次自然升级。
+
+            libs/ 下的三份 pom 是手写的、不带 <parent>：facet 上游 parent 会引入 junit /
+            testcontainers / jackson 三个 BOM，消费方不需要也不该被迫解析它们。
+
+            更新方式（facet 改动后）：
+              cd ../../facet && mvn install -DskipTests
+              然后把新 jar 拷进 libs/ 对应目录、改坐标里的 sha、同步 database-mcp-infra 的版本号。
+            这是刻意选择的取舍——二进制入库换"任何人 clone 下来就能构建"。
+        -->
+        <repository>
+            <id>vendored-libs</id>
+            <name>Vendored facet artifacts (in-tree)</name>
+            <url>file://${maven.multiModuleProjectDirectory}/libs</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
         <repository>
             <id>central</id>
             <name>Maven Central</name>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  随仓库分发的 facet-core 坐标说明（vendored，见根 pom 的 <repositories> 注释）。
+
+  这份 pom 是手写的、刻意不带 <parent>：facet 上游的 parent 引入了 junit / testcontainers /
+  jackson 三个 BOM，而消费方只需要编译期的 facet-core。带 parent 会让解析这份 pom 的人
+  额外去拉三个与自己无关的 BOM，缺一个就整体失败。
+
+  facet-core 本身零三方依赖（上游用 module-info 强制这一点），所以这里没有 <dependencies>。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.yaotj</groupId>
+  <artifactId>facet-core</artifactId>
+  <version>0.1.0-c9642a1</version>
+
+  <name>Facet Core</name>
+  <description>IR、求值器与端口。此模块不得有任何三方依赖——纯度由 module-info 强制。</description>
+</project>

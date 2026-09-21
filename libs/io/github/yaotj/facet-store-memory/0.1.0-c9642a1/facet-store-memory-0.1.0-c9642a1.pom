@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  随仓库分发的 facet-store-memory 坐标说明（vendored，见根 pom 的 <repositories> 注释）。
+
+  手写、不带 <parent>，理由同 facet-core 的 pom。上游 pom 里的 facet-testkit 与
+  junit-jupiter 都是 test scope，对消费方不传递，所以这里只保留 facet-core 一条。
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.yaotj</groupId>
+  <artifactId>facet-store-memory</artifactId>
+  <version>0.1.0-c9642a1</version>
+
+  <name>Facet Store :: Memory</name>
+  <description>内存元组存储。带正反双向索引，是端口语义的参考实现与一致性基准。</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.yaotj</groupId>
+      <artifactId>facet-core</artifactId>
+      <version>0.1.0-c9642a1</version>
+    </dependency>
+  </dependencies>
+</project>

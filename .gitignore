@@ -88,6 +88,12 @@ dependency-reduced-pom.xml
 *.rar
 BOOT-INF/
 
+# 例外：libs/ 下是随仓库分发的 facet 制品（vendored），必须进版本库——它们是
+# database-mcp-infra 能在 CI 与任何 clone 者机器上解析出依赖的唯一来源。理由与更新
+# 方式写在根 pom 的 <repositories> 注释里。三个 jar 合计约 150KB。
+# 放在 *.jar 之后才有效：gitignore 的后一条规则覆盖前一条。
+!libs/**/*.jar
+
 # Build artifacts (platform-specific Docker files)
 Dockerfile.*
 

@@ -114,23 +114,26 @@
             内存适配器。策略数据是配置驱动的，所以不需要 facet-store-pg —— 那个适配器要
             PostgreSQL 的 WITH RECURSIVE / ctid / 顾问锁，H2 上跑不起来。
 
-            NOTE 目前是本地安装的 0.1.0-SNAPSHOT（facet 尚未发布到 Central）。CI 上需要先
-            构建并 install facet，否则解析不到。
+            版本 0.1.0-c9642a1 里的 c9642a1 是 facet 仓库的 commit sha：这三个 jar 随本仓库
+            分发在 libs/ 下（vendored），因为 facet 还没发布到任何公共仓库。原先写
+            0.1.0-SNAPSHOT 依赖本机 mvn install，后果是只有作者那台机器能构建——CI 与任何
+            clone 者都会在这里报 Could not find artifact。理由与更新方式写在根 pom 的
+            <repositories> 注释里。facet 发到 Central 后把这里改成 0.1.0 并删掉 libs/ 即可。
         -->
         <dependency>
             <groupId>io.github.yaotj</groupId>
             <artifactId>facet-core</artifactId>
-            <version>0.1.0-SNAPSHOT</version>
+            <version>0.1.0-c9642a1</version>
         </dependency>
         <dependency>
             <groupId>io.github.yaotj</groupId>
             <artifactId>facet-store-memory</artifactId>
-            <version>0.1.0-SNAPSHOT</version>
+            <version>0.1.0-c9642a1</version>
         </dependency>
         <dependency>
             <groupId>io.github.yaotj</groupId>
             <artifactId>facet-dsl-rebac</artifactId>
-            <version>0.1.0-SNAPSHOT</version>
+            <version>0.1.0-c9642a1</version>
         </dependency>
 
         <!--
