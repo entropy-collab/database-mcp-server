@@ -35,6 +35,7 @@ const COLUMNS = [
   numberColumn('id', 'id', { px: 72 }),
   timeColumn('timestamp', '时间'),
   textColumn('tool', '工具', { flex: 1, weight: 'semibold', filter: 'tool' }),
+  textColumn('principal', '调用者', { flex: 1, filter: 'principal' }),
   textColumn('connectionKey', '连接', { flex: 1, filter: 'connectionKey' }),
   sqlColumn('sql', 'SQL', { flex: 3, filter: 'sql' }),
   numberColumn('rows', '行数', { px: 88 }),
@@ -46,6 +47,7 @@ const COLUMNS = [
 const SEARCH_FIELDS = [
   SEARCH_ALL_FIELD,
   { key: 'tool', type: 'string', label: '工具' },
+  { key: 'principal', type: 'string', label: '调用者' },
   { key: 'connectionKey', type: 'string', label: '连接' },
   { key: 'sql', type: 'string', label: 'SQL' },
   { key: 'error', type: 'string', label: '错误' },
@@ -69,6 +71,7 @@ const DEFAULT_SORT = [{ sortKey: 'id', direction: 'descending' }];
  */
 const GROUP_FIELDS = [
   { key: 'tool', label: '工具名' },
+  { key: 'principal', label: '调用者' },
   { key: 'connectionKey', label: '连接名' },
 ];
 

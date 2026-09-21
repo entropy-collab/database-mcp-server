@@ -130,6 +130,9 @@ public class AuditLogController {
         entry.put("error", entity.error());
         entry.put("timestamp", entity.timestamp().toString());
         entry.put("connectionKey", entity.connectionKey());
+        // principal 必须在这里显式 put：表有这一列、内存 buffer 的 entry 也有这个键，漏掉它的症状是
+        // 「库里查得到谁做的，接口上看不到」——面板与运维脚本都只经过这个 JSON。
+        entry.put("principal", entity.principal());
         return entry;
     }
 

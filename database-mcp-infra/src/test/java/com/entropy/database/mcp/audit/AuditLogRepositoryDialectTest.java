@@ -180,4 +180,18 @@ class AuditLogRepositoryDialectTest {
 
         verify(metaData).getDatabaseProductName();
     }
+
+    /**
+     * SELECT 的列清单必须带 principal。
+     *
+     * <p>漏掉它不会有任何报错：RowMapper 从结果集里读不到这一列，于是每行的 principal 都是 null，
+     * 表里有值而 {@code /api/audit/history} 上永远看不到「谁做的」。
+     */
+    @Test
+    void theHistoryQuerySelectsThePrincipalColumn() throws SQLException {
+        AuditLogRepository repository = repositoryFor("PostgreSQL");
+        repository.ensureTableExists();
+
+        assertThat(capturedQuerySql(repository)).contains("principal");
+    }
 }

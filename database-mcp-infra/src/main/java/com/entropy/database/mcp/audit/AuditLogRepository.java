@@ -441,7 +441,9 @@ public class AuditLogRepository {
             @Nullable Instant startTime,
             @Nullable Instant endTime,
             int limit) {
-        StringBuilder sql = new StringBuilder("SELECT id, tool, sql_text, row_count, duration_ms, success, error, event_time, connection_key FROM audit_log WHERE 1=1");
+        // principal 必须列在这里。漏掉它不会报错，只会让 RowMapper 读到"结果集没有这一列"，
+        // 于是每一行的 principal 都是 null——表里明明有值，接口上永远看不到。
+        StringBuilder sql = new StringBuilder("SELECT id, tool, sql_text, row_count, duration_ms, success, error, event_time, connection_key, principal FROM audit_log WHERE 1=1");
         var params = new ArrayList<>();
 
         if (tool != null && !tool.isBlank()) {
@@ -489,12 +491,11 @@ public class AuditLogRepository {
         @Override
         public AuditLogEntity mapRow(ResultSet rs, int rowNum) throws SQLException {
             // 列名跟着建表改了；record 的字段名（sql/rows/timestamp）不变，改的只有物理列
-            String principal = null;
-            try {
-                principal = rs.getString("principal");
-            } catch (SQLException ignored) {
-                // 旧表没有这一列（升级前的库）：静默降级为 null 而不是让查询整体失败
-            }
+            //
+            // principal 直接读，不做 try-catch 降级。原先那层 catch 是按"旧库没有这一列"写的，
+            // 但它救不了那种情况：列不存在时 SELECT 本身就会失败，根本走不到 RowMapper。
+            // 它唯一的实际效果是把"SELECT 列清单漏了 principal"这种 bug 变成一片静默的 null。
+            // 列的存在性由 ensureTableExists() / ensurePrincipalColumn() 负责。
             return new AuditLogEntity(
                 rs.getLong("id"),
                 rs.getString("tool"),
@@ -505,7 +506,7 @@ public class AuditLogRepository {
                 rs.getString("error"),
                 rs.getTimestamp("event_time").toInstant(),
                 rs.getString("connection_key"),
-                principal
+                rs.getString("principal")
             );
         }
     }
