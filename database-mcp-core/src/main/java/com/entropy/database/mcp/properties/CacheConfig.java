@@ -19,11 +19,23 @@ import java.time.Duration;
 
 /**
  * Cache-related configuration.
+ *
+ * <p>{@code metadataDiskPersistenceEnabled} keeps the metadata cache on disk so a restart resumes
+ * warm instead of re-reading every dictionary view. It is off by default: persisted values
+ * round-trip through JSON, so a driver-specific value type ({@code Timestamp},
+ * {@code BigDecimal}) comes back as a JSON primitive. Shape survives, exact type does not.
+ *
+ * <p>There used to be a {@code warmCacheTtl} component here, fed from
+ * {@code entropy.mcp.database.cache.warm-cache-ttl-minutes}. Nothing read it — the "warm" tier it
+ * belonged to was three no-op branches in {@code DatabaseCacheImpl} — so it has been removed along
+ * with the tier, rather than left in place looking configurable.
  */
 public record CacheConfig(
         int maxSize,
         Duration queryCacheTtl,
         Duration metadataCacheTtl,
-        Duration warmCacheTtl
+        boolean metadataDiskPersistenceEnabled,
+        String metadataDiskPersistencePath,
+        Duration metadataDiskFlushInterval
 ) {
 }

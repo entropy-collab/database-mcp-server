@@ -79,7 +79,7 @@ public record DatabaseProperties(
             etl = new EtlProperties(4);
         }
         if (cache == null) {
-            cache = new CacheProperties(1000, 30, 5, 10);
+            cache = new CacheProperties(1000, 30, 5, false, null, 30);
         }
         if (connectionPool == null) {
             connectionPool = new ConnectionPoolProperties(30000, 600000, 1800000);
@@ -111,13 +111,16 @@ public record DatabaseProperties(
         int maxSize,
         int queryCacheTtlSeconds,
         int metadataCacheTtlMinutes,
-        int warmCacheTtlMinutes
+        boolean metadataDiskPersistenceEnabled,
+        String metadataDiskPersistencePath,
+        int metadataDiskFlushIntervalSeconds
     ) {
         public CacheProperties {
             maxSize = maxSize > 0 ? maxSize : 1000;
             queryCacheTtlSeconds = queryCacheTtlSeconds > 0 ? queryCacheTtlSeconds : 30;
             metadataCacheTtlMinutes = metadataCacheTtlMinutes > 0 ? metadataCacheTtlMinutes : 5;
-            warmCacheTtlMinutes = warmCacheTtlMinutes > 0 ? warmCacheTtlMinutes : 10;
+            metadataDiskFlushIntervalSeconds =
+                    metadataDiskFlushIntervalSeconds > 0 ? metadataDiskFlushIntervalSeconds : 30;
         }
     }
 

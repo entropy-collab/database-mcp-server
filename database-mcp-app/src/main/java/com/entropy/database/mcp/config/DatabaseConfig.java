@@ -89,7 +89,9 @@ public class DatabaseConfig {
                 c.maxSize(),
                 java.time.Duration.ofSeconds(c.queryCacheTtlSeconds()),
                 java.time.Duration.ofMinutes(c.metadataCacheTtlMinutes()),
-                java.time.Duration.ofMinutes(c.warmCacheTtlMinutes())
+                c.metadataDiskPersistenceEnabled(),
+                c.metadataDiskPersistencePath(),
+                java.time.Duration.ofSeconds(c.metadataDiskFlushIntervalSeconds())
         );
     }
 
@@ -101,10 +103,20 @@ public class DatabaseConfig {
     @Bean
     @ConditionalOnMissingBean(com.entropy.database.mcp.cache.DatabaseCache.class)
     public com.entropy.database.mcp.cache.DatabaseCacheImpl databaseCache(CacheConfig cacheConfig) {
+        com.entropy.database.mcp.cache.MetadataDiskStore diskStore = null;
+        if (cacheConfig.metadataDiskPersistenceEnabled()) {
+            String path = cacheConfig.metadataDiskPersistencePath();
+            java.nio.file.Path dir = path != null && !path.isBlank()
+                    ? java.nio.file.Path.of(path)
+                    : java.nio.file.Path.of(System.getProperty("user.dir"), ".cache", "metadata");
+            diskStore = new com.entropy.database.mcp.cache.MetadataDiskStore(
+                    dir, cacheConfig.metadataDiskFlushInterval());
+        }
         return new com.entropy.database.mcp.cache.DatabaseCacheImpl(
                 cacheConfig.maxSize(),
                 cacheConfig.queryCacheTtl(),
-                cacheConfig.metadataCacheTtl()
+                cacheConfig.metadataCacheTtl(),
+                diskStore
         );
     }
 

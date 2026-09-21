@@ -35,8 +35,13 @@ import java.util.function.Function;
  */
 public class ConnectionScopedCache implements DatabaseCache {
 
-    /** Reserved separator — must not be producible by any connection key or cache key. */
-    static final char SEPARATOR = '\u0000';
+    /**
+     * Reserved separator — must not be producible by any connection key or cache key.
+     * Shared with {@link DatabaseCacheImpl#SCOPE_SEPARATOR}, which splits scope from key when
+     * persisting metadata: two independent definitions of the separator would let persistence
+     * partition files along a boundary the cache does not actually use.
+     */
+    static final char SEPARATOR = DatabaseCacheImpl.SCOPE_SEPARATOR;
 
     private final DatabaseCacheImpl shared;
     private final String connectionKey;
@@ -50,23 +55,6 @@ public class ConnectionScopedCache implements DatabaseCache {
 
     private String scoped(String key) {
         return scope + key;
-    }
-
-    // ─── Tiered Operations ────────────────────────────────────────────────
-
-    @Override
-    public Object get(String key, CacheTier tier) {
-        return shared.get(scoped(key), tier);
-    }
-
-    @Override
-    public void put(String key, Object value, CacheTier tier) {
-        shared.put(scoped(key), value, tier);
-    }
-
-    @Override
-    public void evict(String key, CacheTier tier) {
-        shared.evict(scoped(key), tier);
     }
 
     // ─── Query Cache Operations ───────────────────────────────────────────

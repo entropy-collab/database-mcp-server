@@ -48,6 +48,12 @@ public class DatabaseCacheImpl implements DatabaseCache {
     private static final String QUERY_PREFIX = "query:";
     private static final String METADATA_PREFIX = "meta:";
 
+    /**
+     * Separator between connection scope and logical key. {@link MetadataDiskStore} uses it to
+     * partition the flat keyspace into per-connection files, so it must be package-visible.
+     */
+    static final char SCOPE_SEPARATOR = '\u0000';
+
     private Cache<String, Object> queryCache;
     private Cache<String, Object> metadataCache;
 
@@ -59,15 +65,27 @@ public class DatabaseCacheImpl implements DatabaseCache {
     private final Duration queryTtl;
     private final Duration metadataTtl;
 
+    /** {@code null} when disk persistence is disabled. */
+    private final MetadataDiskStore diskStore;
+
     public DatabaseCacheImpl(
             int maxSize,
             Duration queryTtl,
             Duration metadataTtl) {
+        this(maxSize, queryTtl, metadataTtl, null);
+    }
+
+    public DatabaseCacheImpl(
+            int maxSize,
+            Duration queryTtl,
+            Duration metadataTtl,
+            MetadataDiskStore diskStore) {
 
         this.queryTtl = queryTtl;
         this.metadataTtl = metadataTtl;
         this.queryCacheSize = maxSize / 10;  // Query cache is smaller
         this.metadataCacheSize = maxSize;
+        this.diskStore = diskStore;
 
         try {
             // Query result cache - smaller, faster expiration
@@ -96,6 +114,14 @@ public class DatabaseCacheImpl implements DatabaseCache {
                 bloomCapacity,
                 0.01                 // false positive rate: 1%
             );
+
+            // Prewarm from disk when persistence is enabled.
+            if (diskStore != null) {
+                Map<String, Object> persisted = diskStore.load();
+                persisted.forEach((key, value) ->
+                        metadataCache.put(METADATA_PREFIX + key, value));
+                diskStore.start(this::snapshotMetadata);
+            }
 
         } catch (Exception e) {
             log.error("Failed to initialize Caffeine cache, using fallback BloomFilter only", e);
@@ -153,6 +179,11 @@ public class DatabaseCacheImpl implements DatabaseCache {
         }
         @SuppressWarnings("unchecked")
         T result = (T) metadataCache.get(METADATA_PREFIX + key, loader);
+        if (diskStore != null) {
+            // The loader may have populated the entry, and there is no cheap way to tell whether it
+            // did. Marking unconditionally costs at most one redundant flush.
+            diskStore.markDirty();
+        }
         return result;
     }
 
@@ -160,41 +191,18 @@ public class DatabaseCacheImpl implements DatabaseCache {
     public void putMetadata(String key, Object value) {
         if (metadataCache == null) return;
         metadataCache.put(METADATA_PREFIX + key, value);
+        if (diskStore != null) {
+            diskStore.markDirty();
+        }
     }
 
     @Override
     public void evictMetadata(String key) {
         if (metadataCache != null) {
             metadataCache.invalidate(METADATA_PREFIX + key);
-        }
-    }
-
-    // ─── Stats Cache Operations ───────────────────────────────────────────
-
-    @Override
-    public Object get(String key, CacheTier tier) {
-        return switch (tier) {
-            case QUERY -> getQuery(key);
-            case METADATA -> getMetadata(key);
-            case HOT, WARM, COLD -> null;
-        };
-    }
-
-    @Override
-    public void put(String key, Object value, CacheTier tier) {
-        switch (tier) {
-            case QUERY -> putQuery(key, value);
-            case METADATA -> putMetadata(key, value);
-            case HOT, WARM, COLD -> { /* no-op */ }
-        }
-    }
-
-    @Override
-    public void evict(String key, CacheTier tier) {
-        switch (tier) {
-            case QUERY -> evictQuery(key);
-            case METADATA -> evictMetadata(key);
-            case HOT, WARM, COLD -> { /* no-op */ }
+            if (diskStore != null) {
+                diskStore.markDirty();
+            }
         }
     }
 
@@ -204,6 +212,9 @@ public class DatabaseCacheImpl implements DatabaseCache {
     public void clear() {
         if (queryCache != null) queryCache.invalidateAll();
         if (metadataCache != null) metadataCache.invalidateAll();
+        if (diskStore != null) {
+            diskStore.markDirty();
+        }
         log.debug("DatabaseCache cleared");
     }
 
@@ -214,6 +225,12 @@ public class DatabaseCacheImpl implements DatabaseCache {
 
     @Override
     public void shutdown() {
+        // Flush before clearing, not after: shutdown()'s final flush reads a live snapshot, and
+        // clearing first makes that snapshot empty — which then overwrites the persisted copy with
+        // nothing, so the next start has nothing to prewarm from.
+        if (diskStore != null) {
+            diskStore.shutdown();
+        }
         clear();
     }
 
@@ -263,6 +280,7 @@ public class DatabaseCacheImpl implements DatabaseCache {
         stats.put("maxSize", maxSize());
         stats.put("queryTTL", queryTtl.toMillis() / 1000 + "s");
         stats.put("metadataTTL", metadataTtl.toMillis() / 1000 + "s");
+        stats.put("metadataDiskPersistence", diskStore != null);
         
         if (queryCache != null) {
             var qs = queryCache.stats();
@@ -309,6 +327,9 @@ public class DatabaseCacheImpl implements DatabaseCache {
         removed += removeByPrefix(metadataCache, METADATA_PREFIX + scope);
         // The bloom filter has no removal, so a cleared scope keeps reporting "might contain".
         // That costs one extra cache lookup that misses, never a stale hit.
+        if (diskStore != null) {
+            diskStore.markDirty();
+        }
         log.debug("DatabaseCache scope cleared: scope={}, entries={}", scope, removed);
     }
 
@@ -332,5 +353,26 @@ public class DatabaseCacheImpl implements DatabaseCache {
     private static long countByPrefix(Cache<String, Object> cache, String prefix) {
         if (cache == null) return 0;
         return cache.asMap().keySet().stream().filter(k -> k.startsWith(prefix)).count();
+    }
+
+    /**
+     * Point-in-time copy of every metadata entry, keyed without the internal {@code meta:} prefix
+     * so the disk store sees the same logical keys as consumers. Iterating the {@code asMap()} view
+     * is safe: Caffeine only exposes entries that have not yet expired, and concurrent writes to the
+     * cache can add or remove entries between iterations, but since this is invoked from a single
+     * scheduled thread the snapshot is consistent enough for cache persistence.
+     */
+    Map<String, Object> snapshotMetadata() {
+        if (metadataCache == null) {
+            return Map.of();
+        }
+        Map<String, Object> snapshot = new java.util.LinkedHashMap<>();
+        for (var entry : metadataCache.asMap().entrySet()) {
+            String fullKey = entry.getKey();
+            if (fullKey.startsWith(METADATA_PREFIX)) {
+                snapshot.put(fullKey.substring(METADATA_PREFIX.length()), entry.getValue());
+            }
+        }
+        return snapshot;
     }
 }

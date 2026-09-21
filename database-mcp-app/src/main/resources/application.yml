@@ -231,7 +231,17 @@ entropy:
         max-size: 2000
         query-ttl: 30s
         metadata-ttl: 5m
-        max-warm-size: 10
+        # 元数据缓存落盘：重启后不必重新拉一遍数据字典。默认关闭——落盘走 JSON，
+        # 驱动特有的值类型（Timestamp、BigDecimal）回来会变成 JSON 原生类型，
+        # 结构不变但精确类型会丢。开启前请确认下游只按 List/Map/String 读这些值。
+        # 开启时把 metadata-ttl 一并调大，否则 5 分钟就过期，落盘意义不大。
+        metadata-disk-persistence-enabled: false
+        # 留空时落到 ${user.dir}/.cache/metadata；容器里请显式指向挂载卷，
+        # 否则容器重建即丢，等于没开。
+        metadata-disk-persistence-path:
+        # 批量刷盘间隔。每次 putMetadata 只置脏标记，由后台单线程按这个间隔落盘一次，
+        # 不把磁盘延迟放进工具调用路径。硬杀最多丢这一个间隔内新缓存的元数据。
+        metadata-disk-flush-interval-seconds: 30
       # ── 预声明连接（推荐的默认路径）─────────────────────────────────────────
       # 由部署方声明、启动时建成 pinned 池，进程存活期间一直可用、不会像 BYOK 那样到期失效。
       # 工具按名引用，下游分不出它和 BYOK 连接的区别：两者走同一个 ByokDataSourceFactory，
