@@ -16,6 +16,7 @@
 package com.entropy.database.mcp.security;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.servlet.DispatcherType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -256,8 +257,33 @@ public class SecurityConfig {
      * <p>代价（明码标价）：JS/CSS 与 HTML 结构对任何能连上端口的人可读，等于把前端代码与
      * 端点路径清单公开。换来的是登录界面与面板同一套设计系统、同一份构建产物，以及登录后
      * <b>整页不刷新</b>（location.hash 里的现场不丢）。主流 SPA 项目就是这个取舍。
+     *
+     * <h2>第四项 {@code /favicon.ico}：不是装饰，是在修一个弹窗</h2>
+     * <p>{@code index.html} 没有声明 favicon，浏览器就会按约定<b>自己</b>去取 {@code /favicon.ico}——
+     * 每次打开面板都发，而且这个请求不受前端代码控制。不放通它的后果是一条很难反推的链路：
+     * <ol>
+     *   <li>路径不在本清单里 → 落到 {@code anyRequest().denyAll()}；</li>
+     *   <li>匿名请求上的 {@code AccessDeniedException} 会被 {@code ExceptionTranslationFilter}
+     *       转成"去认证"，于是调用入口点；</li>
+     *   <li>favicon 请求的 {@code Accept} 是 {@code image/*}，匹配不上入口点里"纯 401"那一档
+     *       （那一档只认 {@code application/json}），落到 {@code BasicAuthenticationEntryPoint}；</li>
+     *   <li>于是响应带 {@code WWW-Authenticate: Basic} → <b>浏览器在面板上弹出一个原生 Basic
+     *       认证对话框</b>，和 SPA 自己的登录表单同时出现。</li>
+     * </ol>
+     * 症状看起来像"登录功能坏了"，而成因和 {@code /api/**}、和登录流程都没有关系。
+     * {@code SecurityConfigTest#faviconDoesNotTriggerTheNativeBasicDialog} 钉住这条。
+     *
+     * <p>放通它不扩大数据暴露面：判据与上面那三项逐字相同（保护数据而不是装饰）。仓库里目前
+     * 并没有这个文件，所以实际结果是 404 —— 这是可以接受的，要消掉的是 401 上那个挑战头。
+     *
+     * <p><b>只放通这一条路径并不够。</b>文件不存在 → 静态资源 404 → 容器把请求转发到
+     * {@code /error}，那是同一个请求第二次进过滤器链（{@code DispatcherType=ERROR}），
+     * 又一次落到 {@code denyAll} 上，于是挑战头照样出现。两件事必须同时做：本清单放通路径，
+     * 加上 {@code webSecurityFilterChain} 里对 ERROR 派发的 {@code permitAll}（那里有完整说明）。
+     * 这也是 2026-09-21 长春上线 {@code 0.6.0-authz2} 时踩到的：只改了这一行，线上弹窗依旧。
      */
-    private static final String[] WEB_UI_RESOURCES = {"/", "/index.html", "/assets/**"};
+    private static final String[] WEB_UI_RESOURCES = {
+        "/", "/index.html", "/assets/**", "/favicon.ico"};
 
     /** 表单登录与退出的动作端点。两者都要 {@code permitAll}，否则 {@code denyAll} 会把它们收走。 */
     private static final String LOGIN_PROCESSING_URL = "/login";
@@ -349,6 +375,19 @@ public class SecurityConfig {
                 auth.requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                     .requestMatchers("/actuator/info").permitAll();
                 if (securityEnabled) {
+                    /*
+                     * 容器内部的 ERROR 派发必须先放通，否则匿名请求上的每一个 404 都会换回一个带
+                     * Basic 挑战的 401 —— 这是上面 /favicon.ico 那条规则单独放通<b>不够</b>的原因：
+                     * 仓库里没有这个文件，静态资源 404 会被 Tomcat 转发到 /error，那是同一个请求
+                     * 第二次进过滤器链（DispatcherType=ERROR），按 anyRequest().denyAll() 又被拒一次，
+                     * 于是照样走到 BasicAuthenticationEntryPoint 并带上 WWW-Authenticate。
+                     *
+                     * Spring Security 6 起授权规则默认对所有 DispatcherType 生效（此前 ERROR/ASYNC
+                     * 是隐式放过的），放通 ERROR 派发是官方给的解法。不放大暴露面：ERROR 派发只能由
+                     * 容器内部触发，浏览器打不出这种请求；未认证的 /api/** 在第一次（REQUEST）派发
+                     * 就已经 401，走不到这一行。直接 GET /error 也仍然被 denyAll 拒掉。
+                     */
+                    auth.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll();
                     // 面板的 HTML 与构建产物匿名可读，登录动作端点也一样：登录界面是 SPA 的一个视图，
                     // 而 SPA 要先能加载才谈得上渲染登录表单。判据与代价见 WEB_UI_RESOURCES 的注释。
                     auth.requestMatchers(WEB_UI_RESOURCES).permitAll()

@@ -122,7 +122,19 @@ export async function login(username, password) {
   body.set('username', username);
   body.set('password', password);
 
-  const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+  /*
+   * Accept: application/json 必须带上，尽管 /login 的响应体是空的。
+   *
+   * 后端的未认证入口点按 Accept 分流（见 SecurityConfig）：只有 application/json 那一档回
+   * 纯 401，其余落到 BasicAuthenticationEntryPoint 并带上 WWW-Authenticate: Basic ——
+   * 而那个头会让浏览器在<b>登录界面上</b>弹出一个原生 Basic 对话框。
+   * fetch 不加 Accept 时浏览器默认发 `*&#47;*`，正好落在第二档里。
+   * 这个文件里其余的请求都经 getJson / writeHeaders 带上了同一个头，这里是唯一一处要手写的。
+   */
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/x-www-form-urlencoded',
+  };
   const token = csrfToken();
   if (token) {
     headers['X-XSRF-TOKEN'] = token;

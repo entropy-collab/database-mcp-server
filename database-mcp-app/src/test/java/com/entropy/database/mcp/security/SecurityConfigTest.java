@@ -15,6 +15,7 @@
  */
 package com.entropy.database.mcp.security;
 
+import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.Cookie;
 import org.junit.jupiter.api.AfterAll;
@@ -281,6 +282,86 @@ class SecurityConfigTest {
                         .as("curl / 脚本要靠这个头知道该带 Basic 凭据")
                         .startsWith("Basic");
                 });
+        }
+
+        /**
+         * 浏览器自动发的 {@code /favicon.ico} <b>不能</b>换回一个带 Basic 挑战的 401。
+         *
+         * <p>这条钉住的是一个具体的故障现象：打开面板、或者在登录界面上操作时，浏览器会弹出一个
+         * <b>原生的 Basic 认证对话框</b>，和 SPA 自己的登录表单同时出现。
+         *
+         * <p>成因与 {@code /api/**} 无关，链路是这样的：
+         * <ol>
+         *   <li>{@code index.html} 没有声明 favicon，浏览器就按约定自己去取 {@code /favicon.ico}；</li>
+         *   <li>这个路径不在 {@code WEB_UI_RESOURCES} 里，落到 {@code anyRequest().denyAll()}；</li>
+         *   <li>匿名请求上的 {@code AccessDeniedException} 会被 {@code ExceptionTranslationFilter}
+         *       转成"去认证"，于是调用入口点；</li>
+         *   <li>favicon 请求的 {@code Accept} 是 {@code image/*}，匹配不上"纯 401"那一档，
+         *       落到 {@code BasicAuthenticationEntryPoint} → 带 {@code WWW-Authenticate: Basic}
+         *       → 浏览器弹原生对话框。</li>
+         * </ol>
+         *
+         * <p>修法有两半，缺一半线上就照样弹框：把 favicon 划进匿名可读的页面外壳（判据同
+         * {@code WEB_UI_RESOURCES}：要保护的是数据而不是装饰），<b>以及</b>放通容器的 ERROR
+         * 派发（见下一条用例）。404 是可以接受的结果——仓库里确实没有这个文件；
+         * 这里断言的是"不带 Basic 挑战"，而不是"一定有图标"。
+         */
+        @Test
+        void faviconDoesNotTriggerTheNativeBasicDialog() throws Exception {
+            mockMvc.perform(get("/favicon.ico")
+                    .header(HttpHeaders.ACCEPT, "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"))
+                .andExpect(result -> {
+                    assertThat(result.getResponse().getHeader(HttpHeaders.WWW_AUTHENTICATE))
+                        .as("favicon 的响应带了 Basic 挑战，浏览器会在面板上弹出原生登录框")
+                        .isNull();
+                    assertThat(result.getResponse().getStatus())
+                        .as("favicon 不该要求凭据；404（没有这个文件）是可以接受的")
+                        .isNotEqualTo(401);
+                });
+        }
+
+        /**
+         * 容器内部的 ERROR 派发不能换回一个带 Basic 挑战的 401。
+         *
+         * <p>这条是上一条用例<b>漏掉</b>的那一半，2026-09-21 在长春 {@code 0.6.0-authz2} 上现形：
+         * 只把 {@code /favicon.ico} 放进 {@code WEB_UI_RESOURCES} 之后，MockMvc 里这条路径已经绿了，
+         * 而线上 {@code curl -H 'Accept: image/*' /favicon.ico} 依旧是
+         * {@code 401 + WWW-Authenticate: Basic}。差别在于 <b>MockMvc 默认只做 REQUEST 派发</b>：
+         * 真实容器里文件不存在会 404 → 转发到 {@code /error} → 同一个请求第二次进过滤器链
+         * （{@code DispatcherType=ERROR}）→ 再一次落到 {@code denyAll} → 入口点 → 挑战头。
+         *
+         * <p>所以这里显式把派发类型设成 {@code ERROR} 来复现那条第二趟。注意<b>不是</b>直接
+         * {@code GET /error}（那是 REQUEST 派发，仍然应该被 {@code denyAll} 拒掉，
+         * 由 {@link #directErrorPathStaysDenied()} 钉住）。
+         */
+        @Test
+        void errorDispatchDoesNotTriggerTheNativeBasicDialog() throws Exception {
+            mockMvc.perform(get("/error")
+                    .header(HttpHeaders.ACCEPT, "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                    .with(request -> {
+                        request.setDispatcherType(DispatcherType.ERROR);
+                        return request;
+                    }))
+                .andExpect(result -> {
+                    assertThat(result.getResponse().getHeader(HttpHeaders.WWW_AUTHENTICATE))
+                        .as("404 的 ERROR 派发带了 Basic 挑战，浏览器会在面板上弹出原生登录框")
+                        .isNull();
+                    assertThat(result.getResponse().getStatus())
+                        .as("ERROR 派发是容器内部转发，不该再要一次凭据")
+                        .isNotEqualTo(401);
+                });
+        }
+
+        /**
+         * 放通 ERROR 派发<b>不等于</b>把 {@code /error} 这个路径交出去。
+         *
+         * <p>外部直接请求 {@code /error} 走的是 REQUEST 派发，仍然落在 {@code anyRequest().denyAll()}
+         * 上。这条用例存在的意义是划清上一条的边界：放通的是"容器内部转发"这个维度，不是一条路径。
+         */
+        @Test
+        void directErrorPathStaysDenied() throws Exception {
+            mockMvc.perform(get("/error").accept(MediaType.APPLICATION_JSON))
+                .andExpect(result -> assertThat(result.getResponse().getStatus()).isEqualTo(401));
         }
 
         /** 没带 CSRF token 的表单登录必须 403：这条钉住"浏览器那条链上 CSRF 真的开着"。 */
