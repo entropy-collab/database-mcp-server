@@ -18,6 +18,14 @@
   <name>Facet DSL :: ReBAC</name>
   <description>ReBAC 关系式授权的 DSL 前端，编译到 facet-core 的 IR。</description>
 
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
   <dependencies>
     <dependency>
       <groupId>io.github.yaotj</groupId>

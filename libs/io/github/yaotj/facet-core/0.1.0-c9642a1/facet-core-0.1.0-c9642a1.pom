@@ -19,4 +19,12 @@
 
   <name>Facet Core</name>
   <description>IR、求值器与端口。此模块不得有任何三方依赖——纯度由 module-info 强制。</description>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
 </project>
