@@ -1,0 +1,80 @@
+# Dependabot 版本更新配置。
+#
+# 仓库的 Dependabot 安全告警与自动安全修复是在仓库设置里开的（与本文件无关）；
+# 本文件管的是「例行版本更新」——扫描频率、分组方式、以及哪些依赖刻意不跟随升级。
+#
+# 分组的理由：不配 groups 的话每个依赖一个 PR。这个项目有 8 个 JDBC 驱动、Spring Boot
+# 全家桶、一套前端依赖，加起来每周能开出十几个 PR，实际结果是没人看。
+# patch/minor 合成一个 PR（通常可以整体合），major 单独一个（必须逐个判）。
+version: 2
+
+updates:
+  # ── Maven ────────────────────────────────────────────────────────────────
+  # 只列两个目录：绝大多数版本号集中在根 pom 的 <properties> 里，模块 pom 写的是
+  # ${xxx.version}；实测只有 database-mcp-app 自带版本属性（前端插件那两个 pin）。
+  # 其余 6 个模块没有自己的版本声明，列进来只会产生重复 PR。
+  - package-ecosystem: "maven"
+    directories:
+      - "/"
+      - "/database-mcp-app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    groups:
+      maven-patch-minor:
+        update-types:
+          - "patch"
+          - "minor"
+      maven-major:
+        update-types:
+          - "major"
+    ignore:
+      # facet 是随仓库分发的（libs/ 下的 file 仓库，见根 pom 的 <repositories> 注释）。
+      # 它不在任何公共仓库里，Dependabot 查不到"最新版本"，放着只会反复失败。
+      # facet 的升级靠手工替换 libs/ 下的 jar 并改坐标里的 commit sha。
+      - dependency-name: "io.github.yaotj:*"
+      # frontend-maven-plugin 刻意停在 1.15.4 而不是 2.0.x：2.0 换了最低 Maven 要求，
+      # 升级要单独验证。理由写在 database-mcp-app/pom.xml 的注释里。
+      # 只挡 major，1.x 之内的修补仍然接受。
+      - dependency-name: "com.github.eirslett:frontend-maven-plugin"
+        update-types:
+          - "version-update:semver-major"
+
+  # ── 前端 npm ──────────────────────────────────────────────────────────────
+  # 注意：这套依赖刻意全部钉死到确定版本（package.json 里没有 ^ 和 ~），因为
+  # Astryx 还是 Beta。Dependabot 的 PR 会直接改这些钉死的版本号——这不是它做错了，
+  # 而是每个 PR 都需要人工判断，不能顺手合。频率调成 monthly 就是为了压低这个噪音。
+  - package-ecosystem: "npm"
+    directory: "/database-mcp-app/src/main/frontend"
+    schedule:
+      interval: "monthly"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 3
+    groups:
+      frontend-patch:
+        update-types:
+          - "patch"
+      frontend-minor-major:
+        update-types:
+          - "minor"
+          - "major"
+
+  # ── GitHub Actions ───────────────────────────────────────────────────────
+  # actions/checkout、setup-java、cache、upload-artifact 四个。全部合成一个 PR：
+  # 这类升级几乎总是可以整体合，分开看没有额外信息。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        patterns:
+          - "*"
