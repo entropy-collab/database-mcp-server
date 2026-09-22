@@ -48,6 +48,7 @@ import {
   TopNav,
   VStack,
   useHotkeys,
+  useSideNavCollapse,
 } from '@astryxdesign/core';
 import { FALLBACK_MAX_LIMIT, fetchConfig, fetchMe, logout, onUnauthorized } from './api.js';
 /* 刻意从 ./searchFocus.js 而不是 ./components.jsx 取：后者会把 370 KB 的显示件
@@ -56,6 +57,29 @@ import { FALLBACK_MAX_LIMIT, fetchConfig, fetchMe, logout, onUnauthorized } from
 import { focusFirstSearch } from './searchFocus.js';
 import { readHashParams, writeHashParams } from './hashState.js';
 import { DiagnosticBundleButton } from './diagnostics.jsx';
+/* 侧栏图标。它们是折叠态能用的<b>前提</b>而不是装饰——SideNavItem 对没有 icon 的项
+   在折叠态直接 return null，理由与手写取舍写在 navIcons.jsx 的头注释里。 */
+import {
+  IconAuditLog,
+  IconAuthz,
+  IconBackup,
+  IconCatalog,
+  IconCdc,
+  IconConnections,
+  IconDatabase,
+  IconDba,
+  IconHistory,
+  IconInfo,
+  IconJobs,
+  IconLineage,
+  IconPerformance,
+  IconQuality,
+  IconReport,
+  IconSchema,
+  IconSqlDoctor,
+  IconTools,
+  IconUsers,
+} from './navIcons.jsx';
 import {
   COLOR_MODES,
   applyColorMode,
@@ -134,16 +158,32 @@ const LoginView = lazy(() => import('./LoginView.jsx'));
  * hint 一句话必须同时说清「数据从哪来」和「有什么约束」：导航项被点开之前，这句话是运维
  * 判断「我要找的东西在不在这一页」的唯一依据。16 项之后这件事比 8 项时更重要 ——
  * 「数据资产」和「数据质量」从名字上分不出哪个会扫全库。
+ *
+ * ── icon 是必填的，不是可选的装饰 ──
+ * SideNavItem 在折叠态有一句 `if (isCollapsed && !icon) return null;`，所以漏掉 icon 的项
+ * 在折叠侧栏里<b>整个消失</b>（不报错、不留空位）。加视图时必须一起加图标，
+ * 图标在 navIcons.jsx，那个文件的头注释里写了为什么是手写的。
  */
 const VIEW_GROUPS = [
   {
     title: '审计',
     views: [
-      { value: 'audit', label: '审计流水', hint: '进程内环形缓冲，重启即清空' },
-      { value: 'history', label: '审计历史', hint: '审计表，需配 spring.datasource.url' },
+      {
+        value: 'audit',
+        label: '审计流水',
+        icon: IconAuditLog,
+        hint: '进程内环形缓冲，重启即清空',
+      },
+      {
+        value: 'history',
+        label: '审计历史',
+        icon: IconHistory,
+        hint: '审计表，需配 spring.datasource.url',
+      },
       {
         value: 'reports',
         label: '审计报告',
+        icon: IconReport,
         hint: '按时间窗出的合规报告；审计未落库时两份报告是 skipped 而不是错误',
       },
     ],
@@ -151,16 +191,28 @@ const VIEW_GROUPS = [
   {
     title: '运行状态',
     views: [
-      { value: 'connections', label: '连接与连接池', hint: '已注册连接与 HikariCP 池状态' },
-      { value: 'performance', label: '性能', hint: '慢查询原文与 SQL 模式统计' },
+      {
+        value: 'connections',
+        label: '连接与连接池',
+        icon: IconConnections,
+        hint: '已注册连接与 HikariCP 池状态',
+      },
+      {
+        value: 'performance',
+        label: '性能',
+        icon: IconPerformance,
+        hint: '慢查询原文与 SQL 模式统计',
+      },
       {
         value: 'info',
         label: '服务信息',
+        icon: IconInfo,
         hint: '版本、profile、四个生效开关；版本来自打包期的 pom，不是 build-info',
       },
       {
         value: 'tools',
         label: '工具清单',
+        icon: IconTools,
         hint: 'MCP 工具目录 + 运行期启用/停用（本面板唯一的写操作）；没有入参 schema',
       },
     ],
@@ -171,21 +223,25 @@ const VIEW_GROUPS = [
       {
         value: 'schema',
         label: 'Schema 浏览',
+        icon: IconSchema,
         hint: '表/视图/序列/索引/表结构，会真的读业务库的数据字典，默认不自动查',
       },
       {
         value: 'catalog',
         label: '数据资产',
+        icon: IconCatalog,
         hint: '目录扫描与敏感列推断（按命名规则，不看数据）；扫全 Schema 是全站最慢的操作',
       },
       {
         value: 'lineage',
         label: '血缘',
+        icon: IconLineage,
         hint: '只从外键现算，没有外键的库永远是空图；空图的三种原因页面上有列',
       },
       {
         value: 'quality',
         label: '数据质量',
+        icon: IconQuality,
         hint: '只跑内置检查（空值率+重复行），评分 100 不代表业务规则通过；告警汇总恒为空',
       },
     ],
@@ -196,26 +252,31 @@ const VIEW_GROUPS = [
       {
         value: 'sql',
         label: 'SQL 体检',
+        icon: IconSqlDoctor,
         hint: '风险/计划/索引/改写；SQL 走查询串，会进 access log 且有长度上限',
       },
       {
         value: 'dba',
         label: 'DBA 视图',
+        icon: IconDba,
         hint: '会真的连业务库执行查询，默认不自动查，多数视图只有 Oracle 有',
       },
       {
         value: 'cdc',
         label: 'CDC',
+        icon: IconCdc,
         hint: '方言支持/状态/订阅/位点；订阅只是进程内存里的登记，重启即清空',
       },
       {
         value: 'backups',
         label: '备份',
+        icon: IconBackup,
         hint: '只读清单；备份元数据只在内存里（硬编码），重启即全部丢失',
       },
       {
         value: 'jobs',
         label: 'ETL 作业',
+        icon: IconJobs,
         hint: '只读；网关关闭时是 200+enabled=false，有未完成作业时列表端点会 500',
       },
     ],
@@ -237,11 +298,13 @@ const VIEW_GROUPS = [
       {
         value: 'users',
         label: '身份管理',
+        icon: IconUsers,
         hint: '列出/新增/停用调用者身份（写操作）；不含环境变量里的管理员，没配状态库时整页 503',
       },
       {
         value: 'authz',
         label: '权限视图',
+        icon: IconAuthz,
         hint: '按调用者的连接级/表级读写；只读（授权改 yml 并重启），开关关闭时全放行而不是全禁止',
       },
     ],
@@ -400,6 +463,12 @@ function AuthBanner({ config, isConfigLoaded }) {
  * 它回答的是"我手上这份数据有多旧"，而运维是拿自己的表去对的——这里要的正是墙上时钟。
  * 表格里的时间戳换成相对时间的理由（服务器时钟快 11 分钟）在 components.jsx 的
  * timeColumn 上，两处不是同一个问题。
+ *
+ * ── 这一版从"标题带上方独占一行"改成"与标题同一行、右对齐" ──
+ * 它报的是<b>全局</b>状态（整个服务的鉴权与审计），不随视图变化，而独占一行会让它在
+ * 每次切视图时都重新抢一次注意力，并且把真正变化的标题往下压。放到标题右侧之后：
+ * 标题拿回左上角的主导位置（Grafana / Stripe 的 page header 就是这个结构），
+ * 而状态仍然常驻可见——只是不再是"第一眼"。gap 给 5 保证两组不会读成一块。
  */
 function StatusStrip({ config, isConfigLoaded, updatedAt }) {
   const authOn = config?.authEnabled === true;
@@ -429,7 +498,103 @@ function StatusStrip({ config, isConfigLoaded, updatedAt }) {
 }
 
 /**
- * 快捷键说明条 + 总开关。
+ * 显示设置：条数 / 自动刷新 / 主题，收进一个浮层。
+ *
+ * ── 为什么从顶栏平铺改成浮层 ──
+ * 上一版顶栏 endContent 里平铺了六组控件：条数 NumberInput（132px）、自动刷新 Switch、
+ * 「主题」Text + 三档 SegmentedControl、诊断包、刷新、头像。加起来 900px 以上，
+ * 在 1280 宽的屏上就开始 wrap 成两行，而 wrap 之后顶栏高度翻倍、主标题被挤扁。
+ *
+ * 判据是<b>操作频率</b>，不是"能不能放下"：刷新与身份是每次都要的（留在外面），
+ * 而条数、自动刷新、主题都是"调一次用很久"的设置。Vercel / Linear / Stripe 的顶栏
+ * 一律只留 1-2 个高频动作加身份，设置进齿轮——这里照这个分法。
+ *
+ * ── 三项都刻意保留"当前值可见" ──
+ * 收进浮层的代价是当前值看不见了，所以触发器的 label 带上条数（`50 条`）：
+ * 条数直接决定每张表取回多少行，它变了而人不知道，会把"数据只有这么多"读成事实。
+ * 自动刷新开着时另挂一个 Badge——一个正在周期性打接口的开关，藏起来是危险的。
+ */
+function DisplaySettingsMenu({
+  limit, maxLimit, onLimitChange,
+  isAutoRefresh, onAutoRefreshChange,
+  colorMode, onColorModeChange,
+}) {
+  return (
+    <Popover
+      label="显示设置"
+      placement="below"
+      alignment="end"
+      width={300}
+      content={
+        <VStack gap={5} padding={4}>
+          <VStack gap={2}>
+            <Text type="label" weight="semibold">每张表取回条数</Text>
+            <NumberInput
+              label="条数"
+              isLabelHidden
+              value={limit}
+              min={1}
+              max={maxLimit}
+              step={10}
+              isIntegerOnly
+              hasNumberSteppers
+              onChange={(value) => onLimitChange(value ?? 1)}
+            />
+            <Text type="supporting" color="secondary">
+              {`上限 ${maxLimit}，由后端 /api/ui/config 的 maxLimit 决定。`}
+            </Text>
+          </VStack>
+
+          <VStack gap={2}>
+            <Switch
+              label={`自动刷新（每 ${AUTO_REFRESH_INTERVAL_MS / 1000} 秒）`}
+              value={isAutoRefresh}
+              onChange={onAutoRefreshChange}
+            />
+            {/* 这句必须写出来：打开它会让页面自己往性能指标里灌流量，理由见 refresh 那个 effect */}
+            <Text type="supporting" color="secondary">
+              默认关闭。打开后每次轮询都会被记进「性能」页的工具调用计数，
+              也就是说指标里会混进本页面自己的流量。
+            </Text>
+          </VStack>
+
+          <VStack gap={2}>
+            {/*
+              主题三档。用 SegmentedControl 而不是一个「深色」Switch：
+              「跟随系统」是默认值也是第三种状态，Switch 只有两态，
+              硬塞会变成"开=暗、关=亮"，而那样就没有跟随系统了。
+              label 是 aria-label（不渲染），所以上方另给一句可见的 Text。
+              刻意不传 size：那是控件高度不是字号，口径同 ExportCsvButton。
+            */}
+            <Text type="label" weight="semibold">主题</Text>
+            <SegmentedControl
+              value={colorMode}
+              onChange={onColorModeChange}
+              label="配色模式"
+            >
+              {COLOR_MODES.map((m) => (
+                <SegmentedControlItem key={m.value} value={m.value} label={m.label} />
+              ))}
+            </SegmentedControl>
+          </VStack>
+        </VStack>
+      }
+    >
+      <Button
+        /* label 带上生效条数：这个值决定每张表取回多少行，藏起来会让人把
+           "只有这么多数据"当成事实。自动刷新开着时另挂一个 Badge。 */
+        label={`${limit} 条`}
+        variant="secondary"
+        endContent={isAutoRefresh
+          ? <Badge variant="info" label="自动刷新" />
+          : undefined}
+      />
+    </Popover>
+  );
+}
+
+/**
+ * 快捷键说明 + 总开关，收进一个浮层。
  *
  * ── 为什么要有这个开关（不是我多加的功能，是 useHotkeys 自己的要求）──
  * core 的 useHotkeys 文档里有一段硬性要求：注册「单个无修饰键」的快捷键（'r'、'/'、'1'）
@@ -438,36 +603,85 @@ function StatusStrip({ config, isConfigLoaded, updatedAt }) {
  * 这一页的快捷键是全局的（切视图必须在任何位置都能按），改键需要一套设置界面，
  * 所以选第一个：一个开关，默认开。
  *
- * 说明条本身也是必要的：没写出来的快捷键等于不存在，而且第一次误触发时（比如在
- * 某个非输入框区域按了 r 页面突然刷新）看得见这行字才能理解发生了什么。
+ * ── 为什么从常驻一行改成浮层，以及为什么这不违反上面那条要求 ──
+ * 上一版是标题带底部常驻一整行（一个 Switch + 六个 Kbd + 四段说明文字）。那一行是
+ * <b>文档</b>：内容永不变化，却在每个视图上都占一行，而它旁边就是真正会变的标题与 hint。
+ * GitHub / Linear / Notion 都是把快捷键表收进一个 `?` 浮层，不常驻。
+ *
+ * 关键是<b>开关仍然一次点击可达</b>（浮层第一项），而不是埋进某个设置页的第三级——
+ * WCAG 那条要求的是"提供关闭的方式"，浮层满足；它没有要求这个开关常驻在屏幕上。
+ *
+ * 触发器刻意做成一个带 `?` 的 Kbd 视觉而不是纯文字按钮：上一版注释里那条顾虑是真的
+ * ——第一次误触发（在非输入框区域按了 r，页面突然刷新）时，人需要一个"这里有快捷键"的
+ * 线索才能理解刚发生了什么。一个键帽形状的按钮就是这个线索，而一整行说明不是必需的。
  */
-function ShortcutHints({ isEnabled, onToggle }) {
+function KeyboardShortcutsMenu({ isEnabled, onToggle }) {
   return (
-    <HStack gap={3} align="center" wrap="wrap">
-      <Switch label="快捷键" value={isEnabled} onChange={onToggle} />
-      <HStack gap={2} align="center" wrap="wrap">
-        <Kbd keys="r" />
-        <Text type="supporting" color="secondary">刷新</Text>
-        <Kbd keys="1" />
-        <Text type="supporting" color="secondary">–</Text>
-        <Kbd keys="9" />
-        {/*
-          「前 9 项」这句话必须写出来，不能只写 1–9 就完事。
-          侧栏有 16 项而键盘只有 9 个数字键，不说清的话，按到第 10 个视图时用户会以为
-          自己记错了键位或者快捷键坏了 —— 一个静默失效的功能比没有这个功能更糟。
-          带数字前缀的导航项只有前 9 个（见 SideNavItem 的 label），两处口径必须一致。
-        */}
-        <Text type="supporting" color="secondary">
-          {`切视图（只有侧栏前 ${HOTKEY_VIEW_COUNT} 项有数字键，其余 ${VIEWS.length - HOTKEY_VIEW_COUNT} 项点侧栏）`}
-        </Text>
-        <Kbd keys="/" />
-        <Text type="supporting" color="secondary">聚焦搜索</Text>
-        <Kbd keys="escape" />
-        <Text type="supporting" color="secondary">关详情面板</Text>
-      </HStack>
-    </HStack>
+    <Popover
+      label="键盘快捷键"
+      placement="below"
+      alignment="end"
+      width={340}
+      content={
+        <VStack gap={4} padding={4}>
+          {/* 开关放第一项：WCAG 2.1.4 要求的"关闭方式"必须容易到达，不能排在说明后面 */}
+          <Switch label="启用键盘快捷键" value={isEnabled} onChange={onToggle} />
+          <Text type="supporting" color="secondary">
+            这些都是单个无修饰键，语音输入或误触时容易触发，所以给了这个开关（WCAG 2.1.4）。
+          </Text>
+
+          <VStack gap={3}>
+            <HStack gap={3} align="center" wrap="wrap">
+              <Kbd keys="r" />
+              <Text type="supporting">刷新当前视图</Text>
+            </HStack>
+            <HStack gap={3} align="center" wrap="wrap">
+              <Kbd keys="1" />
+              <Text type="supporting" color="secondary">–</Text>
+              <Kbd keys="9" />
+              <Text type="supporting">切视图</Text>
+            </HStack>
+            {/*
+              「前 9 项」这句话必须写出来，不能只写 1–9 就完事。
+              侧栏有 18 项而键盘只有 9 个数字键，不说清的话，按到第 10 个视图时用户会以为
+              自己记错了键位或者快捷键坏了 —— 一个静默失效的功能比没有这个功能更糟。
+              带数字键帽的导航项只有前 9 个（见 SideNavItem 的 endContent），两处口径必须一致。
+            */}
+            <Text type="supporting" color="secondary">
+              {`只有侧栏前 ${HOTKEY_VIEW_COUNT} 项有数字键，其余 ${VIEWS.length - HOTKEY_VIEW_COUNT} 项点侧栏。`}
+              {'侧栏每一项右侧的键帽就是它的键位。'}
+            </Text>
+            <HStack gap={3} align="center" wrap="wrap">
+              <Kbd keys="/" />
+              <Text type="supporting">聚焦当前页第一个搜索框</Text>
+            </HStack>
+            <HStack gap={3} align="center" wrap="wrap">
+              <Kbd keys="escape" />
+              <Text type="supporting">关闭表格的行详情面板</Text>
+            </HStack>
+          </VStack>
+
+          <Text type="supporting" color="secondary">
+            输入框聚焦时一律不拦截按键（含 contenteditable）。
+          </Text>
+        </VStack>
+      }
+    >
+      {/*
+        触发器用 isIconOnly + 一个键帽形状的图标：它同时是"这里有快捷键"的视觉线索
+        （误触发之后有个地方可点）和一个不占宽度的入口。label 变成 aria-label，
+        并把当前是开还是关一起说出来——一个看不出状态的开关入口比没有入口糟。
+      */}
+      <Button
+        label={isEnabled ? '键盘快捷键（已启用）' : '键盘快捷键（已关闭）'}
+        variant="ghost"
+        isIconOnly
+        icon={<Kbd keys="?" />}
+      />
+    </Popover>
   );
 }
+
 
 /**
  * 顶栏右侧的个人信息菜单。
@@ -532,6 +746,61 @@ function UserProfileMenu({ userInfo, onLogout }) {
         icon={<Avatar name={username} size="xsm" tooltip={false} />}
       />
     </Popover>
+  );
+}
+
+/**
+ * 侧栏的过滤框，折叠态自动让位。
+ *
+ * ── 为什么必须包成一个组件，而不是把 TextInput 直接塞进 topContent ──
+ * 折叠后的侧栏是一条 48px 宽、`overflow: hidden` 的 rail。而 SideNav <b>不会</b>隐藏或改造
+ * topContent（它只给那一格加了 `alignItems: center`，见 SideNav.tsx 的 stickyTop 分支），
+ * 所以一个输入框直接放那儿会被裁成 30 来像素的残片——既打不出字，又占掉 rail 顶部一格，
+ * 看起来像渲染坏了。这是上一版加过滤框时漏掉的。
+ *
+ * 包成组件之后它在 SideNavCollapseContext 的 <b>provider 内部</b>渲染（provider 包住整个
+ * nav，含 stickyTop），因此可以直接读折叠态。写成一个函数调用或裸 JSX 都读不到。
+ *
+ * 折叠时返回 null 而不是换成一个搜索图标按钮：rail 上的每个图标在那个语境里都代表"一个视图"，
+ * 混进一个"展开侧栏并聚焦过滤框"的按钮会让图标列表的含义不再统一。想过滤就先展开，
+ * 而展开按钮就在 rail 底部。
+ */
+function NavFilter({ value, onChange }) {
+  const { isCollapsed } = useSideNavCollapse();
+  if (isCollapsed) {
+    return null;
+  }
+  return (
+    <TextInput
+      label="过滤视图"
+      isLabelHidden
+      placeholder="过滤视图（名称或说明）"
+      value={value}
+      onChange={onChange}
+      hasClear
+      size="sm"
+    />
+  );
+}
+
+/**
+ * 过滤没有命中时的说明，折叠态同样让位。
+ *
+ * 折叠态下过滤框已经不可见，但关键字仍然在 state 里（可能是折叠<b>之前</b>输入的），
+ * 于是 rail 里会出现一段被裁掉一半的中文和一个点不到的按钮。理由同 NavFilter。
+ */
+function NavFilterEmptyState({ keyword, onClear }) {
+  const { isCollapsed } = useSideNavCollapse();
+  if (isCollapsed) {
+    return null;
+  }
+  return (
+    <VStack gap={2} padding={4}>
+      <Text type="supporting" color="secondary">
+        {`没有名称或说明匹配「${keyword}」的视图。`}
+      </Text>
+      <Button label="清空过滤" variant="ghost" onClick={onClear} />
+    </VStack>
   );
 }
 
@@ -792,44 +1061,28 @@ export default function App() {
       topNav={
         <TopNav
           heading={<Text weight="semibold">Database MCP Server · 只读运维面板</Text>}
+          /*
+            endContent 只留<b>高频动作 + 身份</b>，四个控件。
+            上一版平铺了六组（条数 132px、自动刷新 Switch、「主题」Text + 三档
+            SegmentedControl、诊断包、刷新、头像），加起来 900px 以上，1280 宽的屏上就
+            wrap 成两行、顶栏高度翻倍。条数 / 自动刷新 / 主题三项已收进 DisplaySettingsMenu，
+            判据是操作频率（详见那个组件的注释）。
+          */
           endContent={
-            <HStack gap={3} align="center" wrap="wrap">
-              <NumberInput
-                label="条数"
-                isLabelHidden
-                value={limit}
-                min={1}
-                max={maxLimit}
-                step={10}
-                isIntegerOnly
-                hasNumberSteppers
-                width={132}
-                onChange={(value) => setLimit(value ?? 1)}
+            <HStack gap={2} align="center" wrap="wrap">
+              <KeyboardShortcutsMenu
+                isEnabled={isHotkeyEnabled}
+                onToggle={setHotkeyEnabled}
               />
-              <Switch
-                label={`自动刷新 ${AUTO_REFRESH_INTERVAL_MS / 1000}s`}
-                value={isAutoRefresh}
-                onChange={setAutoRefresh}
+              <DisplaySettingsMenu
+                limit={limit}
+                maxLimit={maxLimit}
+                onLimitChange={setLimit}
+                isAutoRefresh={isAutoRefresh}
+                onAutoRefreshChange={setAutoRefresh}
+                colorMode={colorMode}
+                onColorModeChange={setColorMode}
               />
-              {/*
-                主题三档。用 SegmentedControl 而不是一个「深色」Switch：
-                「跟随系统」是默认值也是第三种状态，Switch 只有两态，
-                硬塞会变成"开=暗、关=亮"，而那样就没有跟随系统了。
-                label 是 aria-label（不渲染），所以旁边另给一句可见的 Text。
-                刻意不传 size：那是控件高度不是字号，口径同 ExportCsvButton。
-              */}
-              <HStack gap={2} align="center">
-                <Text type="label" color="secondary">主题</Text>
-                <SegmentedControl
-                  value={colorMode}
-                  onChange={setColorMode}
-                  label="配色模式"
-                >
-                  {COLOR_MODES.map((m) => (
-                    <SegmentedControlItem key={m.value} value={m.value} label={m.label} />
-                  ))}
-                </SegmentedControl>
-              </HStack>
               {/* 诊断包按钮是手点的，理由（会被 CONNECTION_REGISTRY_BOOKKEEPING 记一条）
                   写在 diagnostics.jsx 的头注释里。 */}
               <DiagnosticBundleButton limit={limit} />
@@ -855,8 +1108,12 @@ export default function App() {
           header={
             <SideNavHeading
               heading="运维视图"
+              /* icon 是折叠态的必需品：SideNavHeading 和 SideNavItem 一样，
+                 没有 icon 在折叠态直接 return null，rail 顶部会空掉一格。 */
+              icon={<IconDatabase />}
               /* 副标题报「当前显示 / 全部」而不是只报总数：过滤生效时这两个数不等，
-                 而"少了几项"这件事必须能一眼看出来，否则会被当成视图丢了。 */
+                 而"少了几项"这件事必须能一眼看出来，否则会被当成视图丢了。
+                 折叠态下 SideNavHeading 自己会把它藏掉，不必在这里判断。 */
               subheading={
                 navKeyword.trim() === ''
                   ? `${VIEWS.length} 个视图`
@@ -868,18 +1125,9 @@ export default function App() {
             过滤框钉在标题下方（topContent 是 sticky 的，滚动导航时它不动）。
             这是 VS Code / Grafana 侧栏的形态：就地收窄，而不是浮层。
             理由与"为什么不加 CommandPalette"的区别写在 filterGroups 上方。
+            折叠态由 NavFilter 自己让位——SideNav 不会替我们隐藏 topContent。
           */
-          topContent={
-            <TextInput
-              label="过滤视图"
-              isLabelHidden
-              placeholder="过滤视图（名称或说明）"
-              value={navKeyword}
-              onChange={setNavKeyword}
-              hasClear
-              size="sm"
-            />
-          }
+          topContent={<NavFilter value={navKeyword} onChange={setNavKeyword} />}
         >
           {/*
             分组渲染。上一版是一个 isHeaderHidden 的单 Section 包住八项；16 项之后组名
@@ -913,9 +1161,20 @@ export default function App() {
                   <SideNavItem
                     key={v.value}
                     label={v.label}
+                    /*
+                      icon 在折叠态是<b>必需</b>的，不是装饰：SideNavItem 有一句
+                      `if (isCollapsed && !icon) return null;`，漏掉 icon 的项在 rail 里
+                      整个消失。折叠态只渲染这个图标，label 由 core 自动挂的 Tooltip 提供
+                      （hover 200ms），所以 rail 上仍然认得出每一项是什么。
+                      传组件本身而不是字符串：字符串会走注册表查找，查不到就静默渲染成空方块
+                      （而且能通过上面那句 !icon 判断）。理由详见 navIcons.jsx 的头注释。
+                    */
+                    icon={v.icon}
                     title={v.hint}
                     /* 快捷键说明条说的是"只有侧栏前 9 项有数字键"，这里只给那 9 项挂键帽，
-                       两处口径必须一致：给第 10 项挂一个键帽会造出"按 10"的错觉。 */
+                       两处口径必须一致：给第 10 项挂一个键帽会造出"按 10"的错觉。
+                       折叠态下 endContent 不渲染（core 的折叠分支里没有它），这是对的：
+                       48px 的 rail 放不下图标加键帽。 */
                     endContent={hasHotkey ? <Kbd keys={String(index + 1)} /> : undefined}
                     href={`#view=${v.value}&limit=${limit}`}
                     isSelected={v.value === view}
@@ -933,18 +1192,13 @@ export default function App() {
           {/*
             过滤没有命中时给一句话，而不是留一片空白。
             空白侧栏在过滤框下面看起来像"导航坏了"；写出来它才是一个可理解的状态。
+            折叠态由 NavFilterEmptyState 自己让位（48px 的 rail 放不下一段中文）。
           */}
           {visibleGroups.length === 0 && (
-            <VStack gap={2} padding={4}>
-              <Text type="supporting" color="secondary">
-                {`没有名称或说明匹配「${navKeyword.trim()}」的视图。`}
-              </Text>
-              <Button
-                label="清空过滤"
-                variant="ghost"
-                onClick={() => setNavKeyword('')}
-              />
-            </VStack>
+            <NavFilterEmptyState
+              keyword={navKeyword.trim()}
+              onClear={() => setNavKeyword('')}
+            />
           )}
         </SideNav>
       }
@@ -952,18 +1206,33 @@ export default function App() {
       <Layout
         height="fill"
         header={
+          /*
+            标题带从三行压到一行半。
+
+            上一版是 VStack 三层：StatusStrip 独占一行 → Heading + hint → ShortcutHints
+            独占一行，一共约 150px，而且在<b>每个</b>视图上都长这样。三块里只有中间那块
+            随视图变化，另两块一个是全局状态、一个是永不变的快捷键文档。
+
+            这一版按"谁会变"重排（Grafana / Stripe 的 page header 结构）：
+            - 第一行：标题（左，视觉主导）+ 全局状态（右，常驻但不抢戏）
+            - 第二行：这一页的 hint
+            快捷键那一行整块搬进了顶栏的 `?` 浮层（见 KeyboardShortcutsMenu）。
+
+            gap 从 3 收到 2：标题与它自己的 hint 是同一组信息，3 会让它们读成两块。
+            hAlign="between" 把两组推到两端（HStack 的 hAlign 是主轴，接受 between）；
+            vAlign="start" 而不是 center：标题可能折行，居中会让右侧状态跟着上下跳。
+          */
           <LayoutHeader padding={5} hasDivider>
-            <VStack gap={3}>
-              <StatusStrip
-                config={config}
-                isConfigLoaded={isConfigLoaded}
-                updatedAt={updatedAt}
-              />
-              <VStack gap={1}>
+            <VStack gap={2}>
+              <HStack gap={5} hAlign="between" vAlign="start" wrap="wrap">
                 <Heading level={2}>{current.label}</Heading>
-                <Text type="supporting" color="secondary">{current.hint}</Text>
-              </VStack>
-              <ShortcutHints isEnabled={isHotkeyEnabled} onToggle={setHotkeyEnabled} />
+                <StatusStrip
+                  config={config}
+                  isConfigLoaded={isConfigLoaded}
+                  updatedAt={updatedAt}
+                />
+              </HStack>
+              <Text type="supporting" color="secondary">{current.hint}</Text>
             </VStack>
           </LayoutHeader>
         }
