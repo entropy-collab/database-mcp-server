@@ -29,11 +29,11 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # java.version 在根 pom 里是 25，低于它编不过（record pattern / 新 API）。
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           java-version: '25'
           distribution: 'temurin'
@@ -44,7 +44,7 @@ jobs:
       # database-mcp-app/src/main/frontend/node/（刻意不在 target/ 下，见该模块 pom 的注释）。
       # 这一层缓存省掉每次约 30MB 的 node tarball 下载；npm ci 的 tarball 走 ~/.npm。
       - name: Cache frontend toolchain and npm packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             database-mcp-app/src/main/frontend/node
@@ -60,7 +60,7 @@ jobs:
       # 单条断言失败很容易被上千行 Spring 启动日志埋掉。
       - name: Upload test reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-reports
           path: '**/target/*-reports/'
