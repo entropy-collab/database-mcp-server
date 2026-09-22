@@ -383,7 +383,7 @@ curl -s -X POST http://localhost:8686/mcp \
 
 ## 🧰 MCP 工具一览
 
-约 120 个工具（默认配置下全部注册）。这里刻意不钉精确数字——工具增删后它就是谎报；准确数量看
+约 130 个工具（默认配置下全部注册）。这里刻意不钉精确数字——工具增删后它就是谎报；准确数量看
 启动日志打印的 `MCP tool exposure: X of Y tools registered`，或 `suggestTools` 返回的 `totalTools`。
 可通过 `entropy.mcp.tools.plane`
 （`all` / `data` / `control`）与 `groups` / `include` / `exclude` 收敛实际暴露的清单，

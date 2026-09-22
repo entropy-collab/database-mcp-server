@@ -124,7 +124,7 @@ curl -s -X POST http://localhost:8686/mcp \
 
 ## MCP Tools
 
-Roughly 120 tools, all registered under the default configuration. The exact count is
+Roughly 130 tools, all registered under the default configuration. The exact count is
 deliberately not pinned here — it goes stale the moment a tool is added or removed. Read it off
 the startup log (`MCP tool exposure: X of Y tools registered`) or from the `totalTools` field
 returned by `suggestTools`. Use

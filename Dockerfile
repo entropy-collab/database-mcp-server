@@ -14,6 +14,11 @@ RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g; s/security.ubuntu.com/mir
 
 WORKDIR /app
 
+# MCP Registry 用这个 label 校验镜像所有权：值必须与 server.json 的 name 逐字相同，
+# 否则 mcp-publisher 拒绝发布。命名空间用 entropy-collab（仓库所在的 GitHub 账号），
+# 因为 registry 的 GitHub 认证要求 name 前缀是 io.github.<账号名>/。
+LABEL io.modelcontextprotocol.server.name="io.github.entropy-collab/database-mcp-server"
+
 # Copy locally built jar (可执行 jar 由 database-mcp-app 模块产出)
 COPY database-mcp-app/target/database-mcp-server-*.jar app.jar
 
