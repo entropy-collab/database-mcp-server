@@ -12,11 +12,11 @@
     "@astryxdesign/core": "0.6.2",
     "@astryxdesign/theme-neutral": "0.6.2",
     "@stylexjs/stylex": "0.19.1",
-    "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "6.1.1",
-    "vite": "8.3.0"
+    "@vitejs/plugin-react": "6.1.2",
+    "vite": "8.3.5"
   }
 }
